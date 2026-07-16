@@ -7,9 +7,22 @@
 # (`pinact run --verify`). This is the structural defense against the
 # CVE-2025-30066 class (retroactive tag rewrite).
 #
-# There are currently NO exceptions. If a future action genuinely cannot
-# be SHA-pinned (e.g. a reusable workflow whose internals refuse non-tag
-# refs), document the reason here as an `ignore_actions` entry with the
-# tightest `ref` regex that matches the one sanctioned reference.
+# Exceptions carry the tightest `ref` regex that matches the one
+# sanctioned reference, with the reason documented here.
+#
+# aquasecurity/trivy-action: the aquasecurity org enables a GitHub
+# org-level IP allow-list that returns 403 to GitHub Actions runner IPs
+# on the commits API, so `pinact run --verify`'s online tag re-resolution
+# cannot complete from CI (it succeeds from unrestricted IPs). The action
+# stays SHA-pinned in the workflow (auditable inline); this entry only
+# exempts it from the online re-verification the upstream org makes
+# impossible from a runner.
 
 version: 3
+
+ignore_actions:
+  # Pinned to the exact SHA the workflow references -- a future tag-shaped
+  # trivy-action ref no longer matches this exemption, so it fails
+  # `pinact run --check` instead of riding the wildcard through.
+  - name: aquasecurity/trivy-action
+    ref: ^ed142fd0673e97e23eac54620cfb913e5ce36c25$
