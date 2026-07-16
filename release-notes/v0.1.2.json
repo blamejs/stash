@@ -1,0 +1,18 @@
+{
+  "version": "0.1.2",
+  "date": "2026-07-16",
+  "headline": "The documentation site takes the logo's blue; CI gates harden.",
+  "summary": "The documentation site's accent surfaces move to the logo's own measured blue family, the README fronts the logo, and two continuous-integration gates are hardened.",
+  "sections": {
+    "Changed": [
+      "Documentation site: links, active navigation, focus borders, badges, search highlights, code inks, the hero glow, and the browser theme color now come from the logo's measured blue ramp; syntax-highlighting keyword and operator tokens are re-inked to match through site-owned overrides (the vendored highlighter file is untouched). Every introduced color pair is contrast-checked; one pre-existing text-contrast failure is fixed, unfocused search fields gain a visible boundary, keyboard-selected search results are conveyed by color rather than background alone, and printed pages force code and highlights to legible ink on white.",
+      "README: the logo now heads the page, served from assets/.",
+      "Documentation server: the default port moves to 3011 (WIKI_PORT still overrides).",
+      "actions/setup-node moves to the v7.0.0 pin; the diff between the pinned commits was reviewed (two new cache outputs, toolchain migration, no new execution surface)."
+    ],
+    "Fixed": [
+      "The forbidden-token gates in both CI workflows now fail on a hit in ANY pattern: under errexit a non-final negated command's failure was silently skipped, which left the first pattern advisory.",
+      "The CI checkout no longer persists credentials into the workspace."
+    ]
+  }
+}
