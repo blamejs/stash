@@ -278,22 +278,24 @@ jobs:
           cat "${TARBALL}.sha256"
 
       - name: Extract release notes from CHANGELOG
-        # Single source of truth: the `## vX.Y.Z` section of CHANGELOG.md.
+        # Single source of truth: the CHANGELOG.md section whose header is
+        # `## X.Y.Z` (the generator's grammar; a leading v is tolerated).
         # awk prints lines from the matching header up to (not including)
         # the next `## ` header.
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           set -euo pipefail
-          awk -v ver="v${VERSION}" '
-            $0 ~ "^## " ver "( |$|-)" { grab=1; next }
+          VER_RE=$(printf '%s' "${VERSION}" | sed 's/./\./g')
+          awk -v ver="${VER_RE}" '
+            $0 ~ "^## (v)?" ver "( |$)" { grab=1; next }
             grab && /^## / { exit }
             grab { print }
           ' CHANGELOG.md > release-notes.md
           BYTE_COUNT=$(wc -c < release-notes.md | tr -d ' ')
           if [ "$BYTE_COUNT" -lt 16 ]; then
             echo "::error::Could not extract a CHANGELOG.md section for v${VERSION} (got ${BYTE_COUNT} bytes)."
-            echo "::error::Confirm CHANGELOG.md has a '## v${VERSION}' header."
+            echo "::error::Confirm CHANGELOG.md has a '## ${VERSION}' header."
             exit 1
           fi
           echo "[release-notes] extracted ${BYTE_COUNT} bytes for v${VERSION}"
