@@ -199,6 +199,7 @@ const VALID_ALLOW_CLASSES = {
   "path-reresolved-read": 1,
   "constant-time-compare-short-circuited": 1,
   "wiki-port-cross-artifact-drift": 1,
+  "wiki-runtime-file-uncopied": 1,
 };
 
 // Drop matches suppressed by a file-level
@@ -1072,4 +1073,78 @@ test("wiki port agrees across the Dockerfile, composes, Caddyfile, and release-c
 
   const filtered = _filterMarkers(bad, "wiki-port-cross-artifact-drift");
   _report("wiki port agrees across examples/wiki/Dockerfile + composes + Caddyfile + release-container.yml", filtered);
+});
+
+test("every repo-root file the wiki reads at runtime is COPYed by the wiki Dockerfile", () => {
+  // class: wiki-runtime-file-uncopied
+  // reason: the container is built from examples/wiki/Dockerfile, which
+  // COPYs only the trees it names (src/, examples/wiki/). The page
+  // generator renders its front-door Overview page from the repo-ROOT
+  // SPEC.md, resolved as path.resolve(libDir, "..", "SPEC.md") -- a file
+  // ABOVE both copied trees. If the Dockerfile does not also COPY that
+  // file, the read throws in-container, the generator's try/catch drops the
+  // page (fail open), and a site with a blank front door ships green: the
+  // read succeeds locally, where the repo root is present, so the e2e never
+  // sees it. Derive every repo-root file the runtime source reads -- the
+  // FILE in a path.resolve(libDir/LIB_DIR, "..", "FILE") escape, or a
+  // literal "../../FILE" -- and assert each is named by a COPY line in the
+  // Dockerfile (or its top directory is copied). The required-file set is
+  // READ OFF the source, never a frozen inventory, so renaming SPEC.md
+  // updates the requirement automatically; the escape shape (path.resolve /
+  // fs read + the src-dir binding) and the COPY contract are the anchors.
+  const dockerfile = _read(path.join(REPO_ROOT, "examples", "wiki", "Dockerfile"));
+
+  // The build-context source paths a COPY brings in. A COPY line is
+  // `COPY <flags...> <src...> <dest>`: every non-flag arg except the final
+  // destination is a source. Record each normalized path and its basename,
+  // so a file copied directly OR the directory that contains it both count.
+  const copied = new Set();
+  for (const line of _lines(dockerfile)) {
+    const m = /^\s*COPY\s+(.+)$/i.exec(line);
+    if (!m) continue;
+    const args = m[1].split(/\s+/).filter((a) => a && !a.startsWith("--"));
+    for (const a of args.slice(0, -1)) {
+      const norm = a.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+      if (!norm) continue;
+      copied.add(norm);
+      copied.add(norm.split("/").pop());
+    }
+  }
+  const _isCopied = (file) => {
+    const norm = file.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+    return copied.has(norm) || copied.has(norm.split("/")[0]);
+  };
+
+  // Runtime source only: examples/wiki/*.js + examples/wiki/lib/*.js. The
+  // e2e under test/ never runs in the container, so its reads are out of
+  // scope; public/ and vendor/ are already skipped by the asset-mode walk.
+  const runtimeFiles = _wikiFiles().filter((f) =>
+    /^examples\/wiki\/(?:[^/]+|lib\/[^/]+)\.js$/.test(_relPath(f)));
+  assert.ok(runtimeFiles.length > 0, "no wiki runtime files scanned -- detector would be vacuous");
+
+  // Two escape shapes, both resolving ABOVE examples/wiki to the repo root:
+  //   A) path.resolve(libDir|LIB_DIR, "..", "FILE") -- libDir/LIB_DIR is the
+  //      library's src/ (repo-root/src), so one ".." lands at the repo root.
+  //   B) a literal "../../FILE" -- a hardcoded climb out of examples/wiki/lib.
+  const escapeA = /path\.resolve\(\s*(?:libDir|LIB_DIR)\s*,\s*["']\.\.["']\s*,\s*["']([^"']+)["']\s*\)/g;
+  const escapeB = /["']\.\.\/\.\.\/([^"'/]+)["']/g;
+  const bad = [];
+  for (const file of runtimeFiles) {
+    const rel = _relPath(file);
+    const subject = _stripComments(_read(file));
+    for (const re of [escapeA, escapeB]) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(subject)) !== null) {
+        if (_isCopied(m[1])) continue;
+        bad.push({
+          file: rel,
+          line: _lineOfIndex(subject, m.index),
+          content: "reads repo-root '" + m[1] + "' at runtime but examples/wiki/Dockerfile never COPYs it -- the container renders a blank/absent page",
+        });
+      }
+    }
+  }
+  const filtered = _filterMarkers(bad, "wiki-runtime-file-uncopied");
+  _report("every repo-root file the wiki reads at runtime is COPYed by examples/wiki/Dockerfile", filtered);
 });

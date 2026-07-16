@@ -114,9 +114,17 @@ async function run() {
       return ic.src === "/stashjs-logo.png";
     }));
 
-    // Overview: the shipped SPEC.md rendered to HTML.
+    // Overview: the shipped SPEC.md rendered to HTML. This page is the
+    // project's front door and is loaded from a repo-ROOT file
+    // (path.resolve(libDir, "..", "SPEC.md")), which sits ABOVE the trees a
+    // container image copies. The generator drops the page silently (fail
+    // open) if that file is absent at runtime, so assert here that it is
+    // present AND carries real, substantial SPEC content -- an empty or
+    // missing Overview must fail the gate loudly, not ship a blank front door.
     var overview = await _get(port, "/overview");
     check("GET /overview -> 200", overview.status === 200);
+    check("overview carries substantial SPEC content (not an empty shell)", overview.body.length > 5000);
+    check("overview renders a known SPEC section heading", overview.body.indexOf("The one rule</h2>") !== -1);
     check("overview renders the SPEC tables (Methods, Errors)", overview.body.indexOf("<table>") !== -1);
     // A table cell whose inline code carries escaped pipes
     // (`Buffer \| string \| Readable \| AsyncIterable`) must render as ONE
