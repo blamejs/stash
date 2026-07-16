@@ -98,6 +98,23 @@ function _verifiedStream(entry, source) {
   return verify;
 }
 
+// _dispose(source) -- fully tear down an opened backend read source, resolving
+// only once its descriptor is closed. Used when an entry lapses in the window
+// between the expiry gate and the open: the source must be abandoned without
+// leaking a descriptor, and its file closed BEFORE the entry's blob is removed
+// (a still-open handle blocks the unlink on Windows).
+function _dispose(source) {
+  return new Promise((resolve) => {
+    if (!source || typeof source.destroy !== "function" || source.destroyed) {
+      resolve();
+      return;
+    }
+    source.once("close", resolve);
+    source.once("error", () => resolve());
+    source.destroy();
+  });
+}
+
 /**
  * @primitive  stash.Stash
  * @signature  new Stash(opts) -> Stash
@@ -269,6 +286,17 @@ export class Stash {
     assertValid(ref);
     const entry = await this.#statLive(ref);
     const source = await this.#backend.read(ref);
+    // The gate above and this open are two awaits apart, so a short TTL can
+    // lapse in between -- opening a read on a live entry that is expired by the
+    // time the stream would be handed out. Re-check at serve time: an entry
+    // expired NOW is dropped in passing, never served. The verdict is fixed
+    // here, synchronously before the return; an entry that lapses mid-drain
+    // afterward is not killed mid-stream (the read is claimed at this point).
+    if (isExpired(entry, Date.now())) {
+      await _dispose(source);
+      await this.#backend.remove(ref);
+      throw new RefNotFound();
+    }
     return _verifiedStream(entry, source);
   }
 

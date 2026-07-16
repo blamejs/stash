@@ -342,6 +342,31 @@ for (const { name, create } of BACKENDS) {
       assert.equal(calls.filter((c) => c === "remove").length, 1, "dropped in passing exactly once");
     });
 
+    test("apply re-checks expiry after opening the read: an entry lapsing in the open window is dropped, not served", async () => {
+      // The gate and the open are two awaits apart; an entry alive at the gate
+      // can lapse before the stream is handed out. A backend whose read() is
+      // delayed past the deadline reproduces it deterministically.
+      const inner = create();
+      let readCalled = false;
+      const backend = {
+        write: (...a) => inner.write(...a),
+        stat: (...a) => inner.stat(...a),
+        remove: (...a) => inner.remove(...a),
+        list: (...a) => inner.list(...a),
+        read: async (id) => {
+          readCalled = true;
+          const e = await inner.stat(id);
+          while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2)); // poll, don't sleep
+          return inner.read(id);
+        },
+      };
+      const stash = new Stash({ backend });
+      const ref = await stash.push("secret bytes", { ttl: 150 }); // alive at the gate; expires during the delayed open
+      await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+      assert.equal(readCalled, true, "the read WAS opened -- the reject came from the post-open re-check, not the pre-gate");
+      assert.deepEqual(await stash.list({ includeExpired: true }), []); // dropped in passing, source disposed
+    });
+
     test("a ttl whose expiresAt sum is not a safe integer is refused at push, storing nothing", async () => {
       const stash = new Stash({ backend: create() });
       await assert.rejects(stash.push("x", { ttl: Number.MAX_SAFE_INTEGER }), TypeError);
