@@ -17,10 +17,14 @@
 //   source-comment-block validate(): an empty parse (wrong libDir, or a
 //     tree with every doc block deleted) is a finding, not a pass.
 
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { diffSnapshot, isClean } from "../scripts/check-api-snapshot.js";
+import { loadNotes, render } from "../scripts/regen-changelog.js";
+import { freshScratchDir } from "./_scratch.js";
 
 // ---------------------------------------------------------------------------
 // check-api-snapshot -- exact-match drift verdicts
@@ -106,3 +110,61 @@ test("api-snapshot: removed member, kind change, arity change, and @since rewrit
   assert.match(diffSnapshot(snapshotFixture(), redated, "1.0.0").breaking[0], /@since changed/);
 });
 
+// ---------------------------------------------------------------------------
+// regen-changelog -- release-notes/ directory hygiene
+// ---------------------------------------------------------------------------
+
+const VALID_NOTE = JSON.stringify({
+  version: "0.1.0",
+  date: "2026-01-01",
+  summary: "First cut.",
+  sections: { Added: ["The first primitive."] },
+});
+
+function notesFixture(t, extraFiles) {
+  const dir = freshScratchDir("release-notes");
+  mkdirSync(dir, { recursive: true });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "v0.1.0.json"), VALID_NOTE);
+  for (const [name, content] of Object.entries(extraFiles || {})) {
+    writeFileSync(join(dir, name), content);
+  }
+  return dir;
+}
+
+test("changelog: a well-formed notes directory loads and renders", (t) => {
+  const notes = loadNotes(notesFixture(t));
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].version, "0.1.0");
+  assert.match(render(notes), /^# Changelog\n/);
+  assert.match(render(notes), /## 0\.1\.0/);
+});
+
+test("changelog: a misnamed release-notes entry fails instead of vanishing", (t) => {
+  // v0.2.json misses the X.Y.Z shape the loader recognizes; before the
+  // name gate it was silently skipped, its notes never reaching the
+  // CHANGELOG while --check stayed green.
+  const dir = notesFixture(t, { "v0.2.json": VALID_NOTE });
+  assert.throws(() => loadNotes(dir), /unrecognized entr.*v0\.2\.json/s);
+});
+
+test("changelog: a stray non-note file in release-notes/ fails the gate", (t) => {
+  const dir = notesFixture(t, { "notes-draft.txt": "scratch" });
+  assert.throws(() => loadNotes(dir), /unrecognized entr.*notes-draft\.txt/s);
+});
+
+test("changelog: a malformed note still fails loudly", (t) => {
+  const dir = notesFixture(t, { "v0.1.1.json": "{ not json" });
+  assert.throws(() => loadNotes(dir), /v0\.1\.1\.json/);
+});
+
+test("changelog: notes sort newest first", (t) => {
+  const second = JSON.stringify({
+    version: "0.1.1",
+    date: "2026-02-01",
+    summary: "Second cut.",
+    sections: { Fixed: ["A bug."] },
+  });
+  const notes = loadNotes(notesFixture(t, { "v0.1.1.json": second }));
+  assert.deepEqual(notes.map((n) => n.version), ["0.1.1", "0.1.0"]);
+});
