@@ -59,4 +59,13 @@ build time so the scanned image is the published image.
 
 The site tracks the source: a new library release republishes the image
 with the current API surface. To refresh a running production deployment,
-`docker compose pull && docker compose up -d`.
+pass the same two overlay files the production command uses, so the pull
+and restart target the published GHCR image and keep Caddy in place:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+(Set `COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml` in the
+environment to drop the repeated `-f` flags.)
