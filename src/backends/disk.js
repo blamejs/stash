@@ -405,7 +405,12 @@ export class DiskBackend {
 
   // list() -> Entry[]. Loud, not lossy: a sidecar that fails validation
   // fails the listing -- silently skipping corruption would hide it.
-  // In-flight .tmp files are invisible by design.
+  // In-flight .tmp files are invisible by design. The scan is readdir-then-stat,
+  // so an entry can be removed (a concurrent drop, or the sweeper reaping an
+  // expired one) between the two steps: a sidecar seen by readdir is gone by the
+  // stat. That entry has simply left the listing, so a RefNotFound for it is
+  // skipped -- but corruption and every other fault still fail loudly, since a
+  // damaged sidecar must never be silently dropped from a listing.
   async list() {
     const metaDir = await this.#containedDir("meta");
     const out = [];
@@ -413,7 +418,14 @@ export class DiskBackend {
       if (name.endsWith(".tmp")) continue;
       const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
       if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
-      out.push(await this.stat(id));
+      let entry;
+      try {
+        entry = await this.stat(id);
+      } catch (err) {
+        if (err instanceof RefNotFound) continue; // removed between readdir and stat -- no longer listed
+        throw err;
+      }
+      out.push(entry);
     }
     return out;
   }

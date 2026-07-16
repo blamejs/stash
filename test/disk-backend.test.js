@@ -318,6 +318,39 @@ suite("disk: layout and atomicity", () => {
     assert.deepEqual(readdirSync(join(root, "meta")), []);
     assert.deepEqual(readdirSync(join(root, "blobs")), []);
   });
+
+  test("list tolerates a sidecar removed between readdir and stat (concurrent sweep/drop)", async () => {
+    // The sweeper (or a concurrent drop) can unlink an expired sidecar between
+    // the readdir and the per-entry stat, so stat throws RefNotFound for a name
+    // readdir just reported. That entry has simply left the listing -- list must
+    // not reject. Reproduced deterministically: unlink one sidecar the instant
+    // its stat is reached.
+    const { root, stash } = freshStash();
+    const vanishing = await stash.push("removed mid-scan");
+    const kept = await stash.push("survives the scan");
+    const backend = new DiskBackend({ root });
+    const realStat = backend.stat.bind(backend);
+    let removeOnStat = vanishing;
+    backend.stat = async (id) => {
+      if (id === removeOnStat) {
+        removeOnStat = null;
+        rmSync(join(root, "meta", id + ".json")); // a concurrent removal, mid-scan
+      }
+      return realStat(id);
+    };
+    const listed = await backend.list();
+    assert.deepEqual(listed.map((e) => e.id), [kept]); // the vanished entry is absent, not an error
+  });
+
+  test("list still fails loudly on a corrupt sidecar, never silently skipped", async () => {
+    // The RefNotFound skip must not swallow corruption: a rotten sidecar is an
+    // IntegrityError the listing surfaces.
+    const { root, stash } = freshStash();
+    const ref = await stash.push("to be corrupted");
+    writeFileSync(join(root, "meta", ref + ".json"), "{ not valid json");
+    const backend = new DiskBackend({ root });
+    await assert.rejects(backend.list(), IntegrityError);
+  });
 });
 
 suite("disk: containment", () => {
