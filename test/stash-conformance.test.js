@@ -392,6 +392,29 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual(await stash.list({ includeExpired: true }), []);
     });
 
+    test("apply's expiry re-check does not hang on a non-closing source (emitClose:false)", { timeout: 8000 }, async () => {
+      // A Readable with emitClose:false emits neither 'close' nor 'error' on
+      // destroy -- the SPEC.md 9 contract only promises a Readable. Disposal
+      // must not wait on a close event, or apply would hang forever and never
+      // reject / remove.
+      const inner = create();
+      const backend = {
+        write: (...a) => inner.write(...a),
+        stat: (...a) => inner.stat(...a),
+        remove: (...a) => inner.remove(...a),
+        list: (...a) => inner.list(...a),
+        read: async (id) => {
+          const e = await inner.stat(id);
+          while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2));
+          return new Readable({ read() {}, emitClose: false });
+        },
+      };
+      const stash = new Stash({ backend });
+      const ref = await stash.push("x", { ttl: 100 });
+      await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+      assert.deepEqual(await stash.list({ includeExpired: true }), []);
+    });
+
     test("apply's expiry re-check disposes a source that errors on teardown, without hanging", async () => {
       // The dispose helper resolves on the source's 'close' OR 'error' -- a
       // teardown that errors must not leave apply hung. Drive the error arm: a

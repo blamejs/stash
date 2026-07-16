@@ -98,21 +98,19 @@ function _verifiedStream(entry, source) {
   return verify;
 }
 
-// _dispose(source) -- fully tear down an opened backend read source, resolving
-// only once its descriptor is closed. Used when an entry lapses in the window
-// between the expiry gate and the open: the source must be abandoned without
-// leaking a descriptor, and its file closed BEFORE the entry's blob is removed
-// (a still-open handle blocks the unlink on Windows).
+// _dispose(source) -- best-effort teardown of an opened backend read source we
+// are abandoning (the entry lapsed between the expiry gate and the open). It
+// destroys the source and swallows a teardown error, but does NOT wait for a
+// 'close' event: a Readable configured with `emitClose: false` -- which the
+// SPEC.md 9 backend contract permits -- emits neither 'close' nor 'error' on
+// destroy, so waiting would hang apply forever. Waiting is unnecessary anyway:
+// the backend owns its descriptor's close, and the following remove() unlinks
+// the name regardless of a still-closing handle (POSIX unlink-while-open;
+// Windows opens share delete).
 function _dispose(source) {
-  return new Promise((resolve) => {
-    if (!source || typeof source.destroy !== "function" || source.destroyed) {
-      resolve();
-      return;
-    }
-    source.once("close", resolve);
-    source.once("error", () => resolve());
-    source.destroy();
-  });
+  if (!source || typeof source.destroy !== "function" || source.destroyed) return;
+  source.once("error", () => {}); // abandoning it -- a teardown error is not ours to surface
+  source.destroy();
 }
 
 /**
@@ -293,7 +291,7 @@ export class Stash {
     // here, synchronously before the return; an entry that lapses mid-drain
     // afterward is not killed mid-stream (the read is claimed at this point).
     if (isExpired(entry, Date.now())) {
-      await _dispose(source);
+      _dispose(source);
       await this.#backend.remove(ref);
       throw new RefNotFound();
     }
