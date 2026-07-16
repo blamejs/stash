@@ -200,6 +200,9 @@ async function run() {
     // Every image on the site is served locally, so img-src admits no
     // external host.
     check("CSP img-src stays local", homeCsp.indexOf("img-src 'self' data:;") !== -1);
+    // HSTS pins HTTPS for the site and its subdomains.
+    check("HSTS is set with a long max-age and includeSubDomains",
+      /max-age=\d{7,};\s*includeSubDomains/.test(String(home.headers["strict-transport-security"])));
     // permissions-policy carries no deprecated interest-cohort token (FLoC is
     // retired; the token now only draws a console warning).
     check("permissions-policy drops the deprecated interest-cohort token",

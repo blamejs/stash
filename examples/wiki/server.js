@@ -60,6 +60,12 @@ function _csp(scriptHashes) {
 
 var SECURITY_HEADERS = {
   "content-security-policy": _csp(null),
+  // HSTS pins the browser to HTTPS for two years including subdomains. The
+  // container always runs behind a TLS-terminating proxy, so the client
+  // receives this over HTTPS; `preload` is deliberately omitted (that requires
+  // submission to the browser preload list, a deployment decision, not a
+  // library default).
+  "strict-transport-security": "max-age=63072000; includeSubDomains",
   "x-content-type-options": "nosniff",
   "referrer-policy": "strict-origin-when-cross-origin",
   "x-frame-options": "DENY",
