@@ -30,7 +30,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -340,6 +340,48 @@ function cmdPushFix() {
   ok("fix pushed as a new signed commit; review re-requested -- next: release.js watch");
 }
 
+// checksVerdict(rollup) -- fail-closed verdict over a PR's
+// statusCheckRollup. The rollup mixes two entry shapes: a CheckRun
+// (GitHub Actions et al.) reports status/conclusion; a StatusContext
+// (commit statuses) reports state. Passing is a WHITELIST:
+//
+//   CheckRun       not COMPLETED -> waiting. Completed: SUCCESS passes;
+//                  SKIPPED and NEUTRAL pass too -- both are deliberate
+//                  no-op verdicts emitted by the check itself (a
+//                  path-filtered workflow reports SKIPPED), and GitHub's
+//                  own required-check semantics treat them as passing.
+//                  Every other conclusion (FAILURE, CANCELLED, TIMED_OUT,
+//                  ACTION_REQUIRED, STARTUP_FAILURE, STALE, absent, or
+//                  anything unrecognized) is a terminal non-pass: block.
+//   StatusContext  SUCCESS passes; PENDING / EXPECTED wait; everything
+//                  else (ERROR, FAILURE, unrecognized) blocks.
+//   neither shape  an entry this gate cannot read is never a pass: block.
+//
+// green requires at least one entry: an empty rollup means the checks
+// have not attached yet, not that they passed.
+export function checksVerdict(rollup) {
+  const list = Array.isArray(rollup) ? rollup : [];
+  const blocking = [];
+  let pending = 0;
+  for (const c of list) {
+    const name = (c && (c.name || c.context)) || "(unnamed check)";
+    if (c && c.state != null) {
+      const state = String(c.state).toUpperCase();
+      if (state === "SUCCESS") continue;
+      if (state === "PENDING" || state === "EXPECTED") { pending += 1; continue; }
+      blocking.push(name + " (" + state + ")");
+    } else if (c && (c.status != null || c.conclusion != null)) {
+      if (String(c.status || "").toUpperCase() !== "COMPLETED") { pending += 1; continue; }
+      const conclusion = String(c.conclusion || "").toUpperCase();
+      if (conclusion === "SUCCESS" || conclusion === "SKIPPED" || conclusion === "NEUTRAL") continue;
+      blocking.push(name + " (" + (conclusion || "completed without a conclusion") + ")");
+    } else {
+      blocking.push(name + " (unreadable rollup entry)");
+    }
+  }
+  return { blocking, pending, green: blocking.length === 0 && pending === 0 && list.length > 0 };
+}
+
 // watch -- follow the current branch's PR until required checks pass AND
 // the review verdict is clean for the head commit, then squash-merge,
 // sync main, and drop the branch. --no-review skips the verdict gate,
@@ -356,18 +398,12 @@ function cmdWatch() {
     const pr = ghJson(["pr", "view", branch, "--json", "state,headRefOid,statusCheckRollup"]);
     if (pr.state === "MERGED") break;
     if (pr.state !== "OPEN") throw new Error("PR is " + pr.state);
-    const rollup = pr.statusCheckRollup || [];
-    const failed = rollup.filter(function (c) {
-      return String(c.conclusion || "").toUpperCase() === "FAILURE";
-    });
-    if (failed.length > 0) {
-      throw new Error("checks failed: " + failed.map(function (c) { return c.name || c.context; }).join(", ") +
+    const checks = checksVerdict(pr.statusCheckRollup);
+    if (checks.blocking.length > 0) {
+      throw new Error("checks failed: " + checks.blocking.join(", ") +
         " -- fix at the root, then release.js push-fix");
     }
-    const pending = rollup.filter(function (c) {
-      return !c.conclusion && String(c.status || "").toUpperCase() !== "COMPLETED" && !c.state;
-    });
-    const checksDone = pending.length === 0 && rollup.length > 0;
+    const checksDone = checks.green;
     let reviewDone = skipReview;
     if (!skipReview) {
       const verdict = reviewVerdict(branch, pr.headRefOid);
@@ -469,10 +505,9 @@ function cmdHelp() {
 
 // ---- Dispatch ---------------------------------------------------------------
 
-const sub = process.argv[2] || "help";
-
-try {
-  {
+function main() {
+  const sub = process.argv[2] || "help";
+  try {
     switch (sub) {
       case "prepare": cmdPrepare(); break;
       case "push": cmdPush(); break;
@@ -493,8 +528,15 @@ try {
         cmdHelp();
         process.exit(1);
     }
+  } catch (e) {
+    console.error("\nrelease: FAIL -- " + ((e && e.message) || e));
+    process.exit(1);
   }
-} catch (e) {
-  console.error("\nrelease: FAIL -- " + ((e && e.message) || e));
-  process.exit(1);
+}
+
+// Dispatch only when executed directly (`node scripts/release.js ...`); an
+// import (the unit tests drive the exported verdict functions) must load
+// the module without running a subcommand.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
 }
