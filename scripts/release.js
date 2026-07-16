@@ -226,17 +226,18 @@ function readReleaseState() {
   }
 }
 
-// tagTarget(state, version) -- the commit a signed tag must point at. When a
-// prior `watch` recorded the merge commit for THIS version, the tag pins that
-// exact commit; a concurrent PR that lands on main after ours must never be
-// dragged under this version's tag. Absent, malformed, or version-mismatched
-// state -> null: tag HEAD (the standalone path, when tag runs without watch).
-export function tagTarget(state, version) {
+// tagFromState(state) -- the { version, target } a signed tag must use when a
+// prior `watch` recorded them. Pins BOTH the version and the merge commit to
+// the release PR: a concurrent PR that bumps package.json or advances main
+// after our merge can therefore neither mis-version the tag (the version is
+// the one the release branch carried, captured before any sync) nor mis-target
+// it (the commit is the reviewed PR's merge). null when no valid record exists
+// -- a standalone `tag` run then reads the working-tree version and tags HEAD.
+export function tagFromState(state) {
   if (state && typeof state === "object" &&
-      state.version === version &&
-      typeof state.mergeSha === "string" &&
-      /^[0-9a-f]{7,40}$/.test(state.mergeSha)) {
-    return state.mergeSha;
+      typeof state.version === "string" && /^\d+\.\d+\.\d+$/.test(state.version) &&
+      typeof state.mergeSha === "string" && /^[0-9a-f]{7,40}$/.test(state.mergeSha)) {
+    return { version: state.version, target: state.mergeSha };
   }
   return null;
 }
@@ -246,18 +247,20 @@ function cmdTag() {
   if (!gitClean()) {
     throw new Error("tag requires a clean working tree");
   }
-  const version = readVersion();
+  // Prefer the version + commit `watch` recorded for this release, so neither
+  // a concurrent version bump nor a concurrent merge on main can mis-version
+  // or mis-target the tag. Absent a record, tag the working tree at HEAD.
+  const planned = tagFromState(readReleaseState());
+  const version = planned ? planned.version : readVersion();
+  const target = planned ? planned.target : null;
   const tag = "v" + version;
   if (capture("git", ["tag", "-l", tag]).stdout === tag) {
     throw new Error("tag " + tag + " already exists -- this version is already tagged");
   }
-  // Pin the tag to the reviewed PR's merge commit when watch recorded it, so
-  // a concurrent merge that advanced main after ours is never tagged.
-  const target = tagTarget(readReleaseState(), version);
   const tagArgs = ["tag", "-s", tag, "-m", tag];
   if (target) {
     tagArgs.push(target);
-    console.log("tagging the recorded merge commit " + target.slice(0, 12) + " (not HEAD)");
+    console.log("tagging " + tag + " on the recorded merge commit " + target.slice(0, 12) + " (version + commit pinned from the release PR)");
   }
   run("git", tagArgs);
 
@@ -538,6 +541,10 @@ function cmdWatch() {
   requireRemote();
   const branch = currentBranch();
   if (!branch || branch === "main") throw new Error("watch runs from the branch whose PR is in flight");
+  // The version this release branch carries, read BEFORE any sync of main: a
+  // concurrent PR that bumps package.json on main after our merge must not
+  // change the version this PR's tag records.
+  const releaseVersion = readVersion();
   const skipReview = process.argv.indexOf("--no-review") !== -1;
   if (skipReview) console.log("!! review gate SKIPPED by explicit --no-review");
   let reviewNudged = false;
@@ -602,8 +609,8 @@ function cmdWatch() {
   // Record the merge commit so `tag` pins the signed tag to it even if a
   // concurrent PR has since advanced main past it.
   if (mergeSha) {
-    writeFileSync(releaseStatePath(), JSON.stringify({ version: readVersion(), mergeSha }) + "\n");
-    console.log("recorded merge commit " + mergeSha.slice(0, 12) + " for tag");
+    writeFileSync(releaseStatePath(), JSON.stringify({ version: releaseVersion, mergeSha }) + "\n");
+    console.log("recorded merge commit " + mergeSha.slice(0, 12) + " and version " + releaseVersion + " for tag");
   } else {
     console.log("!! could not read the PR merge commit -- tag will fall back to HEAD; verify it before publish");
   }

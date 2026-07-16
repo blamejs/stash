@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { checksVerdict, mergeArgs, reviewDecision, tagTarget } from "../scripts/release.js";
+import { checksVerdict, mergeArgs, reviewDecision, tagFromState } from "../scripts/release.js";
 
 // ---------------------------------------------------------------------------
 // checksVerdict -- CheckRun entries (status / conclusion)
@@ -356,31 +356,30 @@ test("mergeArgs: a missing or truncated head sha throws instead of merging unbou
 
 
 // ---------------------------------------------------------------------------
-// tagTarget -- the signed tag pins the reviewed PR's merge commit
+// tagFromState -- the signed tag pins the release PR's version AND merge commit
 // ---------------------------------------------------------------------------
 
 const SHA = "a1b2c3d4e5f60718293645546372819a0bcdef12";
 
-test("tagTarget: recorded merge commit for this version is the tag target", () => {
-  assert.equal(tagTarget({ version: "0.1.4", mergeSha: SHA }, "0.1.4"), SHA);
+test("tagFromState: recorded version + merge commit are the tag plan", () => {
+  assert.deepEqual(tagFromState({ version: "0.1.4", mergeSha: SHA }), { version: "0.1.4", target: SHA });
 });
 
-test("tagTarget: a version mismatch falls back to HEAD (null), never a stale commit", () => {
-  assert.equal(tagTarget({ version: "0.1.3", mergeSha: SHA }, "0.1.4"), null);
+test("tagFromState: absent / malformed state falls back to HEAD (null)", () => {
+  assert.equal(tagFromState(null), null);
+  assert.equal(tagFromState({}), null);
+  assert.equal(tagFromState({ version: "0.1.4" }), null);
+  assert.equal(tagFromState({ mergeSha: SHA }), null);
+  assert.equal(tagFromState({ version: "not.a.version", mergeSha: SHA }), null);
+  assert.equal(tagFromState({ version: "0.1.4", mergeSha: "not-a-sha" }), null);
+  assert.equal(tagFromState({ version: "0.1.4", mergeSha: "" }), null);
 });
 
-test("tagTarget: absent / malformed state falls back to HEAD (null)", () => {
-  assert.equal(tagTarget(null, "0.1.4"), null);
-  assert.equal(tagTarget({}, "0.1.4"), null);
-  assert.equal(tagTarget({ version: "0.1.4" }, "0.1.4"), null);
-  assert.equal(tagTarget({ version: "0.1.4", mergeSha: "not-a-sha" }, "0.1.4"), null);
-  assert.equal(tagTarget({ version: "0.1.4", mergeSha: "" }, "0.1.4"), null);
-});
-
-// cmdWatch records the merge commit and cmdTag pins the signed tag to it: a
-// concurrent PR that advances main after our merge must never be dragged
-// under this version's tag. Structural, over comment-stripped source.
-test("cmdTag pins the tag to the recorded merge commit, not HEAD", () => {
+// cmdWatch captures the release branch's version BEFORE syncing main and
+// records it with the merge commit; cmdTag pins BOTH. A concurrent PR that
+// bumps package.json or advances main after our merge can therefore neither
+// mis-version nor mis-target the tag. Structural, over comment-stripped source.
+test("cmdTag pins the tag version + commit from the recorded state, not the post-sync tree", () => {
   const raw = readFileSync(new URL("../scripts/release.js", import.meta.url), "utf8");
   const src = raw
     .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -389,7 +388,9 @@ test("cmdTag pins the tag to the recorded merge commit, not HEAD", () => {
   const tagStart = src.indexOf("function cmdTag");
   const tagEnd = src.indexOf("\nfunction ", tagStart + 1);
   const tagBody = src.slice(tagStart, tagEnd === -1 ? undefined : tagEnd);
-  assert.ok(/tagTarget\s*\(/.test(tagBody), "cmdTag must resolve the tag target via tagTarget");
+  assert.ok(/tagFromState\s*\(/.test(tagBody), "cmdTag must resolve version + target via tagFromState");
+  assert.ok(/planned\s*\?\s*planned\.version/.test(tagBody),
+    "cmdTag must take the version from the recorded plan when present");
   assert.ok(/tagArgs\.push\(\s*target\s*\)/.test(tagBody),
     "cmdTag must append the resolved target to the git tag args");
 
@@ -397,6 +398,11 @@ test("cmdTag pins the tag to the recorded merge commit, not HEAD", () => {
   const watchEnd = src.indexOf("\nfunction ", watchStart + 1);
   const watchBody = src.slice(watchStart, watchEnd === -1 ? undefined : watchEnd);
   assert.ok(/mergeCommit/.test(watchBody), "cmdWatch must request the PR mergeCommit");
-  assert.ok(/writeFileSync\(\s*releaseStatePath\(\)/.test(watchBody),
-    "cmdWatch must record the merge commit to the release-state file");
+  // The version must be captured before the pull that syncs main.
+  const verAt = watchBody.indexOf("readVersion()");
+  const pullAt = watchBody.indexOf('"pull"');
+  assert.ok(verAt !== -1 && pullAt !== -1 && verAt < pullAt,
+    "cmdWatch must read the release version BEFORE the pull that syncs main");
+  assert.ok(/writeFileSync\(\s*releaseStatePath\(\)[\s\S]*releaseVersion/.test(watchBody),
+    "cmdWatch must record the pre-sync releaseVersion with the merge commit");
 });
