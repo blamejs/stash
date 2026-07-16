@@ -34,6 +34,14 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual(await drain(await stash.apply(ref)), payload);
     });
 
+    test("round-trips a bare Uint8Array without aliasing the caller's buffer", async () => {
+      const stash = new Stash({ backend: create() });
+      const payload = new Uint8Array([9, 8, 7, 6]);
+      const ref = await stash.push(payload);
+      payload.fill(0); // caller mutation after push must not reach the store
+      assert.deepEqual(await drain(await stash.apply(ref)), Buffer.from([9, 8, 7, 6]));
+    });
+
     test("round-trips a UTF-8 string", async () => {
       const stash = new Stash({ backend: create() });
       const ref = await stash.push("hello stash");
@@ -55,6 +63,27 @@ for (const { name, create } of BACKENDS) {
       }
       const ref = await stash.push(chunks());
       assert.equal((await drain(await stash.apply(ref))).toString("utf8"), "alpha beta");
+    });
+
+    test("round-trips mixed chunk types: string and Uint8Array chunks encode as bytes", async () => {
+      const stash = new Stash({ backend: create() });
+      async function* chunks() {
+        yield "text chunk ";
+        yield new Uint8Array([0x62, 0x79, 0x74, 0x65, 0x73]);
+      }
+      const ref = await stash.push(chunks());
+      const got = await drain(await stash.apply(ref));
+      assert.equal(got.toString("utf8"), "text chunk bytes");
+      assert.equal((await stash.show(ref)).size, got.length);
+    });
+
+    test("list accepts includeExpired and rejects unknown options", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push("listed");
+      assert.deepEqual((await stash.list({ includeExpired: true })).map((e) => e.id), [ref]);
+      assert.deepEqual((await stash.list({ includeExpired: false })).map((e) => e.id), [ref]);
+      await assert.rejects(stash.list({ bogus: true }), TypeError);
+      await assert.rejects(stash.list(null), TypeError);
     });
 
     test("push mints a fresh ref per entry, even for identical bytes", async () => {
@@ -129,6 +158,51 @@ for (const { name, create } of BACKENDS) {
       await assert.rejects(stash.apply(ref), RefNotFound);
       await assert.rejects(stash.show(ref), RefNotFound);
       assert.deepEqual(await stash.list(), []);
+    });
+  });
+}
+
+suite("clear under concurrent destruction", () => {
+  test("an entry that vanishes between list and remove is not counted", async () => {
+    // A remove that reports false mid-clear models a concurrent drop --
+    // the count is actual destructions, not the length of the listing.
+    const inner = new MemoryBackend();
+    let vanish = null;
+    const backend = {
+      write: (...args) => inner.write(...args),
+      read: (...args) => inner.read(...args),
+      stat: (...args) => inner.stat(...args),
+      list: (...args) => inner.list(...args),
+      remove: async (id) => {
+        if (id === vanish) {
+          vanish = null;
+          await inner.remove(id);
+          return false; // someone else already destroyed it
+        }
+        return inner.remove(id);
+      },
+    };
+    const stash = new Stash({ backend });
+    await stash.push("survives the race");
+    vanish = await stash.push("already gone");
+    assert.equal(await stash.clear(), 1);
+    assert.deepEqual(await stash.list(), []);
+  });
+});
+
+// The backend interface is public surface (the subpath export) and Stash is
+// not its only caller: SPEC.md 9 binds the backend's own verdicts. Stash
+// happens to gate read() behind stat(), so read's not-found path is
+// unreachable through apply -- these drive the contract directly, and every
+// future backend inherits the cases through the same BACKENDS loop.
+for (const { name, create } of BACKENDS) {
+  suite("backend contract: " + name, () => {
+    test("read and stat on an absent id throw RefNotFound; remove reports false", async () => {
+      const backend = create();
+      const absent = generate();
+      await assert.rejects(backend.read(absent), RefNotFound);
+      await assert.rejects(backend.stat(absent), RefNotFound);
+      assert.equal(await backend.remove(absent), false);
     });
   });
 }
