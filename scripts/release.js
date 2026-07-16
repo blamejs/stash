@@ -408,43 +408,83 @@ export function unresolvedThreads(nodes) {
     });
 }
 
+// collectAllPages(fetchPage) -- pure: accumulate the nodes of a paginated
+// GraphQL connection across EVERY page. fetchPage(cursor) returns
+// { nodes, hasNextPage, endCursor } for the page after `cursor` (null for the
+// first). A single page read is NOT the whole connection: a gate that trusts
+// the first page treats a later page's open finding as absent. Fail closed --
+// a page with unreadable nodes, or another page promised with no cursor,
+// THROWS rather than returning a partial set. The guard bound is a runaway
+// backstop far above any real thread count, never the precision mechanism.
+export function collectAllPages(fetchPage) {
+  const all = [];
+  let cursor = null;
+  for (let guard = 0; guard < 10000; guard++) {
+    const page = fetchPage(cursor);
+    if (!page || !Array.isArray(page.nodes)) {
+      throw new Error("a paginated page returned no readable nodes -- refusing to " +
+        "treat a partial result as the complete set");
+    }
+    for (const n of page.nodes) all.push(n);
+    if (!page.hasNextPage) return all;
+    if (!page.endCursor) {
+      throw new Error("a paginated page reported a next page with no cursor -- " +
+        "cannot continue safely, so refusing to clear on a partial set");
+    }
+    cursor = page.endCursor;
+  }
+  throw new Error("pagination exceeded the page guard -- aborting rather than looping");
+}
+
 // fetchUnresolvedThreads(prNum) -- the GraphQL wrapper around
-// unresolvedThreads: query the PR's review threads, then apply the pure
-// verdict. ghJson fails closed on a gh error; unresolvedThreads fails closed
-// on a null payload -- together, an unreadable thread state never clears the
-// gate.
+// unresolvedThreads: page through ALL of the PR's review threads, then apply
+// the pure verdict. A PR can carry more than one page of threads; reading only
+// the first would let an open finding on a later page clear the merge gate.
+// ghJson fails closed on a gh error, collectAllPages fails closed on a partial
+// page, and unresolvedThreads fails closed on a null payload -- together, an
+// unreadable or partial thread state never clears the gate.
 function fetchUnresolvedThreads(prNum) {
   const slug = repoSlug();
-  const nodes = ghJson(["api", "graphql", "-f",
-    "query=query { repository(owner:\"" + slug.owner + "\",name:\"" + slug.name +
-    "\") { pullRequest(number:" + prNum + ") { reviewThreads(first:100) { nodes { " +
-    "id isResolved path line comments(first:1) { nodes { author{login} body } } } } } } }",
-    "--jq", ".data.repository.pullRequest.reviewThreads.nodes"]);
+  const nodes = collectAllPages((cursor) => {
+    const after = cursor ? ", after:\"" + cursor + "\"" : "";
+    const conn = ghJson(["api", "graphql", "-f",
+      "query=query { repository(owner:\"" + slug.owner + "\",name:\"" + slug.name +
+      "\") { pullRequest(number:" + prNum + ") { reviewThreads(first:100" + after + ") { " +
+      "pageInfo { hasNextPage endCursor } nodes { " +
+      "id isResolved path line comments(first:1) { nodes { author{login} body } } } } } } }",
+      "--jq", ".data.repository.pullRequest.reviewThreads"]);
+    return {
+      nodes: conn && conn.nodes,
+      hasNextPage: !!(conn && conn.pageInfo && conn.pageInfo.hasNextPage),
+      endCursor: conn && conn.pageInfo && conn.pageInfo.endCursor,
+    };
+  });
   return unresolvedThreads(nodes);
 }
 
-// reviewerSignalsReview(surfaces, headSha, headTime) -- pure: has the reviewer
+// reviewerSignalsReview(surfaces, headSha, triggerId) -- pure: has the reviewer
 // bot signalled a review of the head? The bot has THREE signal forms and all
 // must count, or the wait times out on the common (clean) case:
 //   (1) a formal review node whose reviewed commit is the head -- the form it
 //       posts WITH findings;
 //   (2) a clean-verdict issue comment citing the head's commit sha, posted
 //       with no review node when it finds nothing; and
-//   (3) a bare THUMBS_UP reaction by the bot on a `@codex review` trigger
+//   (3) a bare THUMBS_UP reaction by the bot on the `@codex review` trigger
 //       comment, with NO review node and NO clean-verdict comment at all --
 //       the bot's documented "no suggestions" signal.
 // Forms (1) and (2) carry the head sha, so they self-bind to the head. A
-// reaction carries NO sha -- so form (3) must bind to the head by TIME, or a
-// stale thumbs-up on a prior head's trigger would clear the wait the instant a
-// fix or direct push made a new head that the bot has not yet re-reviewed.
-// headTime is the head commit's committedDate (ISO 8601); form (3) counts a bot
-// thumbs-up ONLY when its own `createdAt` is strictly after headTime. A push
-// creates the new head commit, so any pre-push reaction (the stale case)
-// predates headTime and is rejected. When headTime or the reaction's createdAt
-// is missing/unparseable the reaction is unbindable and does NOT count (fail
-// closed) -- the wait holds for a head-bound signal instead. surfaces:
-// { reviews:[{author,commit}], comments:[{author,body,reactions:[{content,login,createdAt}]}] }.
-export function reviewerSignalsReview(surfaces, headSha, headTime) {
+// reaction carries NO sha, and GitHub exposes no push time to bind it by
+// (pushedDate is null; a commit's committer date is mutable metadata a
+// rebased/cherry-picked head can carry from before the reaction). So form (3)
+// binds to the head by the IDENTITY of the trigger comment: the driver posts
+// `@codex review` for THIS head only after it is the remote head (post-push),
+// and passes that comment's id as triggerId. A bot thumbs-up on THAT comment is
+// therefore a review of this head; a thumbs-up on any earlier trigger (a prior
+// head's) is a different comment id and does not match. Absent a triggerId the
+// reaction is unbindable and does NOT count (fail closed) -- the wait holds for
+// a head-bound signal instead. surfaces: { reviews:[{author,commit}], comments:
+// [{author,body,databaseId,reactions:[{content,login}]}] }.
+export function reviewerSignalsReview(surfaces, headSha, triggerId) {
   if (typeof headSha !== "string" || headSha.length < 7) {
     throw new TypeError("reviewerSignalsReview requires the head commit sha");
   }
@@ -455,26 +495,23 @@ export function reviewerSignalsReview(surfaces, headSha, headTime) {
   if (reviews.some((r) => r && isReviewBot(r.author) && r.commit === headSha)) return true;
   if (comments.some((c) => isReviewBot(c && c.author) &&
     typeof (c && c.body) === "string" && c.body.indexOf(headPrefix) !== -1)) return true;
-  // (3) The bot thumbs-up reaction to a `@codex review` trigger comment, bound
-  // to the head by time: unbindable without a parseable head time.
-  const headMs = Date.parse(headTime);
-  if (!Number.isFinite(headMs)) return false;
+  // (3) A bot thumbs-up on THE trigger comment the driver created for this head.
+  if (triggerId == null) return false;
   return comments.some((c) =>
-    c && typeof c.body === "string" && c.body.indexOf("@codex review") !== -1 &&
-    Array.isArray(c.reactions) && c.reactions.some((rx) => {
-      if (!rx || rx.content !== "THUMBS_UP" || !isReviewBot(rx.login)) return false;
-      const rxMs = Date.parse(rx.createdAt);
-      return Number.isFinite(rxMs) && rxMs > headMs;
-    }));
+    c && c.databaseId != null && String(c.databaseId) === String(triggerId) &&
+    Array.isArray(c.reactions) && c.reactions.some((rx) =>
+      rx && rx.content === "THUMBS_UP" && isReviewBot(rx.login)));
 }
 
-// reviewerReviewedHead(prNum, headSha) -- gather the review surfaces (reviews,
-// and issue comments WITH their reactions and reaction timestamps) plus the
-// head commit's committedDate, and apply reviewerSignalsReview. The committed
-// date head-binds the thumbs-up form; ghJson fails closed to null on a gh
-// error, so an unreadable commit time disables only that form (fail closed),
-// never clears the gate.
-function reviewerReviewedHead(prNum, headSha) {
+// reviewerReviewedHead(prNum, headSha, triggerId) -- gather the review surfaces
+// (reviews, and issue comments WITH their databaseId and reactions) and apply
+// reviewerSignalsReview. triggerId is the id of the `@codex review` comment the
+// driver posted for THIS head; it head-binds the thumbs-up form (form 3). The
+// reviews and comments reads are recent-biased (last:) -- the head review and
+// the driver's just-posted trigger are the newest items, so a busy PR cannot
+// push them past the window -- while the thread gate itself pages in full
+// (fetchUnresolvedThreads). ghJson fails closed to null on a gh error.
+function reviewerReviewedHead(prNum, headSha, triggerId) {
   const slug = repoSlug();
   const reviews = (ghJson(["api", "graphql", "-f",
     "query=query { repository(owner:\"" + slug.owner + "\",name:\"" + slug.name +
@@ -485,21 +522,16 @@ function reviewerReviewedHead(prNum, headSha) {
   const comments = (ghJson(["api", "graphql", "-f",
     "query=query { repository(owner:\"" + slug.owner + "\",name:\"" + slug.name +
     "\") { pullRequest(number:" + prNum + ") { comments(last:60) { nodes { " +
-    "body author{login} reactions(first:30){ nodes { content createdAt user{login} } } } } } } }",
+    "databaseId body author{login} reactions(first:30){ nodes { content user{login} } } } } } } }",
     "--jq", ".data.repository.pullRequest.comments.nodes"]) || [])
     .map((c) => ({
+      databaseId: c && c.databaseId,
       author: c && c.author && c.author.login,
       body: c && c.body,
       reactions: ((c && c.reactions && c.reactions.nodes) || [])
-        .map((rx) => ({
-          content: rx && rx.content,
-          login: rx && rx.user && rx.user.login,
-          createdAt: rx && rx.createdAt,
-        })),
+        .map((rx) => ({ content: rx && rx.content, login: rx && rx.user && rx.user.login })),
     }));
-  const commit = ghJson(["api", "repos/" + slug.owner + "/" + slug.name + "/commits/" + headSha]);
-  const headTime = commit && commit.commit && commit.commit.committer && commit.commit.committer.date;
-  return reviewerSignalsReview({ reviews, comments }, headSha, headTime);
+  return reviewerSignalsReview({ reviews, comments }, headSha, triggerId);
 }
 
 // waitForReviewOnHead(branch, prNum, headSha) -- block until the reviewer has
@@ -514,15 +546,20 @@ function waitForReviewOnHead(branch, prNum, headSha) {
   const budgetMs = 10 * 60 * 1000;
   let waited = 0;
   let nudged = false;
+  let triggerId = null;
   console.log("waiting for the reviewer to review PR #" + prNum + " head " +
     headSha.slice(0, 12) + " before the thread gate (up to 10m; it reviews a bit after CI)...");
   while (waited <= budgetMs) {
-    if (reviewerReviewedHead(prNum, headSha)) {
+    if (reviewerReviewedHead(prNum, headSha, triggerId)) {
       ok("reviewer has reviewed the current head -- the thread gate now sees its findings");
       return;
     }
+    // Nudge ONCE, and remember the id of the trigger comment we post: a bot
+    // thumbs-up on THAT comment (form 3) is a review of this head. Posted only
+    // now -- after this head is confirmed the remote head -- so it can never be
+    // a prior head's trigger.
     if (!nudged && waited >= 3 * stepMs) {
-      requestReview(branch);
+      triggerId = requestReview(prNum);
       nudged = true;
     }
     sleep(stepMs);
@@ -554,8 +591,19 @@ function printUnresolvedThreads(unresolved) {
   console.log("then run the resolve command above for its thread. Re-run: release.js watch");
 }
 
-function requestReview(branch) {
-  run("gh", ["pr", "comment", branch, "--body", "@codex review"]);
+// requestReview(prNum) -- post the `@codex review` trigger for the current head
+// and return the created comment's id, so a bot thumbs-up on THIS comment
+// head-binds the review (reviewerSignalsReview form 3). `gh pr comment --body`
+// takes the literal `@codex review` (no gh @file ambiguity) and prints the new
+// comment's URL, whose trailing `#issuecomment-<id>` IS the databaseId the
+// reactions query reports. A failed post or an unparseable URL returns null:
+// the thumbs-up form then stays disabled (fail closed) until the review-node or
+// clean-comment forms fire, or the wait times out loudly -- never a silent pass.
+function requestReview(prNum) {
+  const rv = capture("gh", ["pr", "comment", String(prNum), "--body", "@codex review"]);
+  if (rv.status !== 0) return null;
+  const m = /#issuecomment-(\d+)/.exec((rv.stdout || "") + "\n" + (rv.stderr || ""));
+  return m ? m[1] : null;
 }
 
 // syncLockfileVersion(lock, version) -- return the parsed package-lock.json
@@ -642,7 +690,8 @@ function cmdPush() {
     const body = notes ? notes.summary : "See the commit message.";
     run("gh", ["pr", "create", "--title", title, "--body", body]);
   }
-  requestReview(branch);
+  const prNum = ghJson(["pr", "view", branch, "--json", "number"]).number;
+  requestReview(prNum);
   ok("PR open, review requested -- next: release.js watch");
 }
 
@@ -662,7 +711,8 @@ function cmdPushFix() {
   run("git", ["commit", "-m", message]);
   verifyCommitSignature();
   run("git", ["push"]);
-  requestReview(branch);
+  const prNum = ghJson(["pr", "view", branch, "--json", "number"]).number;
+  requestReview(prNum);
   ok("fix pushed as a new signed commit; review re-requested -- next: release.js watch");
 }
 

@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { checksVerdict, mergeArgs, reviewerSignalsReview, syncLockfileVersion, tagFromState, unresolvedThreads } from "../scripts/release.js";
+import { checksVerdict, collectAllPages, mergeArgs, reviewerSignalsReview, syncLockfileVersion, tagFromState, unresolvedThreads } from "../scripts/release.js";
 
 // ---------------------------------------------------------------------------
 // checksVerdict -- CheckRun entries (status / conclusion)
@@ -441,18 +441,17 @@ test("cmdTag pins the tag version + commit from the recorded state, not the post
 // ---------------------------------------------------------------------------
 // reviewerSignalsReview -- the reviewer signalled a review of the head via
 // ANY of its three forms (review node, clean-verdict comment, or a bare
-// THUMBS_UP reaction on a trigger comment). The wait must not hang when the
-// bot only reacts.
+// THUMBS_UP reaction on the driver's trigger comment). The wait must not hang
+// when the bot only reacts, and must not clear on a prior head's reaction.
 // ---------------------------------------------------------------------------
 
 const RHEAD = "a1b2c3d4e5f60718293645546372819a0bcdef12";
 const RBOT = "chatgpt-codex-connector[bot]"; // allow:ai-attribution -- reviewer login fixture
-// The head commit's committedDate, and reactions before/after it. The thumbs-up
-// form binds to the head by time: only a reaction strictly after HEAD_TIME
-// reviews this head; a reaction before it is a stale review of a prior head.
-const HEAD_TIME = "2026-07-16T12:00:00Z";
-const RX_FRESH = "2026-07-16T12:05:00Z"; // after the head commit -- reviews it
-const RX_STALE = "2026-07-16T11:00:00Z"; // before the head commit -- prior head
+// The thumbs-up form binds to the head by the IDENTITY of the trigger comment
+// the driver posted for THIS head: only a bot reaction on comment TRIGGER_ID
+// reviews this head; a reaction on any other (a prior head's trigger) does not.
+const TRIGGER_ID = 4994188035; // the `@codex review` comment the driver posted for this head
+const PRIOR_ID = 4990000001; // an earlier trigger comment, from a prior head
 
 test("reviewerSignalsReview: a review node on the head counts (findings form)", () => {
   assert.equal(reviewerSignalsReview({ reviews: [{ author: RBOT, commit: RHEAD }] }, RHEAD), true);
@@ -464,50 +463,53 @@ test("reviewerSignalsReview: a clean-verdict comment citing the head counts", ()
   }, RHEAD), true);
 });
 
-test("reviewerSignalsReview: a bot THUMBS_UP posted AFTER the head counts", () => {
-  // The bot posts NO review node and NO comment -- only a thumbs-up reaction,
-  // and it lands after the head commit. This is the case that otherwise hangs
-  // the wait until it times out.
+test("reviewerSignalsReview: a bot THUMBS_UP on the driver's trigger comment counts", () => {
+  // The bot posts NO review node and NO comment -- only a thumbs-up reaction on
+  // the trigger the driver created for this head. This is the case that
+  // otherwise hangs the wait until it times out.
   assert.equal(reviewerSignalsReview({
     comments: [{
       author: "release-operator",
       body: "@codex review",
-      reactions: [{ content: "THUMBS_UP", login: RBOT, createdAt: RX_FRESH }],
+      databaseId: TRIGGER_ID,
+      reactions: [{ content: "THUMBS_UP", login: RBOT }],
     }],
-  }, RHEAD, HEAD_TIME), true);
+  }, RHEAD, TRIGGER_ID), true);
 });
 
-test("reviewerSignalsReview: a stale bot THUMBS_UP predating the head does NOT count", () => {
-  // The reported P1: a clean thumbs-up on a prior head's trigger must not clear
-  // the wait after a fix/direct push makes a new head the bot has not reviewed.
+test("reviewerSignalsReview: a bot THUMBS_UP on a PRIOR head's trigger does NOT count", () => {
+  // The reported P1: a clean thumbs-up on an earlier trigger must not clear the
+  // wait after a fix/direct push makes a new head the bot has not reviewed. The
+  // driver's trigger for the new head is TRIGGER_ID; a reaction on PRIOR_ID is a
+  // different comment id and does not match.
   assert.equal(reviewerSignalsReview({
     comments: [{
       author: "release-operator",
       body: "@codex review",
-      reactions: [{ content: "THUMBS_UP", login: RBOT, createdAt: RX_STALE }],
+      databaseId: PRIOR_ID,
+      reactions: [{ content: "THUMBS_UP", login: RBOT }],
     }],
-  }, RHEAD, HEAD_TIME), false);
+  }, RHEAD, TRIGGER_ID), false);
 });
 
-test("reviewerSignalsReview: a THUMBS_UP is unbindable (does NOT count) without a head time", () => {
-  // A reaction carries no sha; absent a head time it cannot be bound to the
-  // head, so it fails closed rather than clearing the wait on a stale reaction.
-  assert.equal(reviewerSignalsReview({
-    comments: [{ author: "op", body: "@codex review", reactions: [{ content: "THUMBS_UP", login: RBOT, createdAt: RX_FRESH }] }],
-  }, RHEAD), false);
-  assert.equal(reviewerSignalsReview({
-    comments: [{ author: "op", body: "@codex review", reactions: [{ content: "THUMBS_UP", login: RBOT, createdAt: RX_FRESH }] }],
-  }, RHEAD, "not-a-date"), false);
+test("reviewerSignalsReview: a THUMBS_UP is unbindable (does NOT count) without a trigger id", () => {
+  // A reaction carries no sha; absent the driver's trigger id it cannot be
+  // bound to the head, so it fails closed rather than clearing on a stale one.
+  const surfaces = {
+    comments: [{ author: "op", body: "@codex review", databaseId: TRIGGER_ID, reactions: [{ content: "THUMBS_UP", login: RBOT }] }],
+  };
+  assert.equal(reviewerSignalsReview(surfaces, RHEAD), false);
+  assert.equal(reviewerSignalsReview(surfaces, RHEAD, null), false);
 });
 
-test("reviewerSignalsReview: a THUMBS_UP with no reaction timestamp does NOT count", () => {
+test("reviewerSignalsReview: a THUMBS_UP on a comment with no databaseId does NOT count", () => {
   assert.equal(reviewerSignalsReview({
     comments: [{ author: "op", body: "@codex review", reactions: [{ content: "THUMBS_UP", login: RBOT }] }],
-  }, RHEAD, HEAD_TIME), false);
+  }, RHEAD, TRIGGER_ID), false);
 });
 
-test("reviewerSignalsReview: a head-bound review node counts even with no head time", () => {
-  // Forms (1) and (2) self-bind via the head sha and never need a head time.
+test("reviewerSignalsReview: a head-bound review node counts even with no trigger id", () => {
+  // Forms (1) and (2) self-bind via the head sha and never need a trigger id.
   assert.equal(reviewerSignalsReview({ reviews: [{ author: RBOT, commit: RHEAD }] }, RHEAD), true);
   assert.equal(reviewerSignalsReview({
     comments: [{ author: RBOT, body: "Reviewed `" + RHEAD.slice(0, 10) + "` -- no issues." }],
@@ -515,23 +517,60 @@ test("reviewerSignalsReview: a head-bound review node counts even with no head t
 });
 
 test("reviewerSignalsReview: no signal at all stays false (keep waiting)", () => {
-  assert.equal(reviewerSignalsReview({}, RHEAD, HEAD_TIME), false);
-  assert.equal(reviewerSignalsReview({ comments: [{ author: "someone", body: "hi" }] }, RHEAD, HEAD_TIME), false);
+  assert.equal(reviewerSignalsReview({}, RHEAD, TRIGGER_ID), false);
+  assert.equal(reviewerSignalsReview({ comments: [{ author: "someone", body: "hi" }] }, RHEAD, TRIGGER_ID), false);
 });
 
-test("reviewerSignalsReview: a fresh THUMBS_UP from a non-reviewer does not count", () => {
+test("reviewerSignalsReview: a THUMBS_UP on the trigger from a non-reviewer does not count", () => {
   assert.equal(reviewerSignalsReview({
-    comments: [{ author: "op", body: "@codex review", reactions: [{ content: "THUMBS_UP", login: "randomuser", createdAt: RX_FRESH }] }],
-  }, RHEAD, HEAD_TIME), false);
+    comments: [{ author: "op", body: "@codex review", databaseId: TRIGGER_ID, reactions: [{ content: "THUMBS_UP", login: "randomuser" }] }],
+  }, RHEAD, TRIGGER_ID), false);
 });
 
-test("reviewerSignalsReview: a bot THUMBS_UP on a NON-trigger comment does not count", () => {
+test("reviewerSignalsReview: a numeric trigger id matches a string databaseId (and vice versa)", () => {
+  // gh REST returns the id as a number, GraphQL databaseId as a number, but a
+  // string id must not silently miss -- the compare normalizes both.
   assert.equal(reviewerSignalsReview({
-    comments: [{ author: "op", body: "nice work", reactions: [{ content: "THUMBS_UP", login: RBOT, createdAt: RX_FRESH }] }],
-  }, RHEAD, HEAD_TIME), false);
+    comments: [{ author: "op", body: "@codex review", databaseId: String(TRIGGER_ID), reactions: [{ content: "THUMBS_UP", login: RBOT }] }],
+  }, RHEAD, TRIGGER_ID), true);
 });
 
 test("reviewerSignalsReview: a missing head sha throws instead of matching everything", () => {
   assert.throws(() => reviewerSignalsReview({ reviews: [{ author: RBOT, commit: RHEAD }] }, ""), TypeError);
   assert.throws(() => reviewerSignalsReview({}, undefined), TypeError);
+});
+
+// ---------------------------------------------------------------------------
+// collectAllPages -- accumulate a paginated GraphQL connection across EVERY
+// page. A gate that reads only the first page treats a later page's open
+// finding as absent; this must page through in full and fail closed on a
+// partial read.
+// ---------------------------------------------------------------------------
+
+test("collectAllPages: a single page returns its nodes", () => {
+  assert.deepEqual(collectAllPages(() => ({ nodes: [1, 2, 3], hasNextPage: false })), [1, 2, 3]);
+});
+
+test("collectAllPages: concatenates every page in order and threads the cursor", () => {
+  const seen = [];
+  const pages = {
+    "": { nodes: ["a", "b"], hasNextPage: true, endCursor: "c1" },
+    c1: { nodes: ["c"], hasNextPage: true, endCursor: "c2" },
+    c2: { nodes: ["d"], hasNextPage: false },
+  };
+  const out = collectAllPages((cursor) => {
+    seen.push(cursor);
+    return pages[cursor || ""];
+  });
+  assert.deepEqual(out, ["a", "b", "c", "d"]);
+  assert.deepEqual(seen, [null, "c1", "c2"]); // first page reads with null cursor, then follows endCursor
+});
+
+test("collectAllPages: an unreadable page fails closed (throws)", () => {
+  assert.throws(() => collectAllPages(() => ({ nodes: null, hasNextPage: false })), /partial result/);
+  assert.throws(() => collectAllPages(() => null), /partial result/);
+});
+
+test("collectAllPages: a next page promised with no cursor fails closed (throws)", () => {
+  assert.throws(() => collectAllPages(() => ({ nodes: [1], hasNextPage: true, endCursor: null })), /no cursor/);
 });
