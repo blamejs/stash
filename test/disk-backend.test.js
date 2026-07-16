@@ -276,6 +276,24 @@ suite("disk: layout and atomicity", () => {
     }
   });
 
+  test("a lazy expiry drop that cannot delete surfaces the OS fault, not RefNotFound", { skip: CANNOT_FAULT }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("expired but locked", { ttl: 0 });
+    const { chmodSync } = await import("node:fs");
+    // read+exec but no write: stat reads the sidecar, but the lazy drop's unlink
+    // in the meta dir fails. SPEC 2.1: the denial surfaces, never degrades into
+    // a swallowed not-found.
+    chmodSync(join(root, "meta"), 0o500);
+    try {
+      await stash.apply(ref).then(
+        () => assert.fail("expected the lazy drop's EACCES to surface"),
+        (err) => assert.equal(err.code, "EACCES")
+      );
+    } finally {
+      chmodSync(join(root, "meta"), 0o700);
+    }
+  });
+
   test("entries persist across backend instances over the same root", async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("durable bytes", { meta: { kind: "note" } });
@@ -283,6 +301,22 @@ suite("disk: layout and atomicity", () => {
     const entry = await reopened.show(ref);
     assert.equal(entry.meta.kind, "note");
     assert.equal((await drain(await reopened.apply(ref))).toString("utf8"), "durable bytes");
+  });
+
+  test("expiry policy binds across backend instances over the same root", async () => {
+    const { root, stash: writer } = freshStash();
+    const ref = await writer.push("expired at birth", { ttl: 0 });
+    const reopened = new Stash({ backend: new DiskBackend({ root }) });
+    // the reopened instance re-derives expiresAt from the sidecar: the policy
+    // binds without the writer in memory. Before any read verb, list hides it
+    // and includeExpired reveals it.
+    assert.deepEqual(await reopened.list(), []);
+    assert.equal((await reopened.list({ includeExpired: true })).length, 1);
+    // a read verb applies the policy and drops it in passing
+    await assert.rejects(reopened.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+    assert.equal((await reopened.list({ includeExpired: true })).length, 0);
+    assert.deepEqual(readdirSync(join(root, "meta")), []);
+    assert.deepEqual(readdirSync(join(root, "blobs")), []);
   });
 });
 

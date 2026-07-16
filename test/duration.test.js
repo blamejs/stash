@@ -38,3 +38,13 @@ test("a duration whose milliseconds overflow exact range is refused", () => {
   // the largest exact product still parses
   assert.equal(parse("104249991d"), 104249991 * 24 * 60 * 60 * 1000);
 });
+
+test("a numeric duration must be a non-negative safe integer, not merely finite", () => {
+  // A fractional ms or a value past 2^53-1 would make expiresAt = createdAt +
+  // ms a non-safe integer -- serialized as a lie or an integrity verdict on
+  // every later read. The number branch rejects both at config time.
+  assert.throws(() => parse(1500.5), TypeError);
+  assert.throws(() => parse(Number.MAX_VALUE), TypeError);
+  assert.throws(() => parse(2 ** 53), TypeError); // 2^53 is not a safe integer
+  assert.equal(parse(Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER); // the ceiling still parses
+});

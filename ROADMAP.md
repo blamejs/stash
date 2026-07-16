@@ -19,12 +19,18 @@ both directions. The M1 conformance suite passes unmodified against both
 backends, and the library suite passes under `--permission` scoped to the
 test root.
 
-## M3 -- Expiry -- NEXT
+## M3 -- Expiry -- SHIPPED (0.1.5)
 
-`expiresAt`, lazy expiry on read, `prune()`, `sweepInterval` (unref'd),
-`close()`, `Symbol.asyncDispose`.
+A construct-time `ttl` default, overridable per push (`null` clears it);
+`expiresAt` stamped once at push and never extended. Lazy expiry on every read
+verb -- an expired entry is `RefNotFound` and dropped in passing, before any
+sweep. `list()` filters expired by default (`includeExpired` reveals them);
+`prune()` reaps on demand and returns the real destruction count; a
+`sweepInterval` arms an `unref()`'d background sweep that never blocks process
+exit, skips overlapping ticks, and cannot crash the process on failure.
+`close()` (and `Symbol.asyncDispose` for `await using`) stops the timer.
 
-## M4 -- Limits
+## M4 -- Limits -- NEXT
 
 `maxSize` enforced mid-stream, `maxEntries` / `maxTotal`, partial cleanup on
 rejection.

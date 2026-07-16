@@ -19,13 +19,13 @@
   },
   "stash.show": {
     "decision": "keep-experimental",
-    "reason": "Metadata-only contract is settled; lazy expiry (M3) adds the expired-entry-as-RefNotFound behavior the SPEC promises. Graduate with M3.",
+    "reason": "Metadata-only contract is settled and lazy expiry (M3) now returns an expired entry as RefNotFound. Pre-1.0 the whole surface stays experimental until the option set and error surface are frozen for 1.0.",
     "reviewedAt": "0.1.0",
     "reviewBy": "0.2.0"
   },
   "stash.list": {
     "decision": "keep-experimental",
-    "reason": "includeExpired is accepted but vacuous until expiry exists (M3). Graduate when the option has observable semantics.",
+    "reason": "includeExpired now has observable semantics (M3): the default filters expired entries and the option reveals them until a read verb reaps them. Pre-1.0 the surface stays experimental until frozen for 1.0.",
     "reviewedAt": "0.1.0",
     "reviewBy": "0.2.0"
   },
@@ -39,6 +39,18 @@
     "decision": "keep-experimental",
     "reason": "Same tombstone extension as drop at M7; the count-actual-destructions contract under concurrent removal is pinned by test. Graduate with stash.drop.",
     "reviewedAt": "0.1.0",
+    "reviewBy": "0.2.0"
+  },
+  "stash.prune": {
+    "decision": "keep-experimental",
+    "reason": "prune() destroys expired entries on demand and returns the real destruction count. Its shape is settled (SPEC.md 4 janitorial bucket), but the sweep failure channel it feeds is silent until the 'sweepError' event lands at M6. Graduate once the event surface exists.",
+    "reviewedAt": "0.1.5",
+    "reviewBy": "0.2.0"
+  },
+  "stash.close": {
+    "decision": "keep-experimental",
+    "reason": "close() stops the sweep timer and Symbol.asyncDispose aliases it (SPEC.md 7.1). The contract is final, but disposal composes with the claim/crash-recovery lifecycle that arrives at M5. Graduate once the full lifecycle it bounds is in place.",
+    "reviewedAt": "0.1.5",
     "reviewBy": "0.2.0"
   },
   "stash.backends.DiskBackend": {
