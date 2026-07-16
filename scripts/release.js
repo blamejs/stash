@@ -357,10 +357,14 @@ function cmdPrepare() {
     next = parts.join(".");
   }
   if (!/^\d+\.\d+\.\d+$/.test(next)) throw new Error("bad version '" + next + "'");
+  // Branch FIRST, then mutate: if the release branch already exists the
+  // checkout throws here, while main is still clean -- a version write
+  // before the checkout would leave a dirty main behind every failed
+  // prepare and force manual cleanup before a retry.
+  run("git", ["checkout", "-b", "release-v" + next]);
   const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
   pkg.version = next;
   writeFileSync(join(ROOT, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
-  run("git", ["checkout", "-b", "release-v" + next]);
   ok("version " + current + " -> " + next + " on branch release-v" + next);
   if (!readNotesPresent(next)) {
     console.log("next: write " + releaseNotesPath(next) + ", then regen -> commit -> push -> watch -> tag -> publish");

@@ -9,6 +9,7 @@
 // functions directly -- no process is spawned, so the suite holds under
 // the sandboxed --permission run.
 
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -248,3 +249,24 @@ test("reviewDecision: both reviewer identity forms are trusted", () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// cmdPrepare -- source contract: branch first, version write second
+// ---------------------------------------------------------------------------
+
+test("cmdPrepare creates the release branch before writing package.json", () => {
+  // Frozen control-flow contract: if the branch cannot be created (it
+  // already exists), prepare must fail while main is still clean. A
+  // version write that precedes the checkout leaves a dirty main on
+  // failure and every retry needs manual cleanup.
+  const src = readFileSync(new URL("../scripts/release.js", import.meta.url), "utf8");
+  const start = src.indexOf("function cmdPrepare");
+  const end = src.indexOf("function cmdPush");
+  assert.ok(start !== -1 && end > start, "cmdPrepare and cmdPush must both exist");
+  const body = src.slice(start, end);
+  const branchAt = body.indexOf('"checkout", "-b"');
+  const writeAt = body.indexOf('writeFileSync(join(ROOT, "package.json")');
+  assert.ok(branchAt !== -1, "cmdPrepare must create the release branch");
+  assert.ok(writeAt !== -1, "cmdPrepare must write the bumped package.json");
+  assert.ok(branchAt < writeAt,
+    "create the release branch BEFORE writing package.json -- a failed checkout must leave main clean");
+});
