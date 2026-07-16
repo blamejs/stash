@@ -510,6 +510,32 @@ suite("M3 lifecycle: sweeper, close, disposal (SPEC.md 7, 7.1)", () => {
     await stash.close();
   });
 
+  test("close() awaits an in-flight sweep: no deletion lands after it resolves", async () => {
+    const inner = new MemoryBackend();
+    let releaseList;
+    const listGate = new Promise((r) => { releaseList = r; });
+    let sweepEnteredList = false;
+    let closeResolved = false;
+    let removedAfterClose = false;
+    const backend = {
+      write: (...a) => inner.write(...a),
+      read: (...a) => inner.read(...a),
+      stat: (...a) => inner.stat(...a),
+      list: async () => { sweepEnteredList = true; await listGate; return inner.list(); },
+      remove: async (id) => { if (closeResolved) removedAfterClose = true; return inner.remove(id); },
+    };
+    const stash = new Stash({ backend, sweepInterval: 5 });
+    await stash.push("x", { ttl: 0 });
+    await pollUntil(() => sweepEnteredList); // a sweep is now blocked inside list()
+    const closePromise = stash.close().then(() => { closeResolved = true; });
+    // close() must NOT resolve while the sweep it caught is still running
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(closeResolved, false, "close() awaited the in-flight sweep instead of resolving early");
+    releaseList(); // let the sweep finish -- it reaps the expired entry now
+    await closePromise;
+    assert.equal(removedAfterClose, false, "the sweep's deletion happened before close() resolved, not after");
+  });
+
   test("a sweepInterval above Node's timer ceiling, or of zero, is a config error", async () => {
     assert.throws(() => new Stash({ backend: new MemoryBackend(), sweepInterval: "30d" }), TypeError);
     assert.throws(() => new Stash({ backend: new MemoryBackend(), sweepInterval: 0 }), TypeError);

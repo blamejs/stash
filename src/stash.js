@@ -130,7 +130,7 @@ export class Stash {
   #backend;
   #ttlMs = null;
   #sweepTimer = null;
-  #sweeping = false;
+  #sweepInFlight = null;
 
   constructor(opts) {
     options(opts, "new Stash", { allowed: ["backend", "ttl", "sweepInterval"], unimplemented: UNIMPLEMENTED_OPTIONS });
@@ -158,23 +158,29 @@ export class Stash {
     }
   }
 
-  // #sweep() -- the background tick. Skips while a previous prune is still in
-  // flight (a slow backend + short interval must not stack unbounded concurrent
-  // sweeps), and swallows any prune rejection: an async setInterval callback
-  // that rejects becomes an unhandledRejection, fatal on Node, and a janitor
-  // must never take the process down. This is the drift-rule-8 tier-3
-  // drop-silent sink; M6 replaces the silence with the 'sweepError' emit.
+  // #sweep() -- the background tick. #sweepInFlight is BOTH the overlap guard
+  // (a non-null value means a prune is still running, so this tick is a no-op --
+  // a slow backend + short interval must not stack unbounded concurrent sweeps)
+  // AND the promise close() awaits, so disposal is a real boundary: no
+  // sweep-side deletion lands after close() resolves. It is a settled-tracker
+  // (resolves on success OR failure, never rejects), so close() can await it
+  // without inheriting a sweep failure. The sweep swallows any prune rejection:
+  // an async setInterval callback that rejects becomes an unhandledRejection,
+  // fatal on Node, and a janitor must never take the process down. This is the
+  // drift-rule-8 tier-3 drop-silent sink; M6 replaces the silence with the
+  // 'sweepError' emit.
   async #sweep() {
-    if (this.#sweeping) return;
-    this.#sweeping = true;
+    if (this.#sweepInFlight !== null) return;
+    const work = this.prune();
+    this.#sweepInFlight = work.then(() => {}, () => {});
     try {
-      await this.prune();
+      await work;
     } catch { // drop-silent -- by design (allow:catch-return-swallow): a rejected
       // background sweep would become an unhandledRejection, fatal on Node, and a
       // janitor must never take the process down. M6 replaces this silence with
       // the 'sweepError' emit; vector 16 pins survival now.
     } finally {
-      this.#sweeping = false;
+      this.#sweepInFlight = null;
     }
   }
 
@@ -400,9 +406,10 @@ export class Stash {
    * janitor and only the janitor: a closed store still serves push, apply, and
    * the rest. `Stash` also implements `Symbol.asyncDispose` as an alias, so
    * `await using stash = new Stash(...)` clears the timer when the block exits,
-   * even on throw. Disposal is the real shutdown path -- the sweep timer is
-   * `unref()`'d so it never blocks process exit, but it keeps the `Stash`
-   * reachable until closed.
+   * even on throw. Disposal is a real boundary: `close()` also awaits a sweep
+   * already in flight, so no background deletion lands after it resolves.
+   * Disposal is the real shutdown path -- the sweep timer is `unref()`'d so it
+   * never blocks process exit, but it keeps the `Stash` reachable until closed.
    *
    * @example
    *   const stash = new Stash({ backend, sweepInterval: "5m" });
@@ -417,6 +424,11 @@ export class Stash {
       clearInterval(this.#sweepTimer);
       this.#sweepTimer = null;
     }
+    // Await a sweep already running so no sweep-side mutation lands after
+    // close() resolves. Captured first, since the sweep nulls it when it ends;
+    // the tracker never rejects, so this never throws.
+    const inFlight = this.#sweepInFlight;
+    if (inFlight !== null) await inFlight;
   }
 
   // Symbol.asyncDispose -- the `await using` alias for close() (SPEC.md 7.1).
