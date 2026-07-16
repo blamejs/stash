@@ -196,6 +196,8 @@ const VALID_ALLOW_CLASSES = {
   "inline-dynamic-import": 1,
   "dead-underscore-function": 1,
   "unimported-builtin-call": 1,
+  "path-reresolved-read": 1,
+  "constant-time-compare-short-circuited": 1,
 };
 
 // Drop matches suppressed by a file-level
@@ -452,6 +454,59 @@ test("fail-open-verify -- no catch returns a positive verdict", () => {
   }
   bad = _filterMarkers(bad, "fail-open-verify");
   _report("no fail-open verify shape in src/ (a catch that reports success)", bad);
+});
+
+// ---------------------------------------------------------------------------
+// (7a) constant-time-compare-short-circuited -- timing side-channel via &&/||
+// ---------------------------------------------------------------------------
+
+test("constant-time-compare-short-circuited -- no CT compare is short-circuited by &&/||", () => {
+  // reason: refs (capabilities) and digests both route their equality
+  // through the single timing-safe compare (ref.constantTimeEqual, which
+  // wraps node:crypto timingSafeEqual). Two such compares joined by && / ||
+  // short-circuit the second: when the first is false the second never
+  // runs, reopening the exact timing side-channel the compare exists to
+  // close. Evaluate each into a variable, THEN combine.
+  //
+  // Two passes, file-scoped. PASS 1 derives the constant-time token set --
+  // the frozen timingSafeEqual, the guard's exported constantTimeEqual, and
+  // the name of any local function whose body wraps either (so a renamed
+  // `_ctEq`-style delegate is recovered WITHOUT hardcoding its name). PASS 2
+  // fires on two CT-token CALLS joined by &&/|| within one expression,
+  // bounded away from ; { } so a wrapper DEFINITION and two separate
+  // statements combining already-evaluated vars do not match.
+  const bad = [];
+  for (const file of _srcFiles()) {
+    const rel = _relPath(file);
+    const raw = _read(file);
+    const stripped = _stripCommentsAndLiterals(raw);
+    if (!/\btimingSafeEqual\b/.test(stripped) && !/\bconstantTimeEqual\b/.test(stripped)) continue;
+
+    const toks = { timingSafeEqual: true, constantTimeEqual: true };
+    const wrapRe = /(?:function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)|(?:var|const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\s*)?\([^)]*\)\s*=>?)\s*\{[^{}]*(?:timingSafeEqual|constantTimeEqual)/g;
+    let wm;
+    while ((wm = wrapRe.exec(stripped))) { toks[wm[1] || wm[2]] = true; }
+    const alt = Object.keys(toks)
+      .sort((a, b) => b.length - a.length)
+      .map((t) => t.replace(/[$]/g, "\\$&"))
+      .join("|");
+    const pairRe = new RegExp(
+      "\\b(?:" + alt + ")\\s*\\([^;{}]*?\\)\\s*(?:&&|\\|\\|)\\s*[^;{}]*?\\b(?:" + alt + ")\\s*\\("
+    );
+
+    const lines = _lines(stripped);
+    for (let i = 0; i < lines.length; i++) {
+      if (pairRe.test(lines[i])) {
+        bad.push({
+          file: rel,
+          line: i + 1,
+          content: "two constant-time compares joined by &&/|| short-circuit the second (timing side-channel) -- evaluate each into a var, then combine: " + lines[i].trim().slice(0, 80),
+        });
+      }
+    }
+  }
+  const filtered = _filterMarkers(bad, "constant-time-compare-short-circuited");
+  _report("no constant-time compare is short-circuited by &&/|| in src/", filtered);
 });
 
 // ---------------------------------------------------------------------------
@@ -732,6 +787,29 @@ test("unimported-builtin-call -- no bare call to an unbound node builtin export"
   }
   bad = _filterMarkers(bad, "unimported-builtin-call");
   _report("every invoked node builtin export name is imported or locally bound", bad);
+});
+
+// (16) path-reresolved-read -- storage reads open an fd, never re-resolve a path
+// ---------------------------------------------------------------------------
+
+test("path-reresolved-read -- no path-based blob/sidecar read in src/", () => {
+  // reason: a stored file is read through a descriptor it opened and
+  // verified with fstat on that fd, never by handing a path to
+  // createReadStream / readFile a second time. A path passed to a read
+  // AFTER a separate stat / lstat check is re-resolved by the kernel when
+  // the read opens it, so a symlink or a different file swapped in between
+  // the check and the read is silently followed -- the time-of-check
+  // time-of-use class (CWE-367), and a symlink escape past the containment
+  // check. The FileHandle method forms (fh.createReadStream(), fh.readFile())
+  // read the already-open, already-verified descriptor and are the required
+  // shape; the free-function forms re-resolve the path. Anchored on the Node
+  // API names (a stable contract, like the timingSafeEqual / realpath
+  // guards), so it is rename-proof; the negative lookbehind keeps the method
+  // forms and identifier suffixes out.
+  const re = /(?<![.\w])(?:createReadStream|readFileSync|readFile)\s*\(/;
+  let bad = _scanLines(_srcFiles(), re, { prepare: _stripCommentsAndLiterals });
+  bad = _filterMarkers(bad, "path-reresolved-read");
+  _report("no path-based createReadStream/readFile in src/ (open an fd and read the handle -- CWE-367)", bad);
 });
 
 // ---------------------------------------------------------------------------
