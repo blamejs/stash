@@ -423,8 +423,8 @@ function fetchUnresolvedThreads(prNum) {
   return unresolvedThreads(nodes);
 }
 
-// reviewerSignalsReview(surfaces, headSha) -- pure: has the reviewer bot
-// signalled a review of the head? The bot has THREE signal forms and all
+// reviewerSignalsReview(surfaces, headSha, headTime) -- pure: has the reviewer
+// bot signalled a review of the head? The bot has THREE signal forms and all
 // must count, or the wait times out on the common (clean) case:
 //   (1) a formal review node whose reviewed commit is the head -- the form it
 //       posts WITH findings;
@@ -432,11 +432,19 @@ function fetchUnresolvedThreads(prNum) {
 //       with no review node when it finds nothing; and
 //   (3) a bare THUMBS_UP reaction by the bot on a `@codex review` trigger
 //       comment, with NO review node and NO clean-verdict comment at all --
-//       the bot's documented "no suggestions" signal. The release flow nudges
-//       (`@codex review`) for the current head, so a bot thumbs-up on that trigger is
-//       a review of the head. surfaces: { reviews:[{author,commit}], comments:
-//       [{author,body,reactions:[{content,login}]}] }.
-export function reviewerSignalsReview(surfaces, headSha) {
+//       the bot's documented "no suggestions" signal.
+// Forms (1) and (2) carry the head sha, so they self-bind to the head. A
+// reaction carries NO sha -- so form (3) must bind to the head by TIME, or a
+// stale thumbs-up on a prior head's trigger would clear the wait the instant a
+// fix or direct push made a new head that the bot has not yet re-reviewed.
+// headTime is the head commit's committedDate (ISO 8601); form (3) counts a bot
+// thumbs-up ONLY when its own `createdAt` is strictly after headTime. A push
+// creates the new head commit, so any pre-push reaction (the stale case)
+// predates headTime and is rejected. When headTime or the reaction's createdAt
+// is missing/unparseable the reaction is unbindable and does NOT count (fail
+// closed) -- the wait holds for a head-bound signal instead. surfaces:
+// { reviews:[{author,commit}], comments:[{author,body,reactions:[{content,login,createdAt}]}] }.
+export function reviewerSignalsReview(surfaces, headSha, headTime) {
   if (typeof headSha !== "string" || headSha.length < 7) {
     throw new TypeError("reviewerSignalsReview requires the head commit sha");
   }
@@ -447,15 +455,25 @@ export function reviewerSignalsReview(surfaces, headSha) {
   if (reviews.some((r) => r && isReviewBot(r.author) && r.commit === headSha)) return true;
   if (comments.some((c) => isReviewBot(c && c.author) &&
     typeof (c && c.body) === "string" && c.body.indexOf(headPrefix) !== -1)) return true;
-  // (3) The bot thumbs-up reaction to a `@codex review` trigger comment.
+  // (3) The bot thumbs-up reaction to a `@codex review` trigger comment, bound
+  // to the head by time: unbindable without a parseable head time.
+  const headMs = Date.parse(headTime);
+  if (!Number.isFinite(headMs)) return false;
   return comments.some((c) =>
     c && typeof c.body === "string" && c.body.indexOf("@codex review") !== -1 &&
-    Array.isArray(c.reactions) && c.reactions.some((rx) =>
-      rx && rx.content === "THUMBS_UP" && isReviewBot(rx.login)));
+    Array.isArray(c.reactions) && c.reactions.some((rx) => {
+      if (!rx || rx.content !== "THUMBS_UP" || !isReviewBot(rx.login)) return false;
+      const rxMs = Date.parse(rx.createdAt);
+      return Number.isFinite(rxMs) && rxMs > headMs;
+    }));
 }
 
 // reviewerReviewedHead(prNum, headSha) -- gather the review surfaces (reviews,
-// and issue comments WITH their reactions) and apply reviewerSignalsReview.
+// and issue comments WITH their reactions and reaction timestamps) plus the
+// head commit's committedDate, and apply reviewerSignalsReview. The committed
+// date head-binds the thumbs-up form; ghJson fails closed to null on a gh
+// error, so an unreadable commit time disables only that form (fail closed),
+// never clears the gate.
 function reviewerReviewedHead(prNum, headSha) {
   const slug = repoSlug();
   const reviews = (ghJson(["api", "graphql", "-f",
@@ -467,15 +485,21 @@ function reviewerReviewedHead(prNum, headSha) {
   const comments = (ghJson(["api", "graphql", "-f",
     "query=query { repository(owner:\"" + slug.owner + "\",name:\"" + slug.name +
     "\") { pullRequest(number:" + prNum + ") { comments(last:60) { nodes { " +
-    "body author{login} reactions(first:30){ nodes { content user{login} } } } } } } }",
+    "body author{login} reactions(first:30){ nodes { content createdAt user{login} } } } } } } }",
     "--jq", ".data.repository.pullRequest.comments.nodes"]) || [])
     .map((c) => ({
       author: c && c.author && c.author.login,
       body: c && c.body,
       reactions: ((c && c.reactions && c.reactions.nodes) || [])
-        .map((rx) => ({ content: rx && rx.content, login: rx && rx.user && rx.user.login })),
+        .map((rx) => ({
+          content: rx && rx.content,
+          login: rx && rx.user && rx.user.login,
+          createdAt: rx && rx.createdAt,
+        })),
     }));
-  return reviewerSignalsReview({ reviews, comments }, headSha);
+  const commit = ghJson(["api", "repos/" + slug.owner + "/" + slug.name + "/commits/" + headSha]);
+  const headTime = commit && commit.commit && commit.commit.committer && commit.commit.committer.date;
+  return reviewerSignalsReview({ reviews, comments }, headSha, headTime);
 }
 
 // waitForReviewOnHead(branch, prNum, headSha) -- block until the reviewer has

@@ -447,6 +447,12 @@ test("cmdTag pins the tag version + commit from the recorded state, not the post
 
 const RHEAD = "a1b2c3d4e5f60718293645546372819a0bcdef12";
 const RBOT = "chatgpt-codex-connector[bot]"; // allow:ai-attribution -- reviewer login fixture
+// The head commit's committedDate, and reactions before/after it. The thumbs-up
+// form binds to the head by time: only a reaction strictly after HEAD_TIME
+// reviews this head; a reaction before it is a stale review of a prior head.
+const HEAD_TIME = "2026-07-16T12:00:00Z";
+const RX_FRESH = "2026-07-16T12:05:00Z"; // after the head commit -- reviews it
+const RX_STALE = "2026-07-16T11:00:00Z"; // before the head commit -- prior head
 
 test("reviewerSignalsReview: a review node on the head counts (findings form)", () => {
   assert.equal(reviewerSignalsReview({ reviews: [{ author: RBOT, commit: RHEAD }] }, RHEAD), true);
@@ -458,33 +464,71 @@ test("reviewerSignalsReview: a clean-verdict comment citing the head counts", ()
   }, RHEAD), true);
 });
 
-test("reviewerSignalsReview: a bare THUMBS_UP on the @codex review trigger counts", () => {
-  // The bot posts NO review node and NO comment -- only a thumbs-up reaction. This
-  // is the case that otherwise hangs the wait until it times out.
+test("reviewerSignalsReview: a bot THUMBS_UP posted AFTER the head counts", () => {
+  // The bot posts NO review node and NO comment -- only a thumbs-up reaction,
+  // and it lands after the head commit. This is the case that otherwise hangs
+  // the wait until it times out.
   assert.equal(reviewerSignalsReview({
     comments: [{
       author: "release-operator",
       body: "@codex review",
-      reactions: [{ content: "THUMBS_UP", login: RBOT }],
+      reactions: [{ content: "THUMBS_UP", login: RBOT, createdAt: RX_FRESH }],
     }],
+  }, RHEAD, HEAD_TIME), true);
+});
+
+test("reviewerSignalsReview: a stale bot THUMBS_UP predating the head does NOT count", () => {
+  // The reported P1: a clean thumbs-up on a prior head's trigger must not clear
+  // the wait after a fix/direct push makes a new head the bot has not reviewed.
+  assert.equal(reviewerSignalsReview({
+    comments: [{
+      author: "release-operator",
+      body: "@codex review",
+      reactions: [{ content: "THUMBS_UP", login: RBOT, createdAt: RX_STALE }],
+    }],
+  }, RHEAD, HEAD_TIME), false);
+});
+
+test("reviewerSignalsReview: a THUMBS_UP is unbindable (does NOT count) without a head time", () => {
+  // A reaction carries no sha; absent a head time it cannot be bound to the
+  // head, so it fails closed rather than clearing the wait on a stale reaction.
+  assert.equal(reviewerSignalsReview({
+    comments: [{ author: "op", body: "@codex review", reactions: [{ content: "THUMBS_UP", login: RBOT, createdAt: RX_FRESH }] }],
+  }, RHEAD), false);
+  assert.equal(reviewerSignalsReview({
+    comments: [{ author: "op", body: "@codex review", reactions: [{ content: "THUMBS_UP", login: RBOT, createdAt: RX_FRESH }] }],
+  }, RHEAD, "not-a-date"), false);
+});
+
+test("reviewerSignalsReview: a THUMBS_UP with no reaction timestamp does NOT count", () => {
+  assert.equal(reviewerSignalsReview({
+    comments: [{ author: "op", body: "@codex review", reactions: [{ content: "THUMBS_UP", login: RBOT }] }],
+  }, RHEAD, HEAD_TIME), false);
+});
+
+test("reviewerSignalsReview: a head-bound review node counts even with no head time", () => {
+  // Forms (1) and (2) self-bind via the head sha and never need a head time.
+  assert.equal(reviewerSignalsReview({ reviews: [{ author: RBOT, commit: RHEAD }] }, RHEAD), true);
+  assert.equal(reviewerSignalsReview({
+    comments: [{ author: RBOT, body: "Reviewed `" + RHEAD.slice(0, 10) + "` -- no issues." }],
   }, RHEAD), true);
 });
 
 test("reviewerSignalsReview: no signal at all stays false (keep waiting)", () => {
-  assert.equal(reviewerSignalsReview({}, RHEAD), false);
-  assert.equal(reviewerSignalsReview({ comments: [{ author: "someone", body: "hi" }] }, RHEAD), false);
+  assert.equal(reviewerSignalsReview({}, RHEAD, HEAD_TIME), false);
+  assert.equal(reviewerSignalsReview({ comments: [{ author: "someone", body: "hi" }] }, RHEAD, HEAD_TIME), false);
 });
 
-test("reviewerSignalsReview: a THUMBS_UP from a non-reviewer does not count", () => {
+test("reviewerSignalsReview: a fresh THUMBS_UP from a non-reviewer does not count", () => {
   assert.equal(reviewerSignalsReview({
-    comments: [{ author: "op", body: "@codex review", reactions: [{ content: "THUMBS_UP", login: "randomuser" }] }],
-  }, RHEAD), false);
+    comments: [{ author: "op", body: "@codex review", reactions: [{ content: "THUMBS_UP", login: "randomuser", createdAt: RX_FRESH }] }],
+  }, RHEAD, HEAD_TIME), false);
 });
 
 test("reviewerSignalsReview: a bot THUMBS_UP on a NON-trigger comment does not count", () => {
   assert.equal(reviewerSignalsReview({
-    comments: [{ author: "op", body: "nice work", reactions: [{ content: "THUMBS_UP", login: RBOT }] }],
-  }, RHEAD), false);
+    comments: [{ author: "op", body: "nice work", reactions: [{ content: "THUMBS_UP", login: RBOT, createdAt: RX_FRESH }] }],
+  }, RHEAD, HEAD_TIME), false);
 });
 
 test("reviewerSignalsReview: a missing head sha throws instead of matching everything", () => {
