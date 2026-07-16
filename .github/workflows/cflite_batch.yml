@@ -1,0 +1,80 @@
+# ClusterFuzzLite batch fuzzing: a scheduled long run over the whole
+# corpus, followed by corpus pruning (batch fuzzing without pruning grows
+# the corpus without bound). Crashes and the grown corpus persist as run
+# artifacts; PR runs reuse them through the same filestore.
+#
+# The fuzzing engine exists only inside the fuzz container; the library
+# keeps zero dependencies, dev included, and nothing under
+# .clusterfuzzlite/ ships in the npm tarball.
+
+name: ClusterFuzzLite batch fuzzing
+
+on:
+  schedule:
+    - cron: "43 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cflite-batch-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  batch-fuzzing:
+    name: Batch fuzzing (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read # the filestore lists and downloads corpus artifacts from prior runs
+    strategy:
+      fail-fast: false
+      matrix:
+        # jazzer.js targets carry no native code; "none" is the oss-fuzz
+        # sanitizer for javascript projects.
+        sanitizer: [none]
+    steps:
+      - name: Build fuzzers (${{ matrix.sanitizer }})
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: javascript
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: ${{ matrix.sanitizer }}
+
+      - name: Run fuzzers (${{ matrix.sanitizer }})
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 3600
+          mode: "batch"
+          sanitizer: ${{ matrix.sanitizer }}
+
+  corpus-pruning:
+    name: Corpus pruning
+    needs: batch-fuzzing
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read # the filestore lists and downloads corpus artifacts from prior runs
+    steps:
+      - name: Build fuzzers
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: javascript
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: none
+
+      - name: Prune corpus
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 600
+          mode: "prune"
+          sanitizer: none

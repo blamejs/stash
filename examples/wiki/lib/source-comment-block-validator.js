@@ -256,6 +256,19 @@ export function validate(config) {
   var findings = [];
   var docs = parser.parseTree(libDir);
 
+  // An empty parse cannot be a pass: with zero documented files every
+  // downstream check is vacuous, so a wrong libDir (or a tree whose
+  // @module/@primitive blocks were all deleted) would green the gate
+  // while the wiki silently renders nothing.
+  if (Object.keys(docs).length === 0) {
+    findings.push({
+      kind: "coverage",
+      file: String(libDir),
+      msg: "no documented source files found under libDir -- nothing was validated",
+    });
+    return findings;
+  }
+
   var source_by_file = {};
   Object.keys(docs).forEach(function (file) {
     try { source_by_file[file] = fs.readFileSync(file, "utf8"); } catch (_e) { source_by_file[file] = ""; }
