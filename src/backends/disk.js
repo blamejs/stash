@@ -58,6 +58,21 @@ function _openTamper(err) {
   return err && (err.code === "ELOOP" || err.code === "EISDIR");
 }
 
+// descriptorMatchesName(opened, named) -- does an open descriptor still
+// speak for the in-root name it was opened through? `opened` is the fstat
+// of the descriptor (the object the read will actually draw from); `named`
+// is a no-follow lstat of the path. They agree only for an untampered
+// regular file: if the open traversed a symlink, `named` is the link and
+// `opened` is its target; if the name was swapped after the open, `named`
+// is the new object and `opened` is the original. Either way the dev+ino
+// pair differs, and a symlinked name is rejected outright. This is the
+// no-follow guard on a platform without O_NOFOLLOW, where the open cannot
+// refuse a symlink itself -- exported so its contract is pinned directly.
+export function descriptorMatchesName(opened, named) {
+  return !named.isSymbolicLink() &&
+    named.dev === opened.dev && named.ino === opened.ino;
+}
+
 /**
  * @primitive  stash.backends.DiskBackend
  * @signature  new DiskBackend(opts) -> DiskBackend
@@ -148,12 +163,24 @@ export class DiskBackend {
   // #openStored(path, onAbsent, damaged) -> FileHandle. The read discipline
   // in one place: open the file (O_NOFOLLOW refuses a symlink at open on
   // POSIX), fstat the descriptor to confirm a regular file, and -- only
-  // where the platform lacks O_NOFOLLOW -- lstat the final component so a
-  // symlink is refused there too. The open already bound the descriptor, so
-  // that lstat only ever REJECTS; it never redirects the read, which draws
+  // where the platform lacks O_NOFOLLOW -- cross-check the descriptor's
+  // identity against the name. The open already bound the descriptor, so the
+  // check can only ever REJECT; it never redirects the read, which draws
   // from the returned handle. ENOENT is the caller's chosen absence
-  // (`onAbsent()`); a non-regular or symlinked name is `damaged`. The caller
-  // owns closing the handle.
+  // (`onAbsent()`); a non-regular, symlinked, or swapped name is `damaged`.
+  // The caller owns closing the handle.
+  //
+  // On a platform without O_NOFOLLOW the open follows a symlink, so a
+  // path-name lstat AFTER the open is a check-then-use of its own: an
+  // attacker who swaps the symlink for a regular in-root file between the
+  // open and the lstat passes the check while the descriptor stays bound to
+  // the outside target. The identity of the OPENED OBJECT is the only thing
+  // the swap cannot change -- fstat reports the descriptor's dev+ino, and a
+  // no-follow lstat of the name reports what the name points at NOW. If the
+  // open traversed a symlink they name different objects; if the name was
+  // swapped after the open they name different objects; only an untampered
+  // regular file makes fstat and lstat agree. Comparing them binds the
+  // verdict to the descriptor, closing the window O_NOFOLLOW closes on POSIX.
   async #openStored(path, onAbsent, damaged) {
     let fh;
     try {
@@ -164,9 +191,21 @@ export class DiskBackend {
       throw err;
     }
     try {
-      if (!(await fh.stat()).isFile()) throw new IntegrityError(damaged);
-      if (SYMLINK_GUARD_NEEDED && (await lstat(path)).isSymbolicLink()) {
-        throw new IntegrityError(damaged);
+      const opened = await fh.stat();
+      if (!opened.isFile()) throw new IntegrityError(damaged);
+      if (SYMLINK_GUARD_NEEDED) {
+        let named;
+        try {
+          named = await lstat(path);
+        } catch (err) {
+          // The name vanished or became unreadable after the open -- it no
+          // longer vouches for the descriptor, so refuse rather than serve
+          // an unverifiable handle.
+          throw _absent(err) ? new IntegrityError(damaged) : err;
+        }
+        if (!descriptorMatchesName(opened, named)) {
+          throw new IntegrityError(damaged);
+        }
       }
     } catch (err) {
       await fh.close();

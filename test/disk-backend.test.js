@@ -22,7 +22,7 @@ import { open } from "node:fs/promises";
 import { join } from "node:path";
 
 import { Stash, RefNotFound, InvalidRef, IntegrityError } from "../src/index.js";
-import { DiskBackend } from "../src/backends/disk.js";
+import { DiskBackend, descriptorMatchesName } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
 import { freshScratchDir, cleanupScratch } from "./_scratch.js";
 
@@ -285,6 +285,41 @@ suite("disk: fd-based read discipline (CWE-367)", () => {
       open(guarded, constants.O_RDONLY | constants.O_NOFOLLOW),
       (err) => err.code === "ELOOP"
     );
+  });
+
+  // The no-follow guard for a platform WITHOUT O_NOFOLLOW (Windows): the
+  // open follows a swapped symlink, so a post-open lstat of the NAME is a
+  // check of its own -- an attacker who swaps the symlink for a regular
+  // in-root file between the open and the lstat passes an isSymbolicLink
+  // check while the descriptor stays bound to the outside target. The fix
+  // binds the verdict to the descriptor's identity (fstat) against the
+  // name's current identity (no-follow lstat); these vectors pin that
+  // comparison's contract directly, so they hold on every platform
+  // regardless of symlink-creation privilege.
+  test("descriptorMatchesName: an untampered regular file matches (fstat == lstat, not a link)", () => {
+    const stat = { dev: 42, ino: 1001, isSymbolicLink: () => false };
+    assert.equal(descriptorMatchesName(stat, stat), true);
+  });
+
+  test("descriptorMatchesName: a symlinked name is refused even when dev+ino coincide", () => {
+    const opened = { dev: 42, ino: 1001, isSymbolicLink: () => false };
+    const named = { dev: 42, ino: 1001, isSymbolicLink: () => true };
+    assert.equal(descriptorMatchesName(opened, named), false);
+  });
+
+  test("descriptorMatchesName: a swap after open (different ino) is refused", () => {
+    // fstat: the object the open bound (the outside symlink target);
+    // lstat: the regular in-root file swapped in afterward. Same device,
+    // different inode -> the descriptor no longer speaks for the name.
+    const opened = { dev: 42, ino: 1001, isSymbolicLink: () => false };
+    const swappedIn = { dev: 42, ino: 2002, isSymbolicLink: () => false };
+    assert.equal(descriptorMatchesName(opened, swappedIn), false);
+  });
+
+  test("descriptorMatchesName: a cross-device identity is refused (different dev)", () => {
+    const opened = { dev: 42, ino: 1001, isSymbolicLink: () => false };
+    const otherVolume = { dev: 99, ino: 1001, isSymbolicLink: () => false };
+    assert.equal(descriptorMatchesName(opened, otherVolume), false);
   });
 
   // Shipped path: a symlinked sidecar is refused, never followed to
