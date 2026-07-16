@@ -177,8 +177,6 @@ jobs:
           push: false
           tags: |
             ${{ env.IMAGE }}:${{ steps.tags.outputs.scan_tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Trivy scan -- visibility (all severities, no fail)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
@@ -227,8 +225,6 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           provenance: true
           sbom: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Sign image with cosign (keyless, GitHub OIDC)
         if: ${{ !inputs.dry_run && steps.tags.outputs.is_tag == 'true' && steps.push.outputs.digest }}
