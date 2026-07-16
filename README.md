@@ -53,11 +53,17 @@ Requires Node `>= 24.18.0`.
 
 ## What ships today
 
-The M1 + M2 + M3 surface (see `SPEC.md` section 12 for the full delivery plan):
+The M1 + M2 + M3 + M4 surface (see `SPEC.md` section 12 for the full delivery plan):
 
 - `push` / `apply` / `show` / `list` / `drop` / `clear` over either backend,
   with size and `sha256` digest computed as the bytes stream through and
   digest-verified reads.
+- **Limits**: `maxSize` bounds each entry and is checked as the bytes stream, so
+  an oversized or unbounded source aborts with `SizeExceeded` at the limit
+  rather than filling the disk; `maxEntries` and `maxTotal` bound the whole
+  store and refuse an over-budget push with `StashFull` without evicting
+  anything already stored. Expired-but-unswept entries are reaped before the
+  store is judged full, and every rejected push leaves no partial behind.
 - **Expiry**: a construct-time `ttl` default (`'24h'`, `'7d'`, ms, or `null`),
   overridable per `push`. An expired entry reads back as `RefNotFound` and is
   dropped in passing, before any sweep. `list()` hides expired entries by
@@ -79,14 +85,14 @@ The M1 + M2 + M3 surface (see `SPEC.md` section 12 for the full delivery plan):
   frozen codes).
 - Ref generation and whitelist validation.
 
-Spec'd options whose milestone has not shipped (`maxSize`, `maxEntries`,
-`onPopFailure`, `tombstoneTtl`, ...) **throw at construction** rather than
-sitting silently unenforced -- a security option that is accepted but ignored
-would be a fail-open default.
+Spec'd options whose milestone has not shipped (`onPopFailure`, `tombstoneTtl`,
+`claimTimeout`) **throw at construction** rather than sitting silently
+unenforced -- a security option that is accepted but ignored would be a
+fail-open default.
 
-Next up, in order: mid-stream limits, the claim/commit `pop` cycle with read
-budgets, audit (`verify`), and the replication primitives (`store`,
-tombstones). `ROADMAP.md` tracks status; `SPEC.md` is the contract.
+Next up, in order: the claim/commit `pop` cycle with read budgets, audit
+(`verify`), and the replication primitives (`store`, tombstones). `ROADMAP.md`
+tracks status; `SPEC.md` is the contract.
 
 ## Run it sandboxed
 

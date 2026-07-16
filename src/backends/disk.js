@@ -429,4 +429,35 @@ export class DiskBackend {
     }
     return out;
   }
+
+  // stats() -> { entries, bytes, claimed }. The stash-wide limit pre-check reads
+  // this aggregate rather than parsing every sidecar: `entries` is the sidecar
+  // count (`.tmp` excluded), `bytes` the sum of blob sizes by lstat, `claimed`
+  // the count in claims/ (0 until the claim machinery lands, M5). Loud, not
+  // lossy: a foreign name in meta/ fails the same way list() does. A blob that
+  // vanished between the meta readdir and its lstat contributes nothing rather
+  // than failing -- a concurrent removal, the same tolerance list() holds.
+  async stats() {
+    const metaDir = await this.#containedDir("meta");
+    const blobDir = await this.#containedDir("blobs");
+    const claimsDir = await this.#containedDir("claims");
+    let entries = 0;
+    let bytes = 0;
+    for (const name of await readdir(metaDir)) {
+      if (name.endsWith(".tmp")) continue;
+      const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
+      if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
+      entries += 1;
+      try {
+        bytes += (await lstat(join(blobDir, id))).size;
+      } catch (err) {
+        _absent(err); // ENOENT: the blob vanished mid-scan -> count nothing; any other fault is loud
+      }
+    }
+    let claimed = 0;
+    for (const name of await readdir(claimsDir)) {
+      if (!name.endsWith(".tmp")) claimed += 1;
+    }
+    return { entries, bytes, claimed };
+  }
 }

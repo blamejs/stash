@@ -80,9 +80,11 @@ exception, a hang -- is reported as a crash. The harness lives in
 - **Treat `StashError` codes as the branch surface.** Messages may change
   between patches; codes are frozen (see SPEC.md section 10).
 - **Size the store's limits before exposing `push` to any network path.**
-  `maxSize` / `maxEntries` exist so a request flood becomes a loud `StashFull`
-  instead of a full disk (enforcement ships at the M4 milestone -- until then,
-  the constructor refuses the options rather than silently not enforcing them).
+  `maxSize` bounds each entry mid-stream and `maxEntries` / `maxTotal` bound the
+  whole store, so a request flood -- or a single unbounded upload -- becomes a
+  loud `SizeExceeded` / `StashFull` instead of a full disk. An oversized source
+  is cut off at the limit, not written and then measured, and a rejected push
+  leaves no partial behind.
 
 ## What StashJS deliberately does not do
 

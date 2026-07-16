@@ -102,4 +102,15 @@ export class MemoryBackend {
     for (const held of this.#entries.values()) out.push(structuredClone(held.entry));
     return out;
   }
+
+  // stats() -> { entries, bytes, claimed }. The stash-wide limit pre-check reads
+  // this aggregate rather than parsing every entry: `entries` is the live count,
+  // `bytes` the sum of stored blob sizes, `claimed` is 0 until the claim
+  // machinery lands (M5). Counts every stored entry, expired or not -- a backend
+  // never interprets expiry; the policy layer prunes before it rejects.
+  async stats() {
+    let bytes = 0;
+    for (const held of this.#entries.values()) bytes += held.entry.size;
+    return { entries: this.#entries.size, bytes, claimed: 0 };
+  }
 }

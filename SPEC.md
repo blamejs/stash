@@ -1,116 +1,108 @@
 # StashJS — Specification
 
-**StashJS is a zero-dependency, ephemeral, crypto-agnostic content store for Node.js.**
+StashJS is a zero-dependency, ephemeral, crypto-agnostic content store for Node.js. You hand
+it bytes and get back a ref, and you can read those bytes back once before they're deleted.
 
-You put bytes in. You get a ref back. You take the bytes out once, and they're gone.
-
-It is the "bytes at rest" primitive of the suite, paired with Blamejs ("bytes in motion").
-HermitStash is the first consumer. StashJS is a shelf; it has no opinion about what is on it.
+It stores data at rest and nothing more. The calling application hands it opaque bytes;
+StashJS never inspects the contents. Anything that needs to understand the data — encryption,
+indexing, parsing — is the caller's job.
 
 ---
 
 ## 1. The one rule
 
-**StashJS can't decrypt anything. There's nowhere in it to put a key.**
+StashJS can't decrypt anything, because it has nowhere to put a key. No method takes a key,
+nothing in the source imports a cipher, and there is no `decrypt`, `secret`, or `passphrase`
+option.
 
-There is no key parameter on any method. There is no cipher import anywhere in the source
-tree. There is no `decrypt` option, no `secret`, no `passphrase`. Not because it would be
-insecure, but because the *absence of the capability* is the product.
+This is deliberate, and it's the main reason the library exists. If the code has no way to
+decrypt, an operator who is pressured to produce plaintext has nothing to produce: no key is
+stored anywhere, and there is no decryption path to run. That only works if the capability is
+genuinely missing, so it has to be absent by construction rather than turned off by a flag.
+Encryption is the caller's responsibility — it's the layer that has a threat model.
 
-A store that chooses not to decrypt is a promise. A store with nowhere for a key to live is
-an architecture. When the threat model is "someone compels the operator," only the second one
-survives. Encryption is HermitStash's job, because HermitStash is the thing with a threat
-model. StashJS is a shelf.
+`node:crypto` is allowed for hashing and random IDs only: `createHash`, `randomBytes`, and
+`timingSafeEqual`. Never `createCipheriv` or `createDecipheriv`.
 
-`node:crypto` may be imported for **hashing and random ID generation only** —
-`createHash`, `randomBytes`, `timingSafeEqual`. Never `createCipheriv` or `createDecipheriv`.
-
-If a task seems to require StashJS to understand the contents of a blob, the task is wrong.
-Stop and ask.
+If a feature seems to require StashJS to understand what's inside a blob, it belongs somewhere
+else. Stop and ask.
 
 ---
 
 ## 2. Runtime and non-negotiable constraints
 
-- **Node 24.18.0.** Pinned to match Blamejs. `"engines": { "node": ">=24.18.0" }`, and a
-  `.node-version` / `.nvmrc` containing `24.18.0`. Target it as a floor, not a ceiling —
-  no polyfills, no compat shims, no `if (nodeVersion < x)` branches for older runtimes.
-- **Zero dependencies.** Not one runtime dependency. Not one dev dependency. Node builtins
-  only. Tests use `node:test` and `node:assert`. If a task cannot be completed without adding
-  a package, stop and ask rather than adding it.
-- **ESM only.** `"type": "module"`. Plain JavaScript. No TypeScript, no build step, no
-  transpilation, no bundler. Types, if ever, ship as hand-written `.d.ts` — not now.
-- **Streaming-first.** No method may buffer an entire blob in memory. Size limits are enforced
-  *mid-stream*, not by reading the file to find out how big it was.
+- **Node 24.18.0.** `"engines": { "node": ">=24.18.0" }`, with a `.node-version` / `.nvmrc` of
+  `24.18.0`. Treat this as a floor to build against: no polyfills, no compatibility shims, no
+  `if (nodeVersion < x)` branches for older runtimes.
+- **Zero dependencies**, runtime and dev. Node builtins only; tests use `node:test` and
+  `node:assert`. If something can't be done without adding a package, stop and ask.
+- **ESM only.** `"type": "module"`, plain JavaScript. No TypeScript, no build step, no
+  bundler. If type definitions are ever needed they ship as hand-written `.d.ts`, but not now.
+- **Streaming-first.** No method buffers an entire blob in memory. Size limits are checked as
+  the bytes pass, not by loading the whole blob to measure it.
 
 ### 2.1 Permission model posture
 
-The Node permission model went stable in 23.5, so on 24.18.0 it's `--permission`, not
-`--experimental-permission`. StashJS should be designed to run cleanly under:
+The Node permission model went stable in 23.5, so on 24.18.0 the flag is `--permission`, not
+`--experimental-permission`. StashJS should run cleanly under:
 
 ```
 node --permission --allow-fs-read=./.stash/* --allow-fs-write=./.stash/* app.js
 ```
 
-This is the same argument as §1, enforced by the runtime instead of by discipline: the process
-holding the blobs can be locked to the directory holding the blobs and nothing else. A
-compromised dependency elsewhere in the consumer's tree cannot read the stash, and StashJS
-cannot read anything else.
+This is §1 again, enforced by the runtime instead of by discipline: the process that holds the
+blobs is confined to the directory that holds them. A compromised dependency elsewhere in the
+application can't read the stash, and StashJS can't read anything outside its root.
 
 Design implications, all mandatory:
 
-- **No child processes, no worker threads, no native addons, no WASI.** Each would need its own
-  `--allow-*` grant and each widens the sandbox. StashJS needs none of them.
-- **Symlinks are followed even outside granted paths** — this is a documented limitation of the
-  permission model, not a bug we can wait out. So the DiskBackend must do its own containment
-  check (§9). The sandbox does not do it for us.
-- **Existing file descriptors bypass the model.** Never accept an fd as an input. Paths only.
-- Do not call `process.permission.has()` to branch behavior. If the grant is wrong, let the
-  `ERR_ACCESS_DENIED` surface. A library that silently degrades when sandboxed is worse than
-  one that fails loudly.
-- `--permission` in 24.x does **not** gate the network. Do not claim in the README that it
-  does. StashJS opens no sockets regardless, which is the actual guarantee.
+- **No child processes, no worker threads, no native addons, no WASI.** Each needs its own
+  `--allow-*` grant and widens the sandbox, and StashJS needs none of them.
+- **Symlinks are followed even outside granted paths.** This is a documented limitation of the
+  permission model, so the DiskBackend has to do its own containment check (§9); the sandbox
+  won't do it.
+- **Existing file descriptors bypass the model.** Never accept an fd as input — paths only.
+- Don't call `process.permission.has()` to branch behavior. If a grant is wrong, let the
+  `ERR_ACCESS_DENIED` surface rather than degrading quietly.
+- `--permission` in 24.x does **not** gate the network. Don't claim in the README that it does.
+  StashJS opens no sockets in any case, which is the guarantee it can actually make.
 
-Ship the flags in `examples/` and in the README. It's the cheapest security win in the project
-and most consumers won't know it exists.
+Ship the flags in `examples/` and the README. It's a large security win for almost no effort,
+and most callers won't know the option exists.
 
 ---
 
 ## 3. Do not build these
 
-This section is load-bearing. Each of these will feel helpful and is wrong.
+Each of these will look like a helpful addition and is a mistake.
 
 - **No encryption.** See §1.
-- **No content addressing / dedup.** Refs are random, not content hashes. Reasoning in §5 —
-  read it before "improving" this.
-- **No compression.** The payload is ciphertext. It will not compress, and compressing before
-  encryption is a CRIME/BREACH-class leak. Not our layer either way.
-- **No `node:sqlite` index.** This one is new and will be tempting: it's a builtin, so it does
-  not violate §2's zero-dependency rule on a technicality. Reject it anyway. It's still
-  experimental on 24.x, sidecar files already win on crash-safety (§9), and — decisively — the
-  permission model does not gate filesystem access made through `node:sqlite`. Adopting it
-  would punch a hole straight through §2.1. The one builtin that could plausibly earn its way
-  in is the one that quietly disables the sandbox.
-- **No mimetype sniffing, no content inspection, no thumbnailing, no virus scanning.** Opaque
-  bytes.
-- **No HTTP server, no routes, no multipart parsing.** That's HermitStash.
-- **No cloud backends.** Disk and memory. That's it for v1.
-- **No eviction.** lru-cache and ttl-set evict to make room, and it's the right call for a
-  cache: cache entries are hints. Stash entries are promises. A store that silently destroys
-  the oldest entry when full turns a push flood into an attack on other people's data — for a
-  whistleblower drop, that's a denial-of-evidence primitive. When full, `push` fails loudly
-  with `StashFull`. The rejection is the feature.
-- **No `touch()` / TTL extension / metadata mutation.** See the monotone rule (§4.2).
-- **No namespaces.** keyv-style logical partitions inside one store add key-prefix machinery
-  for something two `Stash` instances with two roots already do with zero magic.
-- **No sync transport, no oplog.** Replication support is §4.4's tombstones and `store()` —
-  the wire, the schedule, and the topology belong to the consumer. And no change journal:
-  full-scan anti-entropy over `list()` + `tombstones()` is cheap at `maxEntries` scale, while
-  a journal is exactly the kind of central mutable file the sidecar design (§9) exists to
-  avoid.
-- **No logging of refs or metadata values.** A ref is a capability. A ref in a log file is a
+- **No content addressing or dedup.** Refs are random, not content hashes. §5 explains why;
+  read it before changing this.
+- **No compression.** The payload is ciphertext, which won't compress, and compressing before
+  encryption is a CRIME/BREACH-class leak. It isn't StashJS's layer regardless.
+- **No `node:sqlite` index.** Tempting because it's a builtin, so it technically satisfies §2's
+  zero-dependency rule. Reject it anyway: it's still experimental on 24.x, sidecar files are
+  already crash-safe (§9), and the permission model does not gate filesystem access made
+  through `node:sqlite`, so adopting it would open a hole in §2.1.
+- **No mimetype sniffing, content inspection, thumbnailing, or virus scanning.** The bytes are
+  opaque.
+- **No HTTP server, routes, or multipart parsing.** That belongs to the caller.
+- **No cloud backends.** Disk and memory only in v1.
+- **No eviction.** A cache can evict to make room because its entries are disposable hints; a
+  stash entry is a commitment the caller was handed. A store that silently dropped the oldest
+  entry when full would turn a flood of pushes into a way to delete other people's data. When
+  full, `push` fails with `StashFull` and destroys nothing.
+- **No `touch()`, TTL extension, or metadata mutation.** See the monotone rule (§4.2).
+- **No namespaces.** Logical partitions inside one store add key-prefix machinery for something
+  two `Stash` instances with two roots already do without it.
+- **No sync transport or oplog.** Replication support is limited to §4.4's tombstones and
+  `store()`; the wire format, schedule, and topology belong to the caller. No change journal
+  either — full-scan anti-entropy over `list()` + `tombstones()` is cheap at `maxEntries`
+  scale, and a journal is the kind of central mutable file the sidecar design (§9) avoids.
+- **No logging of refs or metadata values.** A ref is a capability, so a ref in a log is a
   leaked capability. Log counts and error codes, never identifiers or `meta` contents.
-- **No telemetry, no analytics, no phoning home.**
+- **No telemetry, analytics, or phoning home.**
 
 ---
 
@@ -136,29 +128,28 @@ const stash = new Stash({
 | Method | Returns | Notes |
 |---|---|---|
 | `push(source, opts?)` | `Promise<string>` (ref) | `source`: `Buffer \| string \| Readable \| AsyncIterable`. `opts`: `{ ttl, meta, reads }` |
-| `store(entry, source)` | `Promise<boolean>` | Replication insert (§4.4): caller supplies the full `Entry`, digest verified in-stream. `false` = refused or no-op. |
-| `pop(ref)` | `Promise<Readable>` | **Destructive.** Claims, streams, deletes on successful drain. Ignores any read budget — pop is always terminal. |
-| `apply(ref)` | `Promise<Readable>` | Non-destructive — unless the entry carries a read budget (§4.1). Digest-verified. |
-| `show(ref)` | `Promise<Entry>` | Metadata only. Never contents. |
-| `has(ref)` | `Promise<boolean>` | Existence check without the try/catch ceremony of `show`. Expired = `false`. |
-| `list(opts?)` | `Promise<Entry[]>` | Metadata only. `opts`: `{ includeExpired }` |
-| `tombstones()` | `Promise<Tombstone[]>` | `{ id, destroyedAt, cause }[]` — the graves, for reconciliation. |
-| `drop(ref)` | `Promise<boolean>` | Delete without reading. `false` if absent. |
-| `clear()` | `Promise<number>` | Drop everything. Returns count. |
-| `prune()` | `Promise<number>` | Drop expired only. Returns count. |
-| `stats()` | `Promise<Stats>` | `{ entries, bytes, claimed }` — aggregates only, never refs. |
-| `verify(opts?)` | `Promise<Report>` | Audit: digest-checks blobs, finds orphaned `.tmp`/meta/blob halves, stale claims. Dry-run by default; `{ repair: true }` removes what it condemns. |
+| `store(entry, source)` | `Promise<boolean>` | Replication insert (§4.4): the caller supplies the full `Entry`, and the digest is verified as the bytes stream. `false` means the write was refused or was a no-op. |
+| `pop(ref)` | `Promise<Readable>` | Destructive: claims the entry, streams it, and deletes it once the stream drains. Ignores any read budget; a pop is always terminal. |
+| `apply(ref)` | `Promise<Readable>` | Non-destructive, unless the entry carries a read budget (§4.1). Digest-verified. |
+| `show(ref)` | `Promise<Entry>` | Metadata only, never the contents. |
+| `has(ref)` | `Promise<boolean>` | Existence check without the try/catch that `show` needs. An expired entry reads as `false`. |
+| `list(opts?)` | `Promise<Entry[]>` | Metadata only. `opts`: `{ includeExpired }`. |
+| `tombstones()` | `Promise<Tombstone[]>` | `{ id, destroyedAt, cause }[]`, for reconciliation. |
+| `drop(ref)` | `Promise<boolean>` | Delete without reading. `false` if the ref names nothing. |
+| `clear()` | `Promise<number>` | Delete everything; returns the count. |
+| `prune()` | `Promise<number>` | Delete expired entries only; returns the count. |
+| `stats()` | `Promise<Stats>` | `{ entries, bytes, claimed }`: aggregates only, never refs. |
+| `verify(opts?)` | `Promise<Report>` | Audit: digest-checks blobs and finds orphaned `.tmp` files, meta/blob halves, and stale claims. Dry-run by default; `{ repair: true }` removes what it finds. |
 | `close()` | `Promise<void>` | Stops the sweep timer. Idempotent. |
-| `[Symbol.asyncIterator]()` | `AsyncIterator<Entry>` | `for await (const entry of stash)` — sugar over `list()`. |
+| `[Symbol.asyncIterator]()` | `AsyncIterator<Entry>` | `for await (const entry of stash)`, shorthand for `list()`. |
 
-`push` / `pop` / `apply` / `show` / `list` / `drop` / `clear` / `store` are the `git stash`
-verb set — `store` via the plumbing side (`git stash store`, the script-facing insert), which
-is exactly the register it occupies here — and that correspondence is the point of the name.
-The rule protects the *lifecycle*: do not add lifecycle verbs git doesn't have, and do not
-rename `pop` to `take` or `consume`. The non-git methods (`has`, `stats`, `verify`,
-`tombstones`, `prune`, `close`) are queries and janitorial work — they inspect or maintain the
-shelf, they never move bytes on or off it. Anything new must land cleanly in one of those two
-buckets or it doesn't land.
+`push`, `pop`, `apply`, `show`, `list`, `drop`, `clear`, and `store` are the `git stash` verb
+set — `store` maps to `git stash store`, the plumbing command scripts use to file an
+already-made stash, which is the role it plays here too. Naming them after git stash protects
+the lifecycle: don't add lifecycle verbs git doesn't have, and don't rename `pop` to `take` or
+`consume`. The remaining methods (`has`, `stats`, `verify`, `tombstones`, `prune`, `close`) are
+queries and maintenance; they inspect or clean up the store but never move bytes in or out. A
+new method has to fit one of those two groups.
 
 ### Entry
 
@@ -175,40 +166,39 @@ buckets or it doesn't land.
 }
 ```
 
-`meta` is round-tripped verbatim as JSON. StashJS does not read it, validate it, index it, or
-log it. HermitStash puts an encrypted filename blob in there; that is none of our business.
+`meta` is round-tripped verbatim as JSON. StashJS never reads, validates, indexes, or logs it.
+A caller might keep an encrypted filename in there, for instance; StashJS doesn't look.
 
 ### 4.1 Read budgets
 
-Every tool in this space that survived contact with users converged on the same control:
-expire after N retrievals, not just after T time. Firefox Send made 1–100 downloads its
-signature feature; Jirafeau and Gokapi both carry it. `push(source, { reads: 3 })` is that
-control at the primitive layer.
+Every tool of this kind that lasted converged on the same control: expire after N retrievals,
+not only after some amount of time. Firefox Send made 1–100 downloads its signature feature,
+and Jirafeau and Gokapi both have it. `push(source, { reads: 3 })` provides it at this layer.
 
-Semantics, precisely:
+The semantics:
 
-- A budgeted `apply` spends one credit **only when the stream fully drains and the digest
-  matches.** An abandoned or failed read costs nothing — Send counts download *attempts*,
-  which means a flaky connection can burn a recipient's only chance. We count completions.
+- A budgeted `apply` spends one credit only when the stream fully drains and the digest
+  matches. An abandoned or failed read costs nothing. (Send counted download *attempts*, so a
+  flaky connection could burn a recipient's only chance; this counts completions instead.)
 - The read that takes `readsLeft` to zero destroys the entry through the same commit path as
-  `pop` (§6). Nothing new to get wrong.
-- Budgeted applies serialize through the §6 claim mechanism, so two concurrent reads cannot
-  both spend the last credit. Unbudgeted applies stay lock-free — the common path pays nothing
-  for the feature.
-- `pop` ignores the budget. Pop is terminal by definition.
-- Default is `reads: null` — unlimited.
+  `pop` (§6).
+- Budgeted applies serialize through the §6 claim mechanism, so two concurrent reads can't both
+  spend the last credit. Unbudgeted applies stay lock-free, so the common path isn't slowed by
+  the feature.
+- `pop` ignores the budget; a pop is always terminal.
+- The default is `reads: null`, meaning unlimited.
 
 ### 4.2 The monotone rule
 
-Entries are write-once, and their lifecycle is monotone: **every state change moves an entry
-closer to destruction, never further.** `readsLeft` only decrements. Claims only resolve.
-Expiry only arrives.
+Entries are write-once, and their lifecycle only moves one direction: **every change to an
+entry moves it toward destruction, never away from it.** `readsLeft` only decrements, claims
+only resolve, and expiry only arrives.
 
-This is why there is no `touch()`, no `extendTTL()`, no metadata update — ttlcache-style
-mutable expiry is right for a cache and wrong here, because an entry that can be argued back
-from the brink is a retention liability, not a stash. New terms mean a new push. The rule also
-draws the line for future features: anything that would let an entry live longer than its
-terms at push time is rejected on sight.
+That's why there is no `touch()`, no `extendTTL()`, and no way to update metadata. Mutable
+expiry, the way a cache does it, is wrong here: an entry whose terms can be extended is a
+retention liability rather than something that reliably goes away. Changing the terms means a
+new push. The rule also settles future features — anything that would let an entry outlive the
+terms it was pushed with is rejected.
 
 ### 4.3 Events
 
@@ -222,85 +212,85 @@ terms at push time is rejected on sight.
 | `'expired'` | `Entry` | Once per entry — whether the lazy read path or the sweeper found it first. |
 | `'sweepError'` | `Error` | A background `prune()` threw. |
 
-Two design points that are not optional. The name is `'sweepError'`, **never `'error'`** — an
-unhandled `'error'` event crashes a Node process, and a background janitor must not be able to
-take the app down. And it exists because the current design had a hole: `sweepInterval` runs
-`prune()` on a timer, and until now a failing sweep had nowhere to report. Jirafeau's biggest
-gap after 18 years is that nothing can observe a retrieval or an expiry; HermitStash needs
-exactly that for "your file was picked up" and for audit trails, so the primitive emits and the
-app decides.
+Two things here aren't negotiable. First, the event is `'sweepError'`, never `'error'`: an
+unhandled `'error'` event crashes the Node process, and a failing background sweep must not be
+able to bring the application down. Second, it closes a gap — `sweepInterval` runs `prune()` on
+a timer, and a sweep that throws otherwise has nowhere to report. More broadly, a caller often
+needs to observe retrievals and expiries — for "your file was picked up" notices or an audit
+trail — which older tools of this kind couldn't do at all, so StashJS emits the events and the
+caller decides what to do with them.
 
-Payloads are full `Entry` objects — the embedder owns the store, so refs in events are not a
-leak. §10's rule still applies to what the *embedder* writes to logs.
+Payloads are full `Entry` objects. The application already owns the store, so a ref in an event
+it receives isn't a leak; §10's rule still governs what the application writes to its own logs.
 
 ### 4.4 Replication primitives
 
-HermitStash sync — two instances mirroring one stash over the operator's own transport — is
-the second consumer. StashJS ships the primitives sync needs and none of the machinery: no
-sockets, no wire format, no schedule. The daemon is HermitStash's, the transport is Blamejs's,
-and the store stays a shelf.
+Replication — two instances mirroring one stash over the caller's own transport — is the second
+use case StashJS supports. It ships only the primitives replication needs and none of the
+machinery: no sockets, no wire format, no schedule. The daemon, the transport, and the topology
+are the caller's.
 
-Sync collides with this store's whole point. Replication copies bytes; `pop` promises their
-destruction; and naive sync *resurrects the dead* — node A pops an entry, node B still holds
-it, the next reconciliation copies it straight back onto A. Every feature in this section
-exists to make that collision survivable.
+Replication is in tension with the rest of the store. It copies bytes, while `pop` promises to
+destroy them, and a naive sync brings the destroyed back: node A pops an entry, node B still
+has it, and the next reconciliation copies it back onto A. The features in this section exist to
+make that survivable.
 
-**Tombstones.** Early destruction — `pop`, `drop`, `clear`, a spent read budget — writes a
-tombstone: `{ id, destroyedAt, cause }`. Nothing else. No digest, no size, no `meta` — a
-tombstone that describes the body defeats the burial. It exists to say "never accept this id
-again," not to memorialize what the id was. Expiry writes no tombstone: terms travel with the
-entry (see `store`), so every replica reaches the same deadline on its own clock. Only violent
-death needs a witness.
+**Tombstones.** Any early destruction — `pop`, `drop`, `clear`, or a spent read budget — writes
+a tombstone of `{ id, destroyedAt, cause }` and nothing more: no digest, no size, no `meta`. A
+tombstone only needs to say "never accept this id again," and recording what the entry was would
+leak the content the destruction was meant to remove. Expiry writes no tombstone, because the
+terms travel with the entry (see `store`) and every replica reaches the same deadline on its own
+clock. Only a destruction that isn't already encoded in the entry needs a record.
 
-Tombstones are pruned after `tombstoneTtl` (constructor option, default `'30d'`), and the
-floor rule is the one knob the deployment must own: `tombstoneTtl` must comfortably exceed the
-longest gap between reconciliations, or forgotten graves start resurrecting. StashJS cannot
-know the sync schedule, so it cannot enforce this.
+Tombstones are pruned after `tombstoneTtl` (a constructor option, default `'30d'`). This is the
+one setting the deployment has to get right: `tombstoneTtl` must comfortably exceed the longest
+gap between reconciliations, or a forgotten tombstone lets an id come back. StashJS doesn't know
+the sync schedule, so it can't enforce this.
 
-**`store(entry, source)`** is the replication-grade insert — and still a git verb: `git stash
-store` is the plumbing command scripts use to file an already-created stash, which is
-precisely the register this method lives in. Where `push` mints identity, `store` preserves
-it: the caller supplies the complete `Entry` — id, `createdAt`, `expiresAt`, `reads`,
-`readsLeft`, `digest`, `meta` — and the bytes are verified against the supplied digest as they
-stream, so transfer corruption dies at the door.
+**`store(entry, source)`** is the replication-grade insert, and it's a git verb too: `git stash
+store` files an already-created stash, which is the role it plays here. Where `push` mints a new
+identity, `store` preserves an existing one — the caller supplies the complete `Entry` (id,
+`createdAt`, `expiresAt`, `reads`, `readsLeft`, `digest`, `meta`), and the bytes are checked
+against the supplied digest as they stream, so transfer corruption is caught on the way in.
 
-In order, `store`:
+`store` proceeds in this order:
 
-1. rejects a malformed id (`InvalidRef`, the §5 whitelist — replication input is still input);
-2. refuses a tombstoned id — returns `false`, writes nothing. Destruction is monotone across
-   replicas: a tombstoned id never lives again;
-3. no-ops an entry whose `expiresAt` has already passed — the dead travel as dead;
-4. no-ops an identical live entry (same id, same digest) — idempotent, so retry-based sync is
-   free;
-5. throws `IntegrityError` on a digest conflict (same id, different bytes) — that is not a
-   merge case, it is corruption;
-6. otherwise writes exactly like `push`, except every field is the caller's.
+1. reject a malformed id (`InvalidRef`, the §5 whitelist — replication input is still input);
+2. refuse a tombstoned id: return `false` and write nothing, since a tombstoned id must never
+   come back;
+3. no-op an entry whose `expiresAt` has already passed;
+4. no-op an identical live entry (same id, same digest), so retrying a sync is free;
+5. throw `IntegrityError` on a digest conflict (same id, different bytes) — that's corruption,
+   not a merge;
+6. otherwise write exactly like `push`, except every field is the caller's.
 
-`store` emits **no event.** A sync daemon that hears its own writes echoes them back forever;
-a silent `store` deletes the echo-suppression bug class instead of asking every consumer to
-solve it.
+`store` emits no event. A sync daemon that heard its own writes would echo them back
+indefinitely, so keeping `store` silent removes that class of bug rather than leaving every
+caller to work around it.
 
-**What sync costs — put this in HermitStash's docs, not just here.** A read budget is enforced
-per store. Two replicas holding a `reads: 1` entry can each serve one full read before
-tombstones converge: exactly-once degrades to *eventually*-once. For a burn-after-read drop,
-that trade must be chosen, not discovered. The clean topology is cold standby — replicate for
-durability, serve every read from one node, let tombstones flow outward. Serving reads from
-more than one node is a decision to accept the weaker guarantee, and it should be made in
-writing.
+**What replication costs (document this for the caller, not just here).** A read budget is
+enforced per store. Two replicas holding a `reads: 1` entry can each serve one full read before
+their tombstones converge, so exactly-once becomes eventually-once. For a burn-after-read drop,
+that tradeoff has to be a deliberate choice. The safe topology is cold standby: replicate for
+durability, serve every read from one node, and let tombstones propagate outward. Serving reads
+from more than one node accepts the weaker guarantee, and that should be a decision made on
+purpose.
 
 ---
 
 ## 5. Refs are random, not content hashes
 
-The obvious design is `ref = sha256(contents)`. It is wrong here, for two reasons:
+The obvious design is `ref = sha256(contents)`, and it's the wrong one here, for two reasons.
 
-1. **It leaks.** A content hash is guessable by anyone who has the content. If I suspect you
-   stashed a particular document, I hash it and probe for the ref. That's an enumeration
-   oracle against a whistleblower drop — the exact thing HermitStash exists to prevent.
-2. **It buys nothing.** Dedup is the usual payoff, and dedup does not work on ciphertext. Two
-   uploads of the same file are two different byte streams. There is nothing to deduplicate.
+The first is that it leaks. A content hash is guessable by anyone who has the content: if you
+suspect someone stashed a particular document, you hash it and probe for the ref. That's an
+enumeration oracle against exactly the kind of anonymous drop this store is meant to protect.
 
-So: **the ref is a capability, not an address.**
+The second is that it gains nothing. The usual payoff is dedup, and dedup doesn't work on
+ciphertext — two uploads of the same file are two different byte streams, with nothing to
+deduplicate.
+
+So the ref is a capability, not an address.
 
 - `id = 'v1_' + randomBytes(32).toString('base64url')` — 256 bits, unguessable.
 - The version prefix is for future format migration.
@@ -309,63 +299,62 @@ So: **the ref is a capability, not an address.**
   it as input.
 - Ref comparison, wherever it happens, uses `timingSafeEqual`.
 
-**Refs become filenames, so ref validation is path-traversal defense.** Every ref entering a
-public method is validated *before it touches the filesystem*: it must match
+Because refs become filenames, validating a ref is also the path-traversal defense. Every ref
+entering a public method is checked *before it touches the filesystem*: it must match
 `/^v1_[A-Za-z0-9_-]{43}$/` exactly, or it's `InvalidRef`. No normalization, no `path.resolve`
-rescue, no "clean it up and continue" — a ref that isn't character-for-character well-formed is
-not a ref. This is a whitelist and it stays a whitelist. `../../etc/shadow` must die at the
-regex, not at the syscall.
+rescue, no attempt to clean it up and carry on. This is a whitelist and stays one, so
+`../../etc/shadow` is rejected at the regex, before any syscall runs.
 
 ---
 
 ## 6. `pop` is the hard part
 
-Naive `pop` deletes the entry and streams the file. Then the client's connection drops at 60%,
-and the data is gone forever while the reader got half a file. That is data loss by design.
+A naive `pop` deletes the entry and streams the file. If the client's connection drops at 60%,
+the data is gone and the reader got half a file — data loss built into the design.
 
-`pop` must be a claim → stream → commit cycle:
+So `pop` is a claim → stream → commit cycle:
 
-1. **Claim.** Atomically move the entry to a claimed state (`fs.rename` — atomic on POSIX
-   within a filesystem). This is the concurrency guard: two simultaneous `pop(ref)` calls
-   race on the rename, exactly one wins, the loser gets `RefClaimed`. Pop is once-only by
-   definition; enforce it at the filesystem, not with an in-process lock.
-2. **Stream.** Read from the claimed path, verifying `digest` incrementally.
-3. **Commit.** On stream `end` — fully drained, digest matched — delete.
-4. **Fail.** On stream `error`, premature `destroy`, or digest mismatch — apply the
+1. **Claim.** Atomically move the entry to a claimed state with `fs.rename` (atomic on POSIX
+   within a filesystem). This doubles as the concurrency guard: two simultaneous `pop(ref)`
+   calls race on the rename, one wins, and the loser gets `RefClaimed`. A pop is once-only, and
+   that's enforced at the filesystem rather than with an in-process lock.
+2. **Stream.** Read from the claimed path, verifying `digest` as the bytes pass.
+3. **Commit.** On stream `end`, once the bytes are fully drained and the digest matches, delete.
+4. **Fail.** On stream `error`, a premature `destroy`, or a digest mismatch, apply the
    `onPopFailure` policy.
 
 ### `onPopFailure`
 
-- `'restore'` **(default)** — rename back. The entry survives; the read can be retried. Losing
-  data by default is hostile.
-- `'burn'` — delete anyway. For the paranoid drop: assume any read attempt means the bytes
-  were observed, so the entry must not survive to be read again. HermitStash will likely want
-  this. It must be opt-in.
+- `'restore'` **(default)** — rename the entry back. It survives and the read can be retried.
+  Losing data by default would be hostile.
+- `'burn'` — delete it anyway, on the assumption that any read attempt means the bytes may have
+  been observed and the entry shouldn't survive to be read again. This must be opt-in.
 
 ### Crash recovery
 
-If the process dies mid-`pop`, claimed entries are orphaned. On construction, `Stash` scans for
-claims older than `claimTimeout` (default `10m`) and resolves them per `onPopFailure`. This
-scan is lazy — triggered on first operation, not in the constructor. Constructors do not do
-I/O.
+If the process dies mid-`pop`, claimed entries are left orphaned. On the first operation after
+construction, `Stash` scans for claims older than `claimTimeout` (default `10m`) and resolves
+each per `onPopFailure`. The scan is lazy — it runs on first use, not in the constructor,
+because constructors don't do I/O.
 
 ---
 
 ## 7. Expiry
 
-- `ttl` accepts `'30m'`, `'24h'`, `'7d'`, or a number of ms. Construct-time default,
-  overridable per-`push`. `null` means no expiry.
-- **Lazy:** `pop` / `apply` / `show` treat an expired entry as `RefNotFound` and drop it in
-  passing. An expired entry is never served, even if the sweeper hasn't run.
-- **Swept:** `prune()` sweeps on demand. `sweepInterval` starts a timer that calls it.
-- **The sweep timer must be `.unref()`'d.** Otherwise it holds the event loop open and every
-  consumer's process hangs on exit. This is the single most common way a library like this
-  ruins someone's afternoon.
+- `ttl` accepts `'30m'`, `'24h'`, `'7d'`, or a number of milliseconds. It's a construct-time
+  default, overridable per `push`; `null` means no expiry.
+- **Lazy.** `pop`, `apply`, and `show` treat an expired entry as `RefNotFound` and delete it in
+  passing, so an expired entry is never served even if the sweeper hasn't run.
+- **Swept.** `prune()` reaps expired entries on demand, and `sweepInterval` starts a timer that
+  calls it.
+- **The sweep timer is `.unref()`'d,** so it never holds the event loop open and keeps the
+  caller's process from exiting. Forgetting this is a common way for a library like this to
+  hang someone's process on shutdown.
 - `close()` clears the timer.
 
 ### 7.1 Disposal
 
-V8 13.6 on Node 24 ships explicit resource management natively, so `Stash` implements
+V8 13.6 on Node 24 ships explicit resource management, so `Stash` implements
 `Symbol.asyncDispose` as an alias for `close()`:
 
 ```js
@@ -375,33 +364,33 @@ V8 13.6 on Node 24 ships explicit resource management natively, so `Stash` imple
 }  // close() called automatically, timer cleared, even if the block throws
 ```
 
-Two caveats, both of which mean this is additive and **does not replace the `unref()` rule**:
+Two caveats, both meaning this is additive and **does not replace the `unref()` rule**:
 
-- `await using` can't appear at module top level, and HermitStash will hold a long-lived `Stash`
-  at module scope. So the real-world path is still an explicit `close()` on shutdown, with
-  `unref()` covering everyone who forgets.
-- `Symbol.asyncDispose` must be idempotent. Disposal running twice is normal, not an error.
+- `await using` can't appear at module top level, and a long-lived `Stash` is often held at
+  module scope. So the real path on shutdown is still an explicit `close()`, with `unref()`
+  covering the cases where someone forgets.
+- `Symbol.asyncDispose` must be idempotent — disposing twice is normal, not an error.
 
-Treat it as ergonomics for scripts and tests — where it genuinely earns its place, since it
-kills the `try/finally` in every test that needs a live `Stash`.
+It's mainly for scripts and tests, where it replaces the `try/finally` around every test that
+needs a live `Stash`.
 
 ---
 
 ## 8. Limits
 
-- `maxSize` — per entry. Enforced **during** the write stream: count bytes as they pass, and
-  destroy the stream + clean up the partial the moment the limit is crossed. Never write the
-  whole thing and then check.
-- `maxEntries` / `maxTotal` — stash-wide. `push` rejects with `StashFull`. Without this,
-  HermitStash is one curl loop away from a full disk.
-- On any rejected `push`, partial writes are cleaned up. A failed push leaves nothing behind.
+- `maxSize` is per entry, enforced **during** the write stream: count bytes as they pass and,
+  the moment the limit is crossed, destroy the stream and clean up the partial. Never write the
+  whole blob and then check its size.
+- `maxEntries` and `maxTotal` are stash-wide; a push that would exceed either rejects with
+  `StashFull`. Without them, a caller is one loop away from filling the disk.
+- On any rejected `push`, partial writes are cleaned up, so a failed push leaves nothing behind.
 
 ---
 
 ## 9. Backend interface
 
-The backend is the only thing that touches storage. `Stash` holds the policy; the backend holds
-the bytes.
+The backend is the only part that touches storage: `Stash` holds the policy and the backend
+holds the bytes.
 
 ```js
 {
@@ -433,20 +422,22 @@ the bytes.
 └── tombstones/<id>.json # id + destroyedAt + cause — nothing else
 ```
 
-Sidecar metadata over a central index: no index to corrupt, no lock contention, `list()` is a
-`readdir` + read. Crash-safe by construction. Fast enough.
+Metadata lives in per-entry sidecar files rather than a central index: there's no index to
+corrupt and no lock contention, `list()` is a `readdir` plus a read, and the layout is
+crash-safe.
 
-Writes go to `blobs/<id>.tmp` then `fs.rename` into place. A reader never sees a partial blob.
-Directory mode `0700`, file mode `0600`. Never world-readable.
+Writes go to `blobs/<id>.tmp` and are `fs.rename`d into place, so a reader never sees a partial
+blob. Directories are mode `0700` and files `0600`; nothing is world-readable.
 
-**Containment is our job, not the sandbox's.** Per §2.1 the permission model follows symlinks
-out of granted paths, so `--allow-fs-read=./.stash/*` does not actually confine us if something
-plants a symlink in the root. On construction, `realpath` the root and store it. On every
-resolved blob/meta/claim path, `realpath` the parent and assert it's still under that root —
-refuse with `InvalidRef` otherwise. Use `fs.lstat`, not `fs.stat`, when checking whether an
-entry exists: a symlink where a blob should be is corruption, not a blob.
+**StashJS does its own containment check.** Per §2.1 the permission model follows symlinks out
+of granted paths, so `--allow-fs-read=./.stash/*` doesn't actually confine the process if
+something plants a symlink in the root. On construction, `realpath` the root and store it. On
+every resolved blob/meta/claim path, `realpath` the parent and check it's still under that root,
+refusing with `InvalidRef` otherwise. Use `fs.lstat`, not `fs.stat`, to check whether an entry
+exists, so a symlink standing in for a blob is treated as corruption rather than a blob.
 
-**MemoryBackend** — same interface, `Map`-backed, for tests. No persistence, no pretense.
+**MemoryBackend** implements the same interface backed by a `Map`, for tests, and doesn't
+persist.
 
 ---
 
@@ -463,8 +454,8 @@ Typed, with stable `.code`. Consumers must never string-match a message.
 | `StashFull` | `EFULL` | `maxEntries` / `maxTotal` reached |
 | `InvalidRef` | `EBADREF` | Malformed ref string |
 
-All extend `StashError`. **No error message ever contains a ref, a `meta` value, or a path.**
-Error messages are for developers; refs are capabilities. Keep them apart.
+All extend `StashError`. **No error message ever contains a ref, a `meta` value, or a path** —
+messages are for developers, and a ref is a capability that must not leak into one.
 
 ---
 
@@ -493,9 +484,9 @@ stashjs/
 
 ## 12. Milestones
 
-One milestone per session. Each ends green and committed. Do not start the next until the
-current one's tests pass. `pop` is deliberately last — it is the hard part and it needs
-everything underneath it to be stable first.
+Each milestone ends green and committed. Do not start the next until the current one's
+tests pass. `pop` is deliberately last — it is the hard part and it needs everything
+underneath it to be stable first.
 
 **M1 — Skeleton.** `package.json` (engines, `.node-version`), `errors.js`, `ref.js` (generation
 + the §5 whitelist), `duration.js`, `MemoryBackend`. `push` / `apply` / `show` / `list` /
@@ -577,12 +568,12 @@ Non-negotiable cases:
 
 ### 13.1 Executable invariants
 
-These two are the ones that survive a long agentic session where the prose has scrolled out of
-context. Wire them into CI and a Stop hook — they're §1 and §2 turned into something a machine
-enforces rather than something a model remembers.
+Two checks matter enough to enforce mechanically, so they run in CI (and locally, wired into a
+Stop hook). They turn §1 and §2 into something the build verifies rather than something a
+contributor has to remember.
 
-1. **Grep the source for `createCipheriv`, `createDecipheriv`, `node:sqlite`, and `password`.
-   Zero hits.** This test is not a joke.
-2. **The full suite passes under `--permission` with grants scoped to the test root only.** If
-   a change quietly requires a broader grant, the sandbox catches it at the point the change is
-   made, rather than at the point someone deploys it.
+1. **A grep of the source for `createCipheriv`, `createDecipheriv`, `node:sqlite`, and
+   `password` returns no matches.**
+2. **The full suite passes under `--permission` with grants scoped to the test root only.** If a
+   change quietly needs a broader grant, the sandbox catches it here, when the change is made,
+   instead of in production.

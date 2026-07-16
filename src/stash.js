@@ -36,8 +36,9 @@ import { Transform, pipeline } from "node:stream";
 import { C } from "./constants.js";
 import { parse } from "./duration.js";
 import { isExpired, make } from "./entry.js";
-import { IntegrityError, RefNotFound } from "./errors.js";
+import { IntegrityError, RefNotFound, SizeExceeded, StashFull } from "./errors.js";
 import { assertValid, constantTimeEqual, generate } from "./ref.js";
+import { parse as parseSize } from "./size.js";
 import { options, plainObject } from "./validate.js";
 
 // Constructor options the spec defines but a shipped milestone does not yet
@@ -47,9 +48,6 @@ import { options, plainObject } from "./validate.js";
 // delivery plan; the policy layer names the lists, validate owns the
 // mechanism.
 const UNIMPLEMENTED_OPTIONS = [
-  "maxSize",
-  "maxEntries",
-  "maxTotal",
   "onPopFailure",
   "tombstoneTtl",
   "claimTimeout",
@@ -59,7 +57,7 @@ const UNIMPLEMENTED_PUSH_OPTIONS = ["reads"];
 
 // The backend surface Stash drives today. Validated at construction so a
 // misassembled backend fails at boot, not at first push.
-const REQUIRED_BACKEND_METHODS = ["write", "read", "remove", "stat", "list"];
+const REQUIRED_BACKEND_METHODS = ["write", "read", "remove", "stat", "list", "stats"];
 
 // Normalize a push source to an async-iterable of byte chunks, or throw a
 // config-time TypeError. Accepted: Buffer | Uint8Array | string | Readable |
@@ -113,6 +111,53 @@ function _dispose(source) {
   source.destroy();
 }
 
+// _boundedSource(source, maxSize, residual) -- wrap a push's chunk source so the
+// size limits are enforced DURING the stream, in the policy layer, never in a
+// backend. Each chunk is converted to a Buffer first (so a multibyte string is
+// counted as its encoded bytes, and the counted bytes are exactly the bytes
+// yielded to the backend), the running total is checked BEFORE the chunk is
+// yielded, and the typed verdict is thrown the instant a bound is crossed -- so
+// the crossing chunk never reaches the backend's tmp file and an unbounded
+// source is abandoned at the boundary rather than drained. maxSize is the
+// per-entry bound, `residual` the remaining stash-wide headroom (maxTotal minus
+// what is already stored); either is null for "no bound". SizeExceeded is
+// reported before StashFull when one chunk crosses both: a per-entry overflow is
+// a permanent verdict a retry can't fix, while a full stash may later clear.
+async function* _boundedSource(source, maxSize, residual) {
+  let total = 0;
+  for await (const chunk of source) {
+    const buf = Buffer.from(chunk);
+    total += buf.length;
+    if (maxSize !== null && total > maxSize) throw new SizeExceeded();
+    if (residual !== null && total > residual) throw new StashFull();
+    yield buf;
+  }
+}
+
+// _positiveBytes(value, label) -- a byte bound (maxSize / maxTotal): a size
+// string or byte count resolved through size.parse, then required to be a
+// POSITIVE safe integer. A zero or negative limit would reject every push, so
+// it's a config-time TypeError rather than a silently-broken bound. null/absent
+// means no bound.
+function _positiveBytes(value, label) {
+  const bytes = parseSize(value, label);
+  if (bytes !== null && bytes <= 0) {
+    throw new TypeError(label + ": must be a positive size; 0 would reject every push");
+  }
+  return bytes;
+}
+
+// _positiveCount(value, label) -- a count bound (maxEntries): a positive safe
+// integer, no string form (it's a count, not a size or duration). null/absent
+// means no bound; zero or negative is a config-time TypeError.
+function _positiveCount(value, label) {
+  if (value === null || value === undefined) return null;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(label + ": expected a positive integer count");
+  }
+  return value;
+}
+
 /**
  * @primitive  stash.Stash
  * @signature  new Stash(opts) -> Stash
@@ -131,9 +176,18 @@ function _dispose(source) {
  * still, call `close()` (or `await using`) on shutdown, since an unref'd timer
  * keeps the `Stash` reachable. A `sweepInterval` above Node's ~24.8-day timer
  * ceiling, or of zero, is a config-time TypeError, not a silent busy loop.
- * Spec options whose milestone has not shipped (`maxSize`, `maxEntries`,
- * `maxTotal`, `onPopFailure`, `tombstoneTtl`) throw a TypeError at construction
- * rather than sitting silently unenforced.
+ *
+ * `opts.maxSize` bounds each entry (a size string like `'100mb'` or a byte
+ * count); a push that exceeds it aborts mid-stream with `SizeExceeded`, leaving
+ * no partial behind. `opts.maxEntries` and `opts.maxTotal` bound the whole
+ * store; a push that would exceed either is refused with `StashFull`, and
+ * nothing existing is evicted to make room. Expired-but-unswept entries are
+ * pruned before the store is judged full, so they never block a live push. A
+ * stats read and the write are not atomic, so concurrent pushes can overshoot a
+ * stash-wide bound by the number in flight -- the bound stops unbounded growth,
+ * not that exact byte. Spec options whose milestone has not shipped
+ * (`onPopFailure`, `tombstoneTtl`, `claimTimeout`) throw a TypeError at
+ * construction rather than sitting silently unenforced.
  *
  * @example
  *   import { Stash } from "@blamejs/stash";
@@ -146,9 +200,15 @@ export class Stash {
   #ttlMs = null;
   #sweepTimer = null;
   #sweepInFlight = null;
+  #maxSize = null;
+  #maxTotal = null;
+  #maxEntries = null;
 
   constructor(opts) {
-    options(opts, "new Stash", { allowed: ["backend", "ttl", "sweepInterval"], unimplemented: UNIMPLEMENTED_OPTIONS });
+    options(opts, "new Stash", {
+      allowed: ["backend", "ttl", "sweepInterval", "maxSize", "maxEntries", "maxTotal"],
+      unimplemented: UNIMPLEMENTED_OPTIONS,
+    });
     const backend = opts.backend;
     if (backend === null || typeof backend !== "object") {
       throw new TypeError("new Stash: a backend is required");
@@ -167,6 +227,11 @@ export class Stash {
     if (this.#ttlMs !== null && !Number.isSafeInteger(Date.now() + this.#ttlMs)) {
       throw new TypeError("new Stash: ttl places expiresAt beyond the safe integer range");
     }
+    // Size and count bounds, resolved and validated before the sweep timer is
+    // armed so a malformed bound throws without leaving a timer behind.
+    this.#maxSize = _positiveBytes(opts.maxSize, "maxSize");
+    this.#maxTotal = _positiveBytes(opts.maxTotal, "maxTotal");
+    this.#maxEntries = _positiveCount(opts.maxEntries, "maxEntries");
     const sweepMs = parse(opts.sweepInterval, "sweepInterval");
     if (sweepMs !== null) {
       if (sweepMs <= 0 || sweepMs > C.TIME.MAX_TIMER_MS) {
@@ -239,7 +304,10 @@ export class Stash {
    * the constructor default for this entry (`null` overrides a default back to
    * no expiry); an absent `ttl` inherits the default. Terms are fixed at push
    * and only move the entry toward destruction -- there is no touch or extend.
-   * The ref is random -- a capability, not a content address.
+   * The ref is random -- a capability, not a content address. Construct-time
+   * `maxSize` bounds this entry (`SizeExceeded`, thrown mid-stream), and
+   * `maxEntries` / `maxTotal` bound the whole store (`StashFull`); a rejected
+   * push leaves nothing behind.
    *
    * @example
    *   const ref = await stash.push(ciphertext, { meta: { kind: "drop" }, ttl: "1h" });
@@ -262,8 +330,34 @@ export class Stash {
     // config-time TypeError before anything is stored on a malformed ttl.
     const ttlMs = opts.ttl !== undefined ? parse(opts.ttl, "push: ttl") : this.#ttlMs;
     const chunks = _toChunkSource(source);
+    // Stash-wide bounds, enforced in the policy layer before the backend stores
+    // a byte. maxEntries is a hard pre-check (a new entry always adds one) and
+    // rejects before the stream starts. maxTotal is enforced mid-stream against
+    // the residual headroom (see _boundedSource). Both are expiry-aware: if a
+    // bound is at its edge, prune the provably-expired and re-read stats ONCE, so
+    // a dead-but-unswept entry never rejects a live push. The stats read and the
+    // write are not atomic; concurrent pushes can overshoot by the in-flight
+    // count, which bounds the overshoot without a lock the sidecar design omits.
+    let residual = null;
+    if (this.#maxEntries !== null || this.#maxTotal !== null) {
+      let stats = await this.#backend.stats();
+      const atEdge = (this.#maxEntries !== null && stats.entries >= this.#maxEntries) ||
+        (this.#maxTotal !== null && stats.bytes >= this.#maxTotal);
+      if (atEdge) {
+        await this.prune();
+        stats = await this.#backend.stats();
+      }
+      if (this.#maxEntries !== null && stats.entries >= this.#maxEntries) {
+        throw new StashFull();
+      }
+      if (this.#maxTotal !== null) {
+        residual = this.#maxTotal - stats.bytes;
+        if (residual < 0) residual = 0;
+      }
+    }
     const id = generate();
-    const stored = await this.#backend.write(id, chunks, make(id, meta, ttlMs));
+    const bounded = _boundedSource(chunks, this.#maxSize, residual);
+    const stored = await this.#backend.write(id, bounded, make(id, meta, ttlMs));
     return stored.id;
   }
 
