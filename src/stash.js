@@ -33,13 +33,17 @@
 import { createHash } from "node:crypto";
 import { Transform, pipeline } from "node:stream";
 
+import { make } from "./entry.js";
 import { IntegrityError } from "./errors.js";
 import { assertValid, constantTimeEqual, generate } from "./ref.js";
+import { options, plainObject } from "./validate.js";
 
 // Constructor options the spec defines but a shipped milestone does not yet
 // implement. Accepting one silently would fail open (an operator who set
 // maxSize believes it is enforced), so each throws at config time until its
-// milestone lands. SPEC.md 12 is the delivery plan.
+// milestone lands (validate.options enforces it). SPEC.md 12 is the
+// delivery plan; the policy layer names the lists, validate owns the
+// mechanism.
 const UNIMPLEMENTED_OPTIONS = [
   "ttl",
   "maxSize",
@@ -56,22 +60,6 @@ const UNIMPLEMENTED_PUSH_OPTIONS = ["ttl", "reads"];
 // The backend surface Stash drives today. Validated at construction so a
 // misassembled backend fails at boot, not at first push.
 const REQUIRED_BACKEND_METHODS = ["write", "read", "remove", "stat", "list"];
-
-function _assertPlainObject(value, label) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new TypeError(label + ": expected a plain object");
-  }
-}
-
-function _rejectUnimplemented(opts, unimplemented, label) {
-  for (const key of unimplemented) {
-    if (key in opts) {
-      throw new TypeError(
-        label + ": option '" + key + "' is not implemented yet (SPEC.md 12 is the delivery plan)"
-      );
-    }
-  }
-}
 
 // Normalize a push source to an async-iterable of byte chunks, or throw a
 // config-time TypeError. Accepted: Buffer | Uint8Array | string | Readable |
@@ -134,13 +122,7 @@ export class Stash {
   #backend;
 
   constructor(opts) {
-    _assertPlainObject(opts, "new Stash");
-    _rejectUnimplemented(opts, UNIMPLEMENTED_OPTIONS, "new Stash");
-    for (const key of Object.keys(opts)) {
-      if (key !== "backend") {
-        throw new TypeError("new Stash: unknown option '" + key + "'");
-      }
-    }
+    options(opts, "new Stash", { allowed: ["backend"], unimplemented: UNIMPLEMENTED_OPTIONS });
     const backend = opts.backend;
     if (backend === null || typeof backend !== "object") {
       throw new TypeError("new Stash: a backend is required");
@@ -172,29 +154,15 @@ export class Stash {
    *   const ref = await stash.push(ciphertext, { meta: { kind: "drop" } });
    */
   async push(source, opts = {}) {
-    _assertPlainObject(opts, "push");
-    _rejectUnimplemented(opts, UNIMPLEMENTED_PUSH_OPTIONS, "push");
-    for (const key of Object.keys(opts)) {
-      if (key !== "meta") throw new TypeError("push: unknown option '" + key + "'");
-    }
+    options(opts, "push", { allowed: ["meta"], unimplemented: UNIMPLEMENTED_PUSH_OPTIONS });
     let meta = {};
     if (opts.meta !== undefined) {
-      _assertPlainObject(opts.meta, "push: meta");
+      plainObject(opts.meta, "push: meta");
       meta = JSON.parse(JSON.stringify(opts.meta));
     }
     const chunks = _toChunkSource(source);
     const id = generate();
-    const entry = {
-      id,
-      size: 0,
-      digest: null,
-      createdAt: Date.now(),
-      expiresAt: null,
-      reads: null,
-      readsLeft: null,
-      meta,
-    };
-    const stored = await this.#backend.write(id, chunks, entry);
+    const stored = await this.#backend.write(id, chunks, make(id, meta));
     return stored.id;
   }
 
@@ -260,10 +228,7 @@ export class Stash {
    *   entries.length;
    */
   async list(opts = {}) {
-    _assertPlainObject(opts, "list");
-    for (const key of Object.keys(opts)) {
-      if (key !== "includeExpired") throw new TypeError("list: unknown option '" + key + "'");
-    }
+    options(opts, "list", { allowed: ["includeExpired"] });
     return this.#backend.list();
   }
 

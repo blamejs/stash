@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { generate, isValid, assertValid, constantTimeEqual } from "../src/ref.js";
+import { C } from "../src/constants.js";
 import { InvalidRef } from "../src/errors.js";
 
 test("generate mints a whitelist-shaped, unique ref", () => {
@@ -58,6 +59,18 @@ test("traversal and malformed refs die at the whitelist", () => {
 test("assertValid returns the ref it accepted", () => {
   const ref = generate();
   assert.equal(assertValid(ref), ref);
+});
+
+test("the whitelist regex and C.REF agree", () => {
+  // The pattern is written literally (the whitelist IS the guard); this
+  // pins it to the constants so neither can drift alone.
+  const ref = generate();
+  assert.equal(ref.length, C.REF.PREFIX.length + C.REF.ENCODED_LENGTH);
+  assert.ok(ref.startsWith(C.REF.PREFIX));
+  assert.equal(
+    C.REF.ENCODED_LENGTH,
+    Buffer.alloc(C.REF.RANDOM_BYTES).toString("base64url").length
+  );
 });
 
 test("constantTimeEqual compares strings without type coercion", () => {

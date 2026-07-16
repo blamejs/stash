@@ -19,23 +19,34 @@
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
+import { C } from "./constants.js";
 import { InvalidRef } from "./errors.js";
 
-// The one shape a ref may have. 32 bytes -> 43 base64url chars, unpadded.
+// The one shape a ref may have. 32 random bytes -> 43 base64url chars,
+// unpadded, behind the version prefix. The regex is written literally --
+// the whitelist IS the guard, and deriving it would hide it -- and pinned
+// to C.REF by test.
 const REF_PATTERN = /^v1_[A-Za-z0-9_-]{43}$/;
 
 // generate() -> string. Mint a fresh ref.
 export function generate() {
-  return "v1_" + randomBytes(32).toString("base64url");
+  return C.REF.PREFIX + randomBytes(C.REF.RANDOM_BYTES).toString("base64url");
 }
 
-// isValid(ref) -> boolean. Character-for-character whitelist match.
+// isValid(ref) -> boolean. Character-for-character whitelist match. The
+// pattern is declared here and only here: a second declaration would be a
+// second traversal surface to keep correct.
+// @enforced-by guard-shape-reinlined
+// @guard-shape v1_\[A-Za-z0-9_-\]
 export function isValid(ref) {
   return typeof ref === "string" && REF_PATTERN.test(ref);
 }
 
 // assertValid(ref) -> ref | throws InvalidRef. Every public method routes
 // its ref argument through here BEFORE any backend call.
+// @enforced-by behavioral -- the reject-before-storage rule has no
+//   rename-proof code shape of its own (the pattern shape is isValid's);
+//   the zero-backend-calls conformance vector is the guard.
 export function assertValid(ref) {
   if (!isValid(ref)) throw new InvalidRef();
   return ref;
@@ -43,6 +54,8 @@ export function assertValid(ref) {
 
 // constantTimeEqual(a, b) -> boolean. Timing-safe string equality for
 // capability and digest comparison. Length is not secret; content is.
+// @enforced-by guard-shape-reinlined
+// @guard-shape \btimingSafeEqual\s*\(
 export function constantTimeEqual(a, b) {
   if (typeof a !== "string" || typeof b !== "string") return false;
   const bufA = Buffer.from(a);

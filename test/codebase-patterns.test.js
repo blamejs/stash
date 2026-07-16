@@ -128,6 +128,8 @@ function _stripCommentsAndLiterals(content) {
 // unflagged. When you add a detector with a new allow-class, register it
 // here so the marker-audit gate accepts it.
 const VALID_ALLOW_CLASSES = {
+  "guard-shape-reinlined": 1,
+  "validator-shape-reinlined": 1,
   "forbidden-crypto-token": 1,
   "sandbox-widening-import": 1,
   "permission-probe-branch": 1,
@@ -509,20 +511,21 @@ test("ai-attribution -- no AI-attribution tokens in the tree", () => {
 });
 
 // ---------------------------------------------------------------------------
-// (12) raw-time-scale-literal -- src/duration.js owns the time scale
+// (12) raw-time-scale-literal -- src/constants.js owns the scale facts
 // ---------------------------------------------------------------------------
 
-test("raw-time-scale-literal -- scale arithmetic routes through duration", () => {
-  // reason: the time scale lives in ONE module (src/duration.js parses
-  // '24h' -> ms); a bare `* 1000` / `* 60` / `* 1024` elsewhere in src/ is
-  // a second source of truth for scale math that drifts independently and
-  // that a reviewer must decode by eye. duration.js is the single place
-  // the literals legitimately live, so it is excluded.
+test("raw-time-scale-literal -- scale arithmetic routes through constants", () => {
+  // reason: scale magnitudes live in ONE module (src/constants.js declares
+  // C.TIME / C.BYTES; duration.js resolves '24h' -> ms through them); a
+  // bare `* 1000` / `* 60` / `* 1024` elsewhere in src/ is a second source
+  // of truth for scale math that drifts independently and that a reviewer
+  // must decode by eye. constants.js is the single place the literals
+  // legitimately live, so it is excluded.
   const re = /\*\s*(?:1000|1024|60)\b/;
-  const files = _srcFiles().filter((f) => _relPath(f) !== "src/duration.js");
+  const files = _srcFiles().filter((f) => _relPath(f) !== "src/constants.js");
   let bad = _scanLines(files, re, { prepare: _stripCommentsAndLiterals });
   bad = _filterMarkers(bad, "raw-time-scale-literal");
-  _report("no raw time/byte scale literals (* 1000 / * 60 / * 1024) outside src/duration.js", bad);
+  _report("no raw time/byte scale literals (* 1000 / * 60 / * 1024) outside src/constants.js", bad);
 });
 
 // ---------------------------------------------------------------------------
@@ -601,4 +604,129 @@ test("allow-marker audit -- every marker names a registered class", () => {
     }
   }
   _report("every allow:<class> / allow-file marker names a registered detector class", bad);
+});
+
+// ---------------------------------------------------------------------------
+// Guard / validator enforcement family
+//
+// A fail-closed choke point (a guard: traversal whitelist, timing-safe
+// compare, the canonical Entry shape) or an input-shape validator is
+// defined ONCE, in one owning function, tagged in the comment block above
+// its export:
+//
+//   // @enforced-by <detector-class> | behavioral -- <reason>
+//   // @guard-shape <rename-proof regex of the shape>   (or @validator-shape)
+//   // @guard-via   <regex of a legitimate routing call> (optional)
+//
+// The shapes are read OFF the tagged functions (single source of truth):
+// these two tests are DERIVED, so a new guard is enforced the moment it is
+// tagged, and an untagged guard cannot ship.
+// ---------------------------------------------------------------------------
+
+const _TAGGED_DECL_RE =
+  /((?:^[ \t]*\/\/[^\n]*\n)+)[ \t]*export\s+(?:async\s+)?(?:function|class|const)\s+([\w$]+)/gm;
+
+function _collectTaggedExports() {
+  const found = [];
+  for (const file of _srcFiles()) {
+    const rel = _relPath(file);
+    const src = _read(file);
+    let m;
+    _TAGGED_DECL_RE.lastIndex = 0;
+    while ((m = _TAGGED_DECL_RE.exec(src)) !== null) {
+      const block = m[1];
+      const tags = {
+        shapes: [],
+        vias: [],
+        kinds: [],
+        enforcedBy: null,
+        behavioralReason: false,
+      };
+      for (const line of _lines(block)) {
+        let t;
+        if ((t = /\/\/\s*@guard-shape\s+(.+?)\s*$/.exec(line)) !== null) {
+          tags.shapes.push(t[1]);
+          tags.kinds.push("guard");
+        } else if ((t = /\/\/\s*@validator-shape\s+(.+?)\s*$/.exec(line)) !== null) {
+          tags.shapes.push(t[1]);
+          tags.kinds.push("validator");
+        } else if ((t = /\/\/\s*@guard-via\s+(.+?)\s*$/.exec(line)) !== null) {
+          tags.vias.push(t[1]);
+        } else if ((t = /\/\/\s*@enforced-by\s+(\S+)(.*)$/.exec(line)) !== null) {
+          tags.enforcedBy = t[1];
+          tags.behavioralReason = t[1] === "behavioral" && /--/.test(t[2] + block);
+        }
+      }
+      if (tags.shapes.length > 0 || tags.enforcedBy !== null) {
+        found.push({
+          file: rel,
+          name: m[2],
+          line: _lineOfIndex(src, m.index + m[0].length - 1),
+          ...tags,
+        });
+      }
+    }
+  }
+  return found;
+}
+
+test("guard/validator enforcement -- every tagged choke point declares its detector", () => {
+  // reason: a choke point without an @enforced-by is an unenforced
+  // promise -- nothing stops the next module from re-inlining the shape it
+  // owns. Every function carrying a @guard-shape / @validator-shape must
+  // name the detector class that enforces it (registered above) or declare
+  // `behavioral -- <reason>` when the RED conformance vector IS the guard.
+  const bad = [];
+  for (const g of _collectTaggedExports()) {
+    if (g.shapes.length > 0 && g.enforcedBy === null) {
+      bad.push({ file: g.file, line: g.line, content: g.name + " has @guard-shape but no @enforced-by" });
+    } else if (g.enforcedBy === "behavioral") {
+      if (!g.behavioralReason) {
+        bad.push({ file: g.file, line: g.line, content: g.name + " declares behavioral enforcement without a `-- <reason>`" });
+      }
+    } else if (g.enforcedBy !== null && !VALID_ALLOW_CLASSES[g.enforcedBy]) {
+      bad.push({ file: g.file, line: g.line, content: g.name + " names unregistered detector class '" + g.enforcedBy + "'" });
+    } else if (g.enforcedBy !== null && g.enforcedBy !== "behavioral" && /shape-reinlined$/.test(g.enforcedBy) && g.shapes.length === 0) {
+      bad.push({ file: g.file, line: g.line, content: g.name + " claims shape enforcement but declares no shape" });
+    }
+  }
+  _report("every @guard-shape / @validator-shape export declares a registered @enforced-by", bad);
+});
+
+test("guard/validator shape reinlined -- no module re-implements a tagged choke point", () => {
+  // reason: the whole value of a choke point is that its shape exists in
+  // exactly one place; a re-inline anywhere else (including a module that
+  // does not exist yet) reintroduces the bug class it was built to end --
+  // a second traversal regex to keep correct, a second comparison with a
+  // timing leak, a second Entry construction that drifts from the canon.
+  // The shapes are read off the guards themselves; comments are stripped
+  // from scanned files so tags and prose never match, but string and
+  // regex literals stay visible (a re-declared pattern IS the violation).
+  const guards = _collectTaggedExports().filter((g) => g.shapes.length > 0);
+  const bad = [];
+  for (const g of guards) {
+    const shapeRes = g.shapes.map((s) => new RegExp(s));
+    const viaRes = g.vias.map((v) => new RegExp(v));
+    for (const file of _srcFiles()) {
+      const rel = _relPath(file);
+      if (rel === g.file) continue;
+      const lines = _lines(_stripComments(_read(file)));
+      for (let i = 0; i < lines.length; i++) {
+        for (const re of shapeRes) {
+          if (!re.test(lines[i])) continue;
+          if (viaRes.some((v) => v.test(lines[i]))) continue;
+          bad.push({
+            file: rel,
+            line: i + 1,
+            content: "re-inlines the " + g.name + " shape owned by " + g.file + " -- route through the guard",
+          });
+        }
+      }
+    }
+  }
+  const kinds = new Set(guards.flatMap((g) => g.kinds));
+  let filtered = bad;
+  if (kinds.has("guard")) filtered = _filterMarkers(filtered, "guard-shape-reinlined");
+  if (kinds.has("validator")) filtered = _filterMarkers(filtered, "validator-shape-reinlined");
+  _report("no src module re-inlines a shape owned by a tagged guard/validator", filtered);
 });

@@ -13,18 +13,21 @@
 // at config time -- a mistyped TTL should fail at boot, not silently
 // become "no expiry".
 
-// The time scale lives here and only here; every consumer resolves
-// durations through parse() rather than multiplying its own literals.
+import { C } from "./constants.js";
+
+// Every consumer resolves durations through parse() rather than
+// multiplying its own literals; the scale facts live in constants.
 const UNIT_MS = {
-  s: 1000,
-  m: 60 * 1000,
-  h: 60 * 60 * 1000,
-  d: 24 * 60 * 60 * 1000,
+  s: C.TIME.SECOND,
+  m: C.TIME.MINUTE,
+  h: C.TIME.HOUR,
+  d: C.TIME.DAY,
 };
 
 const DURATION_PATTERN = /^(\d+)(s|m|h|d)$/;
 
 // parse(value, label) -> number(ms) | null | throws TypeError.
+// @enforced-by raw-time-scale-literal
 export function parse(value, label = "duration") {
   if (value === null || value === undefined) return null;
   if (typeof value === "number") {
