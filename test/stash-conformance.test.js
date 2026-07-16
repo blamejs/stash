@@ -8,7 +8,7 @@ import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 
-import { Stash, RefNotFound, InvalidRef, IntegrityError, StashError } from "../src/index.js";
+import { Stash, RefNotFound, InvalidRef, IntegrityError, StashError, SizeExceeded, StashFull } from "../src/index.js";
 import { MemoryBackend } from "../src/backends/memory.js";
 import { DiskBackend } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
@@ -345,7 +345,7 @@ for (const { name, create } of BACKENDS) {
       const inner = create();
       const calls = [];
       const backend = {};
-      for (const m of ["write", "read", "remove", "stat", "list"]) {
+      for (const m of ["write", "read", "remove", "stat", "list", "stats"]) {
         backend[m] = (...args) => { calls.push(m); return inner[m](...args); };
       }
       const stash = new Stash({ backend });
@@ -367,6 +367,7 @@ for (const { name, create } of BACKENDS) {
         stat: (...a) => inner.stat(...a),
         remove: (...a) => inner.remove(...a),
         list: (...a) => inner.list(...a),
+        stats: (...a) => inner.stats(...a),
         read: async (id) => {
           readCalled = true;
           const e = await inner.stat(id);
@@ -392,6 +393,7 @@ for (const { name, create } of BACKENDS) {
         stat: (...a) => inner.stat(...a),
         remove: (...a) => inner.remove(...a),
         list: (...a) => inner.list(...a),
+        stats: (...a) => inner.stats(...a),
         read: async (id) => {
           const e = await inner.stat(id);
           while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2));
@@ -417,6 +419,7 @@ for (const { name, create } of BACKENDS) {
         stat: (...a) => inner.stat(...a),
         remove: (...a) => inner.remove(...a),
         list: (...a) => inner.list(...a),
+        stats: (...a) => inner.stats(...a),
         read: async (id) => {
           const e = await inner.stat(id);
           while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2));
@@ -439,6 +442,7 @@ for (const { name, create } of BACKENDS) {
         stat: (...a) => inner.stat(...a),
         remove: (...a) => inner.remove(...a),
         list: (...a) => inner.list(...a),
+        stats: (...a) => inner.stats(...a),
         read: async (id) => {
           const e = await inner.stat(id);
           while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2));
@@ -468,6 +472,252 @@ for (const { name, create } of BACKENDS) {
         assert.throws(() => new Stash({ backend: create(), ttl }), TypeError);
       }
     });
+
+    // ---- M4 limits (SPEC.md 8) ------------------------------------------
+
+    test("maxSize: exactly the limit round-trips; one byte over is SizeExceeded", async () => {
+      const stash = new Stash({ backend: create(), maxSize: 16 });
+      const ref = await stash.push(Buffer.alloc(16, 7));
+      assert.equal((await drain(await stash.apply(ref))).length, 16);
+      await assert.rejects(stash.push(Buffer.alloc(17, 7)), (e) => e instanceof SizeExceeded && e.code === "E2BIG");
+    });
+
+    test("maxSize is enforced mid-stream: no chunk after the crossing one is pulled", async () => {
+      const stash = new Stash({ backend: create(), maxSize: 10 });
+      const pulled = [];
+      async function* chunks() {
+        for (let i = 0; i < 5; i++) { pulled.push(i); yield Buffer.alloc(4, i); } // 4,8,12 crosses at the third
+      }
+      await assert.rejects(stash.push(chunks()), SizeExceeded);
+      assert.ok(pulled.length <= 3, "stopped at the crossing chunk, not drained (pulled " + pulled.length + ")");
+    });
+
+    test("a single oversized chunk is rejected before it is copied into memory", async () => {
+      // The chunk's byte length must be checked before Buffer.from duplicates
+      // it, or a small maxSize can still be driven to OOM by one hostile chunk.
+      // A Proxy whose length is huge but whose data throws on access proves the
+      // copy never ran: if it had, reading index 0 would throw a different error.
+      const stash = new Stash({ backend: create(), maxSize: 16 });
+      const hostile = new Proxy({ length: 1e9 }, {
+        get(_target, prop) {
+          if (prop === "length") return 1e9;
+          // `then` and symbols are probed by `for await` and Buffer.from's type
+          // checks -- leave those; only a numeric-index read means the copy ran.
+          if (prop === "then" || typeof prop === "symbol") return undefined;
+          throw new Error("chunk data was read -- the copy ran before the size check");
+        },
+      });
+      async function* one() { yield hostile; }
+      await assert.rejects(stash.push(one()), (e) => e instanceof SizeExceeded);
+    });
+
+    test("maxSize bounds an ArrayBuffer chunk: no .length is not a bypass", async () => {
+      // An ArrayBuffer has no `.length`, so measuring it as chunk.length yields
+      // undefined and the running total goes NaN -- every comparison false -- and
+      // an oversized ArrayBuffer slips past maxSize entirely. It must be measured
+      // by byteLength.
+      const stash = new Stash({ backend: create(), maxSize: 16 });
+      async function* one() { yield new ArrayBuffer(64); } // 4x maxSize
+      await assert.rejects(stash.push(one()), (e) => e instanceof SizeExceeded && e.code === "E2BIG");
+    });
+
+    test("maxSize bounds a SharedArrayBuffer chunk the same as an ArrayBuffer", async () => {
+      // A SharedArrayBuffer is not `instanceof ArrayBuffer`, so a bare instanceof
+      // check misses it and its bytes go unmeasured (chunk.length is undefined),
+      // yet Buffer.from stores every byte -- the bytes counted must be the bytes
+      // written. A realm-proof brand check measures it by byteLength.
+      const stash = new Stash({ backend: create(), maxSize: 16 });
+      async function* one() { yield new SharedArrayBuffer(64); } // 4x maxSize
+      await assert.rejects(stash.push(one()), (e) => e instanceof SizeExceeded && e.code === "E2BIG");
+    });
+
+    test("maxSize measures a typed array by its bytes, not its element count", async () => {
+      // A Uint16Array's `.length` is its element count; its byte size is twice
+      // that. Measuring by `.length` lets a 128-byte view slip past a 100-byte
+      // maxSize -- the byte length is what fills the store.
+      const stash = new Stash({ backend: create(), maxSize: 100 });
+      async function* one() { yield new Uint16Array(64); } // 64 elements = 128 bytes
+      await assert.rejects(stash.push(one()), (e) => e instanceof SizeExceeded && e.code === "E2BIG");
+    });
+
+    test("a typed-array chunk is stored by its exact bytes, not reinterpreted element-wise", async () => {
+      // Buffer.from(uint16array) copies element VALUES (each mod 256), losing the
+      // high byte of every element. The chunk must be normalized over its own
+      // bytes so a multi-byte view round-trips intact.
+      const stash = new Stash({ backend: create() });
+      const view = new Uint16Array([0x0102, 0x0304]); // 4 bytes in memory order
+      async function* one() { yield view; }
+      const ref = await stash.push(one());
+      const out = await drain(await stash.apply(ref));
+      assert.deepEqual(out, Buffer.from(view.buffer, view.byteOffset, view.byteLength));
+    });
+
+    test("an unbounded source is abandoned at the boundary, not drained", async () => {
+      const stash = new Stash({ backend: create(), maxSize: 64 });
+      let finallyRan = false;
+      let yielded = 0;
+      async function* infinite() {
+        try { for (;;) { yielded += 1; yield Buffer.alloc(8, 1); } } finally { finallyRan = true; }
+      }
+      await assert.rejects(stash.push(infinite()), SizeExceeded);
+      assert.equal(finallyRan, true, "the source's finally ran -- early termination reached it");
+      assert.ok(yielded <= 9, "pulls bounded by ~ceil(maxSize/chunk), not infinite (" + yielded + ")");
+    });
+
+    test("every source type over maxSize gets SizeExceeded", async () => {
+      const big = Buffer.alloc(20, 3);
+      const sources = [big, new Uint8Array(big), "x".repeat(20), Readable.from([big]), (async function* () { yield big; })()];
+      for (const src of sources) {
+        await assert.rejects(new Stash({ backend: create(), maxSize: 10 }).push(src), SizeExceeded);
+      }
+    });
+
+    test("maxSize counts UTF-8 bytes, not string length", async () => {
+      const stash = new Stash({ backend: create(), maxSize: 3 });
+      await assert.rejects(stash.push("\u00e9\u00e9"), SizeExceeded); // U+00E9 x2: 2 chars, 4 UTF-8 bytes
+      assert.match(await stash.push("abc"), /^v1_/); // 3 bytes fits exactly
+    });
+
+    test("a refused push leaves no poisoned state; a later legitimate push works", async () => {
+      const stash = new Stash({ backend: create(), maxSize: 8 });
+      await assert.rejects(stash.push(Buffer.alloc(9, 1)), SizeExceeded);
+      assert.deepEqual(await stash.list(), []);
+      const ref = await stash.push(Buffer.alloc(8, 1));
+      assert.equal((await stash.list()).length, 1);
+      assert.equal((await drain(await stash.apply(ref))).length, 8);
+    });
+
+    test("maxEntries: a full store is StashFull before the stream starts; drop frees a slot", async () => {
+      const inner = create();
+      const backend = {};
+      for (const m of ["write", "read", "remove", "stat", "list", "stats"]) backend[m] = (...a) => inner[m](...a);
+      const stash = new Stash({ backend, maxEntries: 1 });
+      const first = await stash.push("a");
+      let pulled = false;
+      async function* watched() { pulled = true; yield Buffer.from("b"); }
+      await assert.rejects(stash.push(watched()), (e) => e instanceof StashFull && e.code === "EFULL");
+      assert.equal(pulled, false, "rejected before the source was pulled -- no eviction, no wasted read");
+      await stash.drop(first);
+      assert.match(await stash.push("b"), /^v1_/);
+    });
+
+    test("maxTotal: a push whose footprint exceeds the remaining headroom is StashFull; the partial is cleaned; a fitting re-push works", async () => {
+      // maxTotal bounds the stored footprint (blob + sidecar), so size it from a
+      // measured entry rather than a bare blob-byte count. Room for two such
+      // entries leaves headroom for a second small blob but not a large one.
+      const gauge = create();
+      await new Stash({ backend: gauge }).push(Buffer.alloc(10, 1));
+      const oneEntry = (await gauge.stats()).bytes; // one 10-byte-blob entry: blob plus sidecar
+      const stash = new Stash({ backend: create(), maxTotal: 2 * oneEntry });
+      await stash.push(Buffer.alloc(10, 1)); // the first entry lands
+      // a blob as large as a whole entry cannot fit beside the first plus a new sidecar
+      await assert.rejects(stash.push(Buffer.alloc(oneEntry, 2)), (e) => e instanceof StashFull && e.code === "EFULL");
+      assert.equal((await stash.list()).length, 1); // the over-budget push left no partial
+      assert.match(await stash.push(Buffer.alloc(4, 2)), /^v1_/); // a small blob still fits the headroom
+    });
+
+    test("maxTotal boundary: an entry filling the limit lands; any further push -- even zero-byte -- rejects", async () => {
+      // A zero-byte blob is not free: it still carries a sidecar. So at the limit
+      // even an empty push rejects, because its sidecar alone no longer fits.
+      const gauge = create();
+      await new Stash({ backend: gauge }).push(Buffer.alloc(10, 1));
+      const oneEntry = (await gauge.stats()).bytes;
+      const stash = new Stash({ backend: create(), maxTotal: oneEntry }); // room for exactly one
+      await stash.push(Buffer.alloc(10, 1)); // fills the store to the limit
+      await assert.rejects(stash.push(Buffer.alloc(0)), StashFull); // a zero-byte blob still needs a sidecar
+      await assert.rejects(stash.push(Buffer.alloc(1, 2)), StashFull);
+      assert.equal((await stash.list()).length, 1);
+    });
+
+    test("with both bounds set, a per-entry overflow reports SizeExceeded, not StashFull", async () => {
+      // maxSize is the per-entry cap, maxTotal the whole-store cap. A blob over
+      // maxSize reports the permanent verdict (SizeExceeded) -- a retry can't shrink
+      // the entry -- rather than the transient StashFull, since _boundedSource
+      // checks the per-entry bound before the stash-wide residual on each chunk.
+      const stash = new Stash({ backend: create(), maxSize: 4, maxTotal: "1gb" });
+      await assert.rejects(stash.push(Buffer.alloc(5, 2)), (e) => e instanceof SizeExceeded && e.code === "E2BIG");
+    });
+
+    test("maxTotal counts the entry's own metadata: a tiny blob with a large meta is StashFull, not a bypass", async () => {
+      // stats().bytes counts blob + sidecar, and the sidecar serializes meta. If
+      // the pre-check bounded only the blob, a caller could push unbounded metadata
+      // under maxTotal by keeping the blob tiny. The entry's own sidecar counts
+      // against the headroom, so an oversized meta is refused before it lands.
+      const stash = new Stash({ backend: create(), maxTotal: 400 });
+      await assert.rejects(
+        stash.push(Buffer.alloc(1, 1), { meta: { big: "a".repeat(2000) } }),
+        (e) => e instanceof StashFull && e.code === "EFULL",
+      );
+      assert.deepEqual(await stash.list(), []); // nothing landed
+    });
+
+    test("maxTotal counts every entry's sidecar: repeated zero-byte pushes cannot grow the store without bound", async () => {
+      // A zero-byte blob still costs a sidecar. Once the footprint reaches maxTotal
+      // even an empty push is refused -- the sidecar alone no longer fits -- so a
+      // loop of zero-byte pushes can't creep past the limit one sidecar at a time.
+      const stash = new Stash({ backend: create(), maxTotal: 600 });
+      let stored = 0;
+      for (let i = 0; i < 50; i += 1) {
+        try {
+          await stash.push(Buffer.alloc(0));
+          stored += 1;
+        } catch (e) {
+          assert.ok(e instanceof StashFull);
+          break;
+        }
+      }
+      assert.ok(stored >= 1, "at least one zero-byte entry fits");
+      assert.ok(stored < 50, "the store fills and rejects rather than admitting all 50");
+    });
+
+    test("an unlimited stash never reads backend.stats()", async () => {
+      const inner = create();
+      let statsCalls = 0;
+      const backend = {};
+      for (const m of ["write", "read", "remove", "stat", "list"]) backend[m] = (...a) => inner[m](...a);
+      backend.stats = (...a) => { statsCalls += 1; return inner.stats(...a); };
+      const stash = new Stash({ backend });
+      await stash.push(Buffer.alloc(4096, 1));
+      assert.equal(statsCalls, 0, "the common path pays nothing for the feature");
+    });
+
+    test("expired-but-unswept entries do not hold the door shut (maxEntries and maxTotal)", async () => {
+      const s1 = new Stash({ backend: create(), maxEntries: 1 });
+      await s1.push("dead", { ttl: 0 }); // expired at birth
+      const live1 = await s1.push("live"); // the pre-check prunes the dead one, then admits this
+      assert.equal((await s1.show(live1)).id, live1);
+      assert.deepEqual((await s1.list({ includeExpired: true })).map((e) => e.id), [live1]);
+
+      const gauge = create();
+      await new Stash({ backend: gauge }).push(Buffer.alloc(12, 9));
+      const oneEntry = (await gauge.stats()).bytes; // one 12-byte-blob entry: blob plus sidecar
+      const s2 = new Stash({ backend: create(), maxTotal: oneEntry }); // room for exactly one
+      await s2.push(Buffer.alloc(12, 9), { ttl: 0 }); // fat and expired, fills the store
+      const live2 = await s2.push(Buffer.alloc(12, 1)); // fits only once the dead one is reaped
+      assert.equal((await s2.show(live2)).id, live2);
+    });
+
+    test("maxTotal: an expired entry in the sidecar band does not block a live push", async () => {
+      // The rejection threshold with the sidecar charged is maxTotal - sidecar,
+      // BELOW maxTotal. If the prune only fires at stats.bytes >= maxTotal, a dead
+      // entry that leaves the footprint in the band (maxTotal - sidecar, maxTotal)
+      // is never reaped, and a live push is wrongly refused. Expired entries must
+      // be reclaimed before the headroom is judged.
+      const gauge = create();
+      await new Stash({ backend: gauge }).push(Buffer.alloc(8, 1), { ttl: 0 });
+      const oneDead = (await gauge.stats()).bytes; // a dead 8-byte entry's footprint
+      const stash = new Stash({ backend: create(), maxTotal: oneDead + 1 });
+      await stash.push(Buffer.alloc(8, 1), { ttl: 0 }); // fills to oneDead: inside the band
+      const live = await stash.push(Buffer.alloc(8, 2)); // must reap the dead one first
+      assert.equal((await stash.show(live)).id, live);
+      assert.deepEqual((await stash.list({ includeExpired: true })).map((e) => e.id), [live]);
+    });
+
+    test("StashFull/SizeExceeded are StashErrors; a bad limit value is a config TypeError, not a StashError", async () => {
+      const stash = new Stash({ backend: create(), maxSize: 4 });
+      await assert.rejects(stash.push(Buffer.alloc(5, 1)), (e) => e instanceof StashError);
+      assert.throws(() => new Stash({ backend: create(), maxSize: "nope" }), (e) => e instanceof TypeError && !(e instanceof StashError));
+    });
   });
 }
 
@@ -482,6 +732,7 @@ suite("clear under concurrent destruction", () => {
       read: (...args) => inner.read(...args),
       stat: (...args) => inner.stat(...args),
       list: (...args) => inner.list(...args),
+      stats: (...args) => inner.stats(...args),
       remove: async (id) => {
         if (id === vanish) {
           vanish = null;
@@ -508,6 +759,7 @@ suite("prune under concurrent destruction", () => {
       read: (...a) => inner.read(...a),
       stat: (...a) => inner.stat(...a),
       list: (...a) => inner.list(...a),
+      stats: (...a) => inner.stats(...a),
       remove: async (id) => {
         if (id === vanish) { vanish = null; await inner.remove(id); return false; }
         return inner.remove(id);
@@ -581,6 +833,7 @@ suite("M3 lifecycle: sweeper, close, disposal (SPEC.md 7, 7.1)", () => {
       read: (...a) => inner.read(...a),
       stat: (...a) => inner.stat(...a),
       remove: (...a) => inner.remove(...a),
+      stats: (...a) => inner.stats(...a),
       list: async () => { ticks += 1; throw new Error("sweep boom"); },
     };
     const stash = new Stash({ backend, sweepInterval: 5 });
@@ -603,6 +856,7 @@ suite("M3 lifecycle: sweeper, close, disposal (SPEC.md 7, 7.1)", () => {
       read: (...a) => inner.read(...a),
       stat: (...a) => inner.stat(...a),
       remove: (...a) => inner.remove(...a),
+      stats: (...a) => inner.stats(...a),
       list: async () => {
         inFlight += 1;
         maxConcurrent = Math.max(maxConcurrent, inFlight);
@@ -630,6 +884,7 @@ suite("M3 lifecycle: sweeper, close, disposal (SPEC.md 7, 7.1)", () => {
       write: (...a) => inner.write(...a),
       read: (...a) => inner.read(...a),
       stat: (...a) => inner.stat(...a),
+      stats: (...a) => inner.stats(...a),
       list: async () => { sweepEnteredList = true; await listGate; return inner.list(); },
       remove: async (id) => { if (closeResolved) removedAfterClose = true; return inner.remove(id); },
     };
@@ -700,6 +955,21 @@ for (const { name, create } of BACKENDS) {
       await assert.rejects(backend.stat(absent), RefNotFound);
       assert.equal(await backend.remove(absent), false);
     });
+
+    test("stats() is { entries, bytes, claimed } of non-negative safe integers, and tracks writes and removes", async () => {
+      const backend = create();
+      assert.deepEqual(await backend.stats(), { entries: 0, bytes: 0, claimed: 0 });
+      const id = generate();
+      const skeleton = { id, size: 0, digest: null, createdAt: 0, expiresAt: null, reads: null, readsLeft: null, meta: {} };
+      await backend.write(id, [Buffer.alloc(9, 1)], skeleton);
+      const s = await backend.stats();
+      assert.equal(s.entries, 1);
+      assert.ok(s.bytes > 9, "footprint counts the sidecar metadata, not just the 9 blob bytes");
+      assert.equal(s.claimed, 0);
+      for (const v of [s.entries, s.bytes, s.claimed]) assert.equal(Number.isSafeInteger(v) && v >= 0, true);
+      await backend.remove(id);
+      assert.deepEqual(await backend.stats(), { entries: 0, bytes: 0, claimed: 0 });
+    });
   });
 }
 
@@ -708,7 +978,7 @@ suite("ref validation precedes storage access", () => {
     const calls = [];
     const inner = new MemoryBackend();
     const backend = {};
-    for (const method of ["write", "read", "remove", "stat", "list"]) {
+    for (const method of ["write", "read", "remove", "stat", "list", "stats"]) {
       backend[method] = (...args) => {
         calls.push(method);
         return inner[method](...args);
@@ -740,6 +1010,7 @@ suite("integrity", () => {
       stat: (...args) => inner.stat(...args),
       remove: (...args) => inner.remove(...args),
       list: (...args) => inner.list(...args),
+      stats: (...args) => inner.stats(...args),
       read: async (id) => {
         await inner.read(id);
         return Readable.from([Buffer.from("tampered bytes")]);
@@ -778,10 +1049,40 @@ suite("config-time failures", () => {
 
   test("spec options whose milestone has not shipped throw, never sit unenforced", () => {
     const backend = new MemoryBackend();
-    for (const key of ["maxSize", "maxEntries", "maxTotal", "onPopFailure", "tombstoneTtl", "claimTimeout"]) {
+    for (const key of ["onPopFailure", "tombstoneTtl", "claimTimeout"]) {
       assert.throws(() => new Stash({ backend, [key]: "1h" }), TypeError);
     }
     assert.throws(() => new Stash({ backend: new MemoryBackend(), unknownKnob: 1 }), TypeError);
+  });
+
+  test("limit bounds are validated at construction (an unvalidated bound is a disabled check)", () => {
+    // maxSize / maxTotal: a size string or positive byte count. Zero, negative,
+    // fractional, malformed strings, and non-size values are config errors --
+    // reaching a `count > bound` compare with any of them fails open or fails
+    // everything.
+    for (const bad of [0, -1, NaN, Infinity, 1.5, "0mb", "1.5mb", "mb", "10h", "100", true, {}, []]) {
+      assert.throws(() => new Stash({ backend: new MemoryBackend(), maxSize: bad }), TypeError);
+      assert.throws(() => new Stash({ backend: new MemoryBackend(), maxTotal: bad }), TypeError);
+    }
+    // maxEntries is a positive integer count with no string form.
+    for (const bad of [0, -1, 1.5, NaN, Infinity, "100", "10mb", true, {}]) {
+      assert.throws(() => new Stash({ backend: new MemoryBackend(), maxEntries: bad }), TypeError);
+    }
+    // valid bounds construct without throwing (maxSize within maxTotal)
+    new Stash({ backend: new MemoryBackend(), maxSize: "100mb", maxTotal: "1gb", maxEntries: 10 });
+  });
+
+  test("maxSize above maxTotal is a config-time TypeError (a per-entry cap that can never bind)", () => {
+    // An empty store admits at most maxTotal bytes, so a maxSize larger than
+    // maxTotal is a cap that never fires -- surface the contradiction at boot,
+    // not as silent dead configuration.
+    assert.throws(() => new Stash({ backend: new MemoryBackend(), maxSize: 100, maxTotal: 50 }), TypeError);
+    assert.throws(() => new Stash({ backend: new MemoryBackend(), maxSize: "2gb", maxTotal: "1gb" }), TypeError);
+    // equal is coherent (an entry of exactly maxTotal fits an empty store), and
+    // either bound alone imposes no cross-constraint.
+    new Stash({ backend: new MemoryBackend(), maxSize: 50, maxTotal: 50 });
+    new Stash({ backend: new MemoryBackend(), maxSize: 100 });
+    new Stash({ backend: new MemoryBackend(), maxTotal: 50 });
   });
 
   test("push rejects unimplemented and unknown options", async () => {

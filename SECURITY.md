@@ -80,9 +80,22 @@ exception, a hang -- is reported as a crash. The harness lives in
 - **Treat `StashError` codes as the branch surface.** Messages may change
   between patches; codes are frozen (see SPEC.md section 10).
 - **Size the store's limits before exposing `push` to any network path.**
-  `maxSize` / `maxEntries` exist so a request flood becomes a loud `StashFull`
-  instead of a full disk (enforcement ships at the M4 milestone -- until then,
-  the constructor refuses the options rather than silently not enforcing them).
+  `maxSize` bounds each entry mid-stream and `maxEntries` / `maxTotal` bound the
+  whole store, so a request flood -- or a single unbounded upload -- becomes a
+  loud `SizeExceeded` / `StashFull` instead of a full disk. An oversized source
+  is cut off at the limit, not written and then measured, and a rejected push
+  leaves no partial behind. `maxTotal` counts the stored footprint -- each blob
+  plus its metadata -- so a caller cannot slip past it with many tiny blobs
+  carrying large `meta`.
+- **Set `maxTotal` against the real endpoint, not just an arbitrary number.**
+  The limit is a ceiling you choose; it does not read the disk. A `maxTotal`
+  above the partition's free space never fires -- the filesystem fills first and
+  the write dies with an I/O error instead of a clean `StashFull`. Keep it below
+  the free capacity of the backing partition, leave slack for the one-entry
+  sidecar overshoot and for block-granularity rounding on many small entries,
+  and keep `maxSize` at or below `maxTotal`. On the memory backend the ceiling is
+  the process heap, not a partition. SPEC.md section 8.2 has the full sizing
+  guidance.
 
 ## What StashJS deliberately does not do
 

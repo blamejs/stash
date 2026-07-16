@@ -429,4 +429,48 @@ export class DiskBackend {
     }
     return out;
   }
+
+  // stats() -> { entries, bytes, claimed }. The stash-wide limit pre-check reads
+  // this aggregate rather than parsing every sidecar: `entries` is the sidecar
+  // count (`.tmp` excluded), `bytes` the stored footprint -- each entry's blob
+  // size PLUS its sidecar file size, so a limit sees the real cost and a caller
+  // can't slip past `maxTotal` with tiny blobs and huge `meta`. `claimed` is the
+  // count in claims/ (0 until the claim machinery lands, M5). Loud, not lossy: a
+  // foreign name in meta/ fails the same way list() does. The sidecar is stat'd
+  // BEFORE the entry is counted, so a sidecar that vanished between the readdir
+  // and its lstat (a concurrent sweep or drop) is skipped entirely -- not counted
+  // as an entry with zero bytes -- keeping `entries` in step with what list()
+  // would report. Once the sidecar is counted, a blob that vanished the same way
+  // contributes nothing rather than failing.
+  async stats() {
+    const metaDir = await this.#containedDir("meta");
+    const blobDir = await this.#containedDir("blobs");
+    const claimsDir = await this.#containedDir("claims");
+    let entries = 0;
+    let bytes = 0;
+    for (const name of await readdir(metaDir)) {
+      if (name.endsWith(".tmp")) continue;
+      const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
+      if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
+      let sidecarSize;
+      try {
+        sidecarSize = (await lstat(join(metaDir, name))).size; // the sidecar file
+      } catch (err) {
+        _absent(err); // the sidecar vanished mid-scan -> not a live entry; skip it
+        continue;     // whole, the same tolerance list() holds -- never count it
+      }
+      entries += 1;
+      bytes += sidecarSize;
+      try {
+        bytes += (await lstat(join(blobDir, id))).size; // the blob
+      } catch (err) {
+        _absent(err); // the blob vanished mid-scan -> count the sidecar only
+      }
+    }
+    let claimed = 0;
+    for (const name of await readdir(claimsDir)) {
+      if (!name.endsWith(".tmp")) claimed += 1;
+    }
+    return { entries, bytes, claimed };
+  }
 }

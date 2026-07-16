@@ -24,7 +24,7 @@ import { open } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
-import { Stash, RefNotFound, InvalidRef, IntegrityError } from "../src/index.js";
+import { Stash, RefNotFound, InvalidRef, IntegrityError, SizeExceeded } from "../src/index.js";
 import { DiskBackend, descriptorMatchesName, verifyDescriptorAgainstName } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
 import { freshScratchDir, cleanupScratch } from "./_scratch.js";
@@ -688,5 +688,60 @@ suite("disk: hostile sidecars", () => {
         assert.doesNotMatch(err.message, /[\\/]/);
       }
     );
+  });
+});
+
+suite("disk: limits (SPEC.md 8)", () => {
+  test("an oversized push leaves no blob, sidecar, or .tmp on disk", async () => {
+    const { root } = freshStash();
+    const stash = new Stash({ backend: new DiskBackend({ root }), maxSize: 16 });
+    await assert.rejects(stash.push(Buffer.alloc(32, 1)), SizeExceeded);
+    assert.deepEqual(readdirSync(join(root, "blobs")), []);
+    assert.deepEqual(readdirSync(join(root, "meta")), []);
+  });
+
+  test("an oversized hostile source stops at the boundary; the tmp never absorbs the tail", async () => {
+    const { root } = freshStash();
+    const stash = new Stash({ backend: new DiskBackend({ root }), maxSize: 64 });
+    let pulled = 0;
+    async function* hostile() {
+      for (;;) { pulled += 1; yield Buffer.alloc(16, 1); } // 4x maxSize in 16-byte chunks
+    }
+    await assert.rejects(stash.push(hostile()), SizeExceeded);
+    assert.ok(pulled <= 5, "pulls bounded near ceil(maxSize/chunk) -- the check is before the yield (pulled " + pulled + ")");
+    assert.deepEqual(readdirSync(join(root, "blobs")), []);
+  });
+
+  test("stats() sums the sidecar count and blob sizes, and fails loudly on a foreign name in meta/", async () => {
+    const { root, stash } = freshStash();
+    await stash.push(Buffer.alloc(10, 1));
+    await stash.push(Buffer.alloc(5, 2));
+    const backend = new DiskBackend({ root });
+    const s = await backend.stats();
+    assert.equal(s.entries, 2);
+    assert.ok(s.bytes > 15, "footprint counts the two sidecar files on top of the 15 blob bytes");
+    assert.equal(s.claimed, 0);
+    // a foreign name in meta/ is corruption, surfaced the same way list() does
+    writeFileSync(join(root, "meta", "intruder.json"), "{}");
+    await assert.rejects(backend.stats(), IntegrityError);
+  });
+
+  test("stats() counts an entry only when its sidecar is present, in step with list()", async () => {
+    // stats() stats each sidecar BEFORE counting it, so `entries` matches what
+    // list() reports: a sidecar removed by a concurrent sweep is skipped, never
+    // counted as a zero-byte entry (the same tolerance list() holds against a
+    // sidecar that vanishes between the readdir and the per-entry read). A blob
+    // removed under a surviving sidecar still counts the entry, at its sidecar
+    // size alone.
+    const { root, stash } = freshStash();
+    await stash.push(Buffer.alloc(10, 1));
+    const b = await stash.push(Buffer.alloc(5, 2));
+    rmSync(join(root, "blobs", b)); // blob gone, sidecar survives
+    const backend = new DiskBackend({ root });
+    const s = await backend.stats();
+    const listed = await backend.list();
+    assert.equal(s.entries, 2, "both sidecars present -> both counted");
+    assert.equal(s.entries, listed.length, "stats().entries agrees with list().length");
+    assert.ok(s.bytes > 10, "counts one intact blob plus both sidecars, minus the removed blob");
   });
 });

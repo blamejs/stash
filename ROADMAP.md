@@ -1,7 +1,7 @@
 # Roadmap
 
 `SPEC.md` is the contract; section 12 defines the milestones. This file tracks
-their status. One milestone ships at a time, each ending green and committed.
+their status. Each milestone ships green and committed.
 
 ## M1 -- Skeleton -- SHIPPED (0.1.0)
 
@@ -30,12 +30,18 @@ sweep. `list()` filters expired by default (`includeExpired` reveals them);
 exit, skips overlapping ticks, and cannot crash the process on failure.
 `close()` (and `Symbol.asyncDispose` for `await using`) stops the timer.
 
-## M4 -- Limits -- NEXT
+## M4 -- Limits -- SHIPPED (0.1.6)
 
-`maxSize` enforced mid-stream, `maxEntries` / `maxTotal`, partial cleanup on
-rejection.
+`maxSize` bounds each entry and is enforced as the bytes stream: the count is
+checked before each chunk reaches the backend, so an oversized or unbounded
+source aborts with `SizeExceeded` at the limit instead of filling the disk.
+`maxEntries` and `maxTotal` bound the whole store; a push that would exceed
+either is refused with `StashFull`, and nothing already stored is evicted.
+Expired-but-unswept entries are pruned before the store is judged full, so a
+dead entry never blocks a live push. Every rejected push leaves no partial
+behind. The backend contract gains `stats()` for the aggregate the checks read.
 
-## M5 -- Pop & budgets
+## M5 -- Pop & budgets -- NEXT
 
 The claim/stream/commit cycle, `onPopFailure` (`'restore'` default, `'burn'`
 opt-in), crash recovery, read budgets on the same claim machinery.

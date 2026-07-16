@@ -197,6 +197,7 @@ const VALID_ALLOW_CLASSES = {
   "dead-underscore-function": 1,
   "unimported-builtin-call": 1,
   "path-reresolved-read": 1,
+  "npm-shim-bare-spawn": 1,
   "constant-time-compare-short-circuited": 1,
   "wiki-port-cross-artifact-drift": 1,
   "wiki-runtime-file-uncopied": 1,
@@ -812,6 +813,37 @@ test("path-reresolved-read -- no path-based blob/sidecar read in src/", () => {
   let bad = _scanLines(_srcFiles(), re, { prepare: _stripCommentsAndLiterals });
   bad = _filterMarkers(bad, "path-reresolved-read");
   _report("no path-based createReadStream/readFile in src/ (open an fd and read the handle -- CWE-367)", bad);
+});
+
+// ---------------------------------------------------------------------------
+// npm-shim-bare-spawn -- npm/npx invoked as a bare command, never through a shell
+// ---------------------------------------------------------------------------
+
+test("npm-shim-bare-spawn -- npm/npx runs through a shell, never a bare spawn", () => {
+  // reason: `npm` and `npx` resolve to `.cmd` shims on Windows that Node
+  // refuses to spawn directly, so passing "npm" as the command with an args
+  // array -- whether to spawnSync/spawn/execFile or to a capture/run wrapper --
+  // returns ENOENT on Windows while passing on Linux CI. That is an OS-specific
+  // break the Linux runner cannot see: it is what falsely failed the 0.1.4
+  // publish verification. The required form is the shell command STRING
+  // (spawnSync("npm view ...", [], { shell: true })), where "npm" is followed
+  // by its subcommand inside the string rather than being the whole first
+  // argument. Anchored on the command-plus-args-array SHAPE ("npm" | "npx" as a
+  // complete literal immediately followed by `, [`), not a spawn function name,
+  // so a renamed wrapper is still caught and the shell command-string form
+  // stays silent (its literal is "npm <sub>...", never bare "npm"). A bare
+  // spawn whose args come from a variable rather than an inline array is the
+  // documented residual; tooling here always passes the array inline.
+  // The quote class is written with hex escapes (\x22 = ", \x27 = ') so this
+  // regex literal carries no bare quote that the shared comment/literal
+  // stripper (which does not parse regex literals) would mis-pair.
+  const re = /[\x22\x27](?:npm|npx)[\x22\x27]\s*,\s*\[/;
+  let bad = _scanLines(_scriptFiles().concat(_testFiles(), _srcFiles()), re, {
+    prepare: _stripComments,
+    skipSelf: true,
+  });
+  bad = _filterMarkers(bad, "npm-shim-bare-spawn");
+  _report("no bare npm/npx spawn (use the shell command-string form -- npm is npm.cmd on Windows)", bad);
 });
 
 // ---------------------------------------------------------------------------
