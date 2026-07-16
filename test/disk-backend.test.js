@@ -19,6 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { open } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
 import { Stash, RefNotFound, InvalidRef, IntegrityError } from "../src/index.js";
@@ -51,6 +52,26 @@ function canSymlinkFiles() {
   }
 }
 const FILE_SYMLINKS = canSymlinkFiles();
+
+// A FIFO (named pipe) planted where a blob or sidecar belongs is the FIFO
+// vector: on POSIX an O_RDONLY open of a FIFO with no writer parks forever.
+// mkfifo is POSIX-only and unprivileged (Windows has neither the command
+// nor the parking semantics; the sandbox denies the spawn that creates
+// one), so probe once and skip where it is unavailable.
+function canMkfifo() {
+  if (process.platform === "win32") return false;
+  const probeDir = freshScratchDir("fifo-probe");
+  mkdirSync(probeDir, { recursive: true });
+  try {
+    execFileSync("mkfifo", [join(probeDir, "p")]);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true });
+  }
+}
+const FIFO_OK = canMkfifo();
 
 // Under --permission the runtime denies fs.symlink entirely, so the
 // vectors that PLANT links (the library only ever refuses them) run in
@@ -316,6 +337,31 @@ suite("disk: fd-based read discipline (CWE-367)", () => {
       open(guarded, constants.O_RDONLY | constants.O_NOFOLLOW),
       (err) => err.code === "ELOOP"
     );
+  });
+
+  // A blob or sidecar replaced with a FIFO (named pipe) that has no writer
+  // would park an O_RDONLY open forever -- before the fstat that rejects a
+  // non-regular shape can run -- hanging show / list / apply instead of
+  // failing. The non-blocking open returns at once so the fstat refuses the
+  // FIFO as damage. Each test carries its own timeout: a regression parks
+  // the test itself (a failure), never the shared runner.
+  test("a FIFO where a sidecar belongs is refused promptly, never blocks", { skip: !FIFO_OK || SANDBOXED, timeout: 10000 }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("legit", { meta: { k: "v" } });
+    const sidecarPath = join(root, "meta", ref + ".json");
+    rmSync(sidecarPath);
+    execFileSync("mkfifo", [sidecarPath]);
+    await assert.rejects(stash.show(ref), IntegrityError);
+    await assert.rejects(stash.list(), IntegrityError);
+  });
+
+  test("a FIFO where a blob belongs is refused promptly, never blocks", { skip: !FIFO_OK || SANDBOXED, timeout: 10000 }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("legit blob");
+    const blobPath = join(root, "blobs", ref);
+    rmSync(blobPath);
+    execFileSync("mkfifo", [blobPath]);
+    await assert.rejects(stash.apply(ref), IntegrityError);
   });
 
   // The no-follow guard for a platform WITHOUT O_NOFOLLOW (Windows): the

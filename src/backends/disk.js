@@ -35,7 +35,17 @@ const FILE_MODE = 0o600;
 // but before the read is the time-of-check/time-of-use class (CWE-367), and
 // a path-based read follows the swap. O_NOFOLLOW refuses a symlink where a
 // blob or sidecar belongs at open time on POSIX. O_RDONLY is 0.
-const READ_FLAGS = FS.O_RDONLY | (FS.O_NOFOLLOW || 0);
+//
+// O_NONBLOCK guards the open itself: a blob or sidecar swapped for a FIFO
+// (named pipe) with no writer parks an O_RDONLY open FOREVER on POSIX --
+// before fstat can run to reject the non-regular shape -- so a read would
+// hang instead of failing. Opening non-blocking returns immediately (or
+// ENXIO for a device with no reader), and the fstat then rejects the
+// non-regular file. It is inert for a regular file: POSIX read semantics
+// ignore O_NONBLOCK on regular files, so streaming a real blob is
+// unaffected. O_NONBLOCK is 0 on platforms that lack it (Windows), where a
+// FIFO cannot be planted unprivileged in the first place.
+const READ_FLAGS = FS.O_RDONLY | (FS.O_NOFOLLOW || 0) | (FS.O_NONBLOCK || 0);
 
 // Windows lacks O_NOFOLLOW (0 above), so the open cannot refuse a symlink on
 // its own there; a post-open lstat cross-checks the final component instead.
@@ -51,11 +61,13 @@ function _absent(err) {
   throw err;
 }
 
-// A symlink refused at open (ELOOP, POSIX O_NOFOLLOW) or a non-file the
-// open itself rejected (EISDIR on platforms that block opening a directory)
-// is store tampering, not absence.
+// A symlink refused at open (ELOOP, POSIX O_NOFOLLOW), a non-file the open
+// itself rejected (EISDIR on platforms that block opening a directory), or a
+// device / FIFO whose non-blocking open has no peer (ENXIO) is store
+// tampering, not absence: a blob or sidecar is a regular file, and any of
+// these means something else was put where one belongs.
 function _openTamper(err) {
-  return err && (err.code === "ELOOP" || err.code === "EISDIR");
+  return err && (err.code === "ELOOP" || err.code === "EISDIR" || err.code === "ENXIO");
 }
 
 // descriptorMatchesName(opened, named) -- does an open descriptor still
