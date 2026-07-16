@@ -55,13 +55,17 @@ export class MemoryBackend {
   #entries = new Map();
 
   // write(id, source, entry) -> Entry. Consumes the async-iterable source
-  // chunk by chunk, computing size and sha256 digest as bytes pass.
+  // chunk by chunk, computing size and sha256 digest as bytes pass. Every
+  // retained chunk is an OWNED COPY: the store outlives the push, so a
+  // caller that reuses its chunk buffer after a yield (a scratch buffer, a
+  // pooled slab) must not be able to rewrite stored bytes out from under
+  // the recorded digest.
   async write(id, source, entry) {
     const hash = createHash("sha256");
     const chunks = [];
     let size = 0;
     for await (const chunk of source) {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const buf = chunk instanceof Uint8Array ? Buffer.copyBytesFrom(chunk) : Buffer.from(chunk);
       hash.update(buf);
       size += buf.length;
       chunks.push(buf);

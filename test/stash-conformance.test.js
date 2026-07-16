@@ -70,6 +70,23 @@ for (const { name, create } of BACKENDS) {
       assert.equal((await drain(await stash.apply(ref))).toString("utf8"), "alpha beta");
     });
 
+    test("stream chunks are copied at write: caller buffer reuse cannot rewrite stored bytes", async () => {
+      // A source that reuses its chunk buffer after the yield -- the pooled
+      // slab / scratch-buffer pattern. The store outlives the push, so a
+      // retained reference (instead of an owned copy) lets the caller
+      // rewrite stored bytes out from under the recorded digest, and the
+      // entry dies unreadable on its next apply.
+      const stash = new Stash({ backend: create() });
+      const scratch = Buffer.from("aaaa");
+      async function* reusing() {
+        yield scratch;
+        scratch.fill(0x62); // runs after the store consumed the first chunk
+        yield Buffer.from("cccc");
+      }
+      const ref = await stash.push(reusing());
+      assert.equal((await drain(await stash.apply(ref))).toString("utf8"), "aaaacccc");
+    });
+
     test("round-trips mixed chunk types: string and Uint8Array chunks encode as bytes", async () => {
       const stash = new Stash({ backend: create() });
       async function* chunks() {
