@@ -144,6 +144,7 @@ const VALID_ALLOW_CLASSES = {
   "raw-time-scale-literal": 1,
   "inline-dynamic-import": 1,
   "dead-underscore-function": 1,
+  "unimported-builtin-call": 1,
 };
 
 // Drop matches suppressed by a file-level
@@ -575,6 +576,105 @@ test("dead-underscore-function -- every _helper is referenced", () => {
   }
   bad = _filterMarkers(bad, "dead-underscore-function");
   _report("no unused `_`-prefixed functions/consts in src/", bad);
+});
+
+// ---------------------------------------------------------------------------
+// (15) unimported-builtin-call -- every invoked builtin name is bound
+// ---------------------------------------------------------------------------
+
+// Parse the import statements out of comment-stripped source (specifiers
+// are string literals, so strings must survive). Yields, per statement,
+// the local bindings it creates and the module specifier it names.
+const _IMPORT_RE =
+  /import\s*(?:([\w$]+)\s*,?\s*)?(?:\{([^}]*)\}|\*\s*as\s+([\w$]+))?\s*(?:from\s*)?["']([^"']+)["']/g;
+
+function _importBindings(subject, each) {
+  let m;
+  _IMPORT_RE.lastIndex = 0;
+  while ((m = _IMPORT_RE.exec(subject)) !== null) {
+    const names = [];
+    if (m[1]) names.push(m[1]);
+    if (m[3]) names.push(m[3]);
+    if (m[2]) {
+      for (const part of m[2].split(",")) {
+        const name = part.trim().split(/\s+as\s+/).pop().trim();
+        if (name) names.push(name);
+      }
+    }
+    each(names, m[4]);
+  }
+}
+
+test("unimported-builtin-call -- no bare call to an unbound node builtin export", () => {
+  // reason: a bare invocation of a node builtin export name (writeFileSync,
+  // spawnSync, ...) that the file neither imports nor declares is a latent
+  // ReferenceError on whichever branch reaches it -- and the unexercised
+  // branch is often the rarely-run one (an error path, a release step), so
+  // the crash ships silently. The name sets are read off the builtin
+  // modules themselves at scan time via process.getBuiltinModule -- the
+  // frozen upstream contract, not a renameable local -- and a name is
+  // satisfied only by an import binding, a local declaration/parameter, or
+  // being a global.
+  const files = _allJsFiles();
+
+  // Every node: module imported anywhere in the scanned tree contributes
+  // its export names: a file that calls a builtin export without importing
+  // its module at all is the same ReferenceError class.
+  const builtinNames = new Set();
+  for (const file of files) {
+    _importBindings(_stripComments(_read(file)), (names, spec) => {
+      if (!spec.startsWith("node:")) return;
+      for (const name of Object.keys(process.getBuiltinModule(spec))) builtinNames.add(name);
+    });
+  }
+
+  let bad = [];
+  for (const file of files) {
+    const rel = _relPath(file);
+    const raw = _read(file);
+    const subject = _stripCommentsAndLiterals(raw);
+    const bound = new Set();
+    _importBindings(_stripComments(raw), (names) => {
+      for (const name of names) bound.add(name);
+    });
+    // Declarations, destructurings, and function/arrow parameters.
+    const declRe = /\b(?:function|class|const|let|var)\s+([\w$]+)/g;
+    let m;
+    while ((m = declRe.exec(subject)) !== null) bound.add(m[1]);
+    const destructRe = /\b(?:const|let|var)\s*[{[]([^}\]]*)[}\]]/g;
+    while ((m = destructRe.exec(subject)) !== null) {
+      for (const tok of m[1].split(/[,:]/)) {
+        const name = tok.trim().replace(/=.*$/, "").trim();
+        if (/^[\w$]+$/.test(name)) bound.add(name);
+      }
+    }
+    const paramRe = /\bfunction\s*[\w$]*\s*\(([^()]*)\)|(?<![\w$])\(([^()]*)\)\s*=>|(?<![\w$.])([\w$]+)\s*=>/g;
+    while ((m = paramRe.exec(subject)) !== null) {
+      for (const tok of (m[1] || m[2] || m[3] || "").split(",")) {
+        const name = tok.trim().replace(/=.*$/, "").trim();
+        if (/^[\w$]+$/.test(name)) bound.add(name);
+      }
+    }
+    const lines = _lines(subject);
+    const rawLines = _lines(raw);
+    for (let i = 0; i < lines.length; i++) {
+      const callRe = /(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g;
+      let c;
+      while ((c = callRe.exec(lines[i])) !== null) {
+        const name = c[1];
+        if (!builtinNames.has(name) || bound.has(name) || name in globalThis) continue;
+        // Method-definition shorthand (`name(params) {`) declares, never calls.
+        if (/^[\w$]+\s*\([^()]*\)\s*\{/.test(lines[i].slice(c.index))) continue;
+        bad.push({
+          file: rel,
+          line: i + 1,
+          content: "bare call to unbound builtin export '" + name + "': " + (rawLines[i] || "").trim(),
+        });
+      }
+    }
+  }
+  bad = _filterMarkers(bad, "unimported-builtin-call");
+  _report("every invoked node builtin export name is imported or locally bound", bad);
 });
 
 // ---------------------------------------------------------------------------
