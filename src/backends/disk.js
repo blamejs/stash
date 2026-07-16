@@ -432,11 +432,13 @@ export class DiskBackend {
 
   // stats() -> { entries, bytes, claimed }. The stash-wide limit pre-check reads
   // this aggregate rather than parsing every sidecar: `entries` is the sidecar
-  // count (`.tmp` excluded), `bytes` the sum of blob sizes by lstat, `claimed`
-  // the count in claims/ (0 until the claim machinery lands, M5). Loud, not
-  // lossy: a foreign name in meta/ fails the same way list() does. A blob that
-  // vanished between the meta readdir and its lstat contributes nothing rather
-  // than failing -- a concurrent removal, the same tolerance list() holds.
+  // count (`.tmp` excluded), `bytes` the stored footprint -- each entry's blob
+  // size PLUS its sidecar file size, so a limit sees the real cost and a caller
+  // can't slip past `maxTotal` with tiny blobs and huge `meta`. `claimed` is the
+  // count in claims/ (0 until the claim machinery lands, M5). Loud, not lossy: a
+  // foreign name in meta/ fails the same way list() does. A file that vanished
+  // between its readdir and its lstat contributes nothing rather than failing --
+  // a concurrent removal, the same tolerance list() holds.
   async stats() {
     const metaDir = await this.#containedDir("meta");
     const blobDir = await this.#containedDir("blobs");
@@ -449,9 +451,14 @@ export class DiskBackend {
       if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
       entries += 1;
       try {
-        bytes += (await lstat(join(blobDir, id))).size;
+        bytes += (await lstat(join(metaDir, name))).size; // the sidecar file
       } catch (err) {
-        _absent(err); // ENOENT: the blob vanished mid-scan -> count nothing; any other fault is loud
+        _absent(err); // vanished mid-scan -> count nothing; any other fault is loud
+      }
+      try {
+        bytes += (await lstat(join(blobDir, id))).size; // the blob
+      } catch (err) {
+        _absent(err);
       }
     }
     let claimed = 0;

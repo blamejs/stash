@@ -105,12 +105,18 @@ export class MemoryBackend {
 
   // stats() -> { entries, bytes, claimed }. The stash-wide limit pre-check reads
   // this aggregate rather than parsing every entry: `entries` is the live count,
-  // `bytes` the sum of stored blob sizes, `claimed` is 0 until the claim
-  // machinery lands (M5). Counts every stored entry, expired or not -- a backend
-  // never interprets expiry; the policy layer prunes before it rejects.
+  // `bytes` the stored footprint, `claimed` is 0 until the claim machinery lands
+  // (M5). `bytes` sums each entry's blob size AND its metadata, so a limit sees
+  // the real cost -- a caller can't slip past `maxTotal` by pushing tiny blobs
+  // with huge `meta`. The disk backend's sidecar is a JSON file; here the
+  // equivalent is the entry's serialized length. Counts every stored entry,
+  // expired or not -- a backend never interprets expiry; the policy layer prunes
+  // before it rejects.
   async stats() {
     let bytes = 0;
-    for (const held of this.#entries.values()) bytes += held.entry.size;
+    for (const held of this.#entries.values()) {
+      bytes += held.entry.size + Buffer.byteLength(JSON.stringify(held.entry));
+    }
     return { entries: this.#entries.size, bytes, claimed: 0 };
   }
 }

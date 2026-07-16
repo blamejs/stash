@@ -719,7 +719,7 @@ suite("disk: limits (SPEC.md 8)", () => {
     const backend = new DiskBackend({ root });
     const s = await backend.stats();
     assert.equal(s.entries, 2);
-    assert.equal(s.bytes, 15);
+    assert.ok(s.bytes > 15, "footprint counts the two sidecar files on top of the 15 blob bytes");
     assert.equal(s.claimed, 0);
     // a foreign name in meta/ is corruption, surfaced the same way list() does
     writeFileSync(join(root, "meta", "intruder.json"), "{}");

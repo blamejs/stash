@@ -126,11 +126,16 @@ function _dispose(source) {
 async function* _boundedSource(source, maxSize, residual) {
   let total = 0;
   for await (const chunk of source) {
-    const buf = Buffer.from(chunk);
-    total += buf.length;
+    // Measure the chunk's byte length WITHOUT copying it, so a single hostile
+    // oversized chunk is rejected before Buffer.from duplicates it in memory --
+    // the advertised limit has to bound this allocation too, not just what is
+    // written. A string is measured by its UTF-8 byte length; a Buffer or
+    // Uint8Array by its own length.
+    const len = typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+    total += len;
     if (maxSize !== null && total > maxSize) throw new SizeExceeded();
     if (residual !== null && total > residual) throw new StashFull();
-    yield buf;
+    yield Buffer.from(chunk); // only materialized once it is known to fit
   }
 }
 
@@ -185,9 +190,13 @@ function _positiveCount(value, label) {
  * pruned before the store is judged full, so they never block a live push. A
  * stats read and the write are not atomic, so concurrent pushes can overshoot a
  * stash-wide bound by the number in flight -- the bound stops unbounded growth,
- * not that exact byte. Spec options whose milestone has not shipped
- * (`onPopFailure`, `tombstoneTtl`, `claimTimeout`) throw a TypeError at
- * construction rather than sitting silently unenforced.
+ * not that exact byte. `maxTotal` counts the stored footprint -- each blob plus
+ * its metadata, not the blob alone -- so many tiny blobs carrying large `meta`
+ * cannot slip past it. It is a ceiling you set, not one the disk enforces: size
+ * it below the backing partition's free space (and keep `maxSize` at or below
+ * it), or the filesystem fills before the limit fires. Spec options whose
+ * milestone has not shipped (`onPopFailure`, `tombstoneTtl`, `claimTimeout`)
+ * throw a TypeError at construction rather than sitting silently unenforced.
  *
  * @example
  *   import { Stash } from "@blamejs/stash";
@@ -232,6 +241,13 @@ export class Stash {
     this.#maxSize = _positiveBytes(opts.maxSize, "maxSize");
     this.#maxTotal = _positiveBytes(opts.maxTotal, "maxTotal");
     this.#maxEntries = _positiveCount(opts.maxEntries, "maxEntries");
+    // A per-entry cap larger than the whole-store cap can never bind: an empty
+    // store admits at most maxTotal bytes, so a maxSize above it is dead
+    // configuration. Refuse it at boot rather than accept a check that never
+    // fires (SPEC.md 8.2).
+    if (this.#maxSize !== null && this.#maxTotal !== null && this.#maxSize > this.#maxTotal) {
+      throw new TypeError("new Stash: maxSize must not exceed maxTotal -- a per-entry cap above the whole-store cap can never bind");
+    }
     const sweepMs = parse(opts.sweepInterval, "sweepInterval");
     if (sweepMs !== null) {
       if (sweepMs <= 0 || sweepMs > C.TIME.MAX_TIMER_MS) {
@@ -338,6 +354,8 @@ export class Stash {
     // a dead-but-unswept entry never rejects a live push. The stats read and the
     // write are not atomic; concurrent pushes can overshoot by the in-flight
     // count, which bounds the overshoot without a lock the sidecar design omits.
+    const id = generate();
+    const entry = make(id, meta, ttlMs);
     let residual = null;
     if (this.#maxEntries !== null || this.#maxTotal !== null) {
       let stats = await this.#backend.stats();
@@ -351,13 +369,21 @@ export class Stash {
         throw new StashFull();
       }
       if (this.#maxTotal !== null) {
-        residual = this.#maxTotal - stats.bytes;
-        if (residual < 0) residual = 0;
+        // maxTotal bounds the stored footprint -- blob plus sidecar -- so this
+        // entry's own metadata is charged against the headroom before the blob
+        // streams. Without it, a caller slips unbounded `meta` (or an endless
+        // run of zero-byte blobs, each still costing a sidecar) past the limit.
+        // The stored sidecar serializes this entry with `size`/`digest` filled in
+        // after the write, so this under-counts by those fixed fields -- a bounded
+        // sub-100-byte overshoot on the last admitted entry, never the meta -- and
+        // never over-counts, so it can't reject an entry that would have fit.
+        const sidecarBytes = Buffer.byteLength(JSON.stringify(entry));
+        residual = this.#maxTotal - stats.bytes - sidecarBytes;
+        if (residual < 0) throw new StashFull();
       }
     }
-    const id = generate();
     const bounded = _boundedSource(chunks, this.#maxSize, residual);
-    const stored = await this.#backend.write(id, bounded, make(id, meta, ttlMs));
+    const stored = await this.#backend.write(id, bounded, entry);
     return stored.id;
   }
 

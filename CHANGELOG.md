@@ -27,6 +27,11 @@ live push. Every rejected push leaves nothing behind.
   room -- a flood of pushes cannot delete other people's data. `maxEntries`
   is checked before the stream starts; `maxTotal` is enforced against the
   remaining headroom as the bytes stream.
+- `maxTotal` counts the stored footprint -- each blob plus the metadata
+  stored beside it -- not the blob bytes alone. The entry's own metadata is
+  charged against the headroom before the blob streams, so a caller cannot
+  slip past the limit with a flood of tiny (or zero-byte) blobs carrying
+  large `meta`.
 - Expired-but-unswept entries are pruned before the store is judged full, so
   an entry past its deadline that no read or sweep has reaped yet never
   blocks a live push against `maxEntries` or `maxTotal`.
@@ -41,6 +46,10 @@ live push. Every rejected push leaves nothing behind.
   be a positive size, and `maxEntries` a positive integer count -- zero, a
   negative, a fraction, or a non-size string is a config-time `TypeError`,
   never a silently disabled check.
+- A `maxSize` larger than `maxTotal` is refused at construction: a per-entry
+  cap above the whole-store cap can never bind, since even an empty store
+  admits at most `maxTotal` bytes. The contradiction surfaces as a
+  `TypeError` at boot rather than as dead configuration.
 - Because the store's size is read but not locked, concurrent pushes can
   overshoot a stash-wide bound by the number in flight; the bound stops
   unbounded growth rather than pinning the store to an exact byte. A custom

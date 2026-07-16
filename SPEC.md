@@ -385,6 +385,45 @@ needs a live `Stash`.
   `StashFull`. Without them, a caller is one loop away from filling the disk.
 - On any rejected `push`, partial writes are cleaned up, so a failed push leaves nothing behind.
 
+### 8.1 What a byte counts against
+
+`maxTotal` bounds the **stored footprint**, not just the blob bytes. Every entry costs its blob
+plus the metadata the backend keeps beside it — on disk that's the JSON sidecar file, in memory
+the equivalent serialized length. `stats().bytes` reports that sum, and the limit checks against
+it, so a caller cannot slip past `maxTotal` by pushing a stream of tiny blobs each carrying a
+large `meta`. The metadata is part of what fills the partition, so it is part of what the limit
+counts.
+
+The blob is bounded before it lands: a push checks the remaining headroom (`maxTotal` minus what
+is already stored) against the incoming bytes and rejects mid-stream if the blob alone would
+cross it. The sidecar is written after, so a single accepted entry can carry the footprint a
+fixed amount past `maxTotal` — bounded by one sidecar, never unbounded, and the next push sees
+the overshoot and rejects. Size `maxTotal` with that one-entry slack in mind rather than to the
+last byte of the partition.
+
+### 8.2 Sizing against the endpoint
+
+The limits are ceilings the operator sets; they do not read the hardware. A `maxTotal` larger
+than the free space on the backing partition is a limit that never fires — the filesystem fills
+first, and a write fails with an I/O error instead of a clean `StashFull`. When choosing the
+bounds:
+
+- Set `maxTotal` comfortably below the free capacity of the partition the disk backend writes to,
+  leaving room for the sidecar slack above and for anything else sharing that filesystem. The
+  useful ceiling is the smallest of what the disk holds, what the process is allowed to consume,
+  and what the operator wants to risk.
+- Keep `maxSize` at or below `maxTotal`. A per-entry cap larger than the whole-stash cap can
+  never bind — no single entry fits within `maxSize` yet exceeds a smaller `maxTotal`, since even
+  an empty store admits at most `maxTotal` bytes. When both are set and `maxSize` exceeds
+  `maxTotal`, the constructor throws a `TypeError` rather than accept a cap that can never fire.
+- Account for filesystem block granularity on the disk backend: a blob smaller than one block
+  still consumes a full block, so many small entries cost more real space than `stats().bytes`
+  reports. On a partition tight enough for that to matter, set `maxTotal` below the raw free
+  figure to leave slack.
+- The memory backend is bounded by the process heap, not a partition. There `maxTotal` guards
+  against a push loop exhausting memory; size it against the memory ceiling the process runs
+  under, not against disk.
+
 ---
 
 ## 9. Backend interface
@@ -474,7 +513,6 @@ stashjs/
 │       └── memory.js
 ├── test/
 ├── examples/
-├── CLAUDE.md
 ├── SPEC.md
 ├── README.md
 └── package.json

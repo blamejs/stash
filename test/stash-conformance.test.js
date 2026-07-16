@@ -492,6 +492,25 @@ for (const { name, create } of BACKENDS) {
       assert.ok(pulled.length <= 3, "stopped at the crossing chunk, not drained (pulled " + pulled.length + ")");
     });
 
+    test("a single oversized chunk is rejected before it is copied into memory", async () => {
+      // The chunk's byte length must be checked before Buffer.from duplicates
+      // it, or a small maxSize can still be driven to OOM by one hostile chunk.
+      // A Proxy whose length is huge but whose data throws on access proves the
+      // copy never ran: if it had, reading index 0 would throw a different error.
+      const stash = new Stash({ backend: create(), maxSize: 16 });
+      const hostile = new Proxy({ length: 1e9 }, {
+        get(_target, prop) {
+          if (prop === "length") return 1e9;
+          // `then` and symbols are probed by `for await` and Buffer.from's type
+          // checks -- leave those; only a numeric-index read means the copy ran.
+          if (prop === "then" || typeof prop === "symbol") return undefined;
+          throw new Error("chunk data was read -- the copy ran before the size check");
+        },
+      });
+      async function* one() { yield hostile; }
+      await assert.rejects(stash.push(one()), (e) => e instanceof SizeExceeded);
+    });
+
     test("an unbounded source is abandoned at the boundary, not drained", async () => {
       const stash = new Stash({ backend: create(), maxSize: 64 });
       let finallyRan = false;
@@ -541,27 +560,73 @@ for (const { name, create } of BACKENDS) {
       assert.match(await stash.push("b"), /^v1_/);
     });
 
-    test("maxTotal mid-stream crossing is StashFull; the partial is cleaned; a fitting re-push works", async () => {
-      const stash = new Stash({ backend: create(), maxTotal: 20 });
-      await stash.push(Buffer.alloc(15, 1)); // 15 stored, 5 of headroom
-      await assert.rejects(stash.push(Buffer.alloc(10, 2)), (e) => e instanceof StashFull && e.code === "EFULL");
-      assert.equal((await stash.list()).length, 1); // no partial left behind
-      assert.match(await stash.push(Buffer.alloc(5, 2)), /^v1_/); // fits the residual exactly
+    test("maxTotal: a push whose footprint exceeds the remaining headroom is StashFull; the partial is cleaned; a fitting re-push works", async () => {
+      // maxTotal bounds the stored footprint (blob + sidecar), so size it from a
+      // measured entry rather than a bare blob-byte count. Room for two such
+      // entries leaves headroom for a second small blob but not a large one.
+      const gauge = create();
+      await new Stash({ backend: gauge }).push(Buffer.alloc(10, 1));
+      const oneEntry = (await gauge.stats()).bytes; // one 10-byte-blob entry: blob plus sidecar
+      const stash = new Stash({ backend: create(), maxTotal: 2 * oneEntry });
+      await stash.push(Buffer.alloc(10, 1)); // the first entry lands
+      // a blob as large as a whole entry cannot fit beside the first plus a new sidecar
+      await assert.rejects(stash.push(Buffer.alloc(oneEntry, 2)), (e) => e instanceof StashFull && e.code === "EFULL");
+      assert.equal((await stash.list()).length, 1); // the over-budget push left no partial
+      assert.match(await stash.push(Buffer.alloc(4, 2)), /^v1_/); // a small blob still fits the headroom
     });
 
-    test("maxTotal boundary: filling to exactly the limit works; a zero-byte push at the limit works; one more byte rejects", async () => {
-      const stash = new Stash({ backend: create(), maxTotal: 10 });
-      await stash.push(Buffer.alloc(10, 1)); // exactly the limit
-      assert.match(await stash.push(Buffer.alloc(0)), /^v1_/); // adds nothing
+    test("maxTotal boundary: an entry filling the limit lands; any further push -- even zero-byte -- rejects", async () => {
+      // A zero-byte blob is not free: it still carries a sidecar. So at the limit
+      // even an empty push rejects, because its sidecar alone no longer fits.
+      const gauge = create();
+      await new Stash({ backend: gauge }).push(Buffer.alloc(10, 1));
+      const oneEntry = (await gauge.stats()).bytes;
+      const stash = new Stash({ backend: create(), maxTotal: oneEntry }); // room for exactly one
+      await stash.push(Buffer.alloc(10, 1)); // fills the store to the limit
+      await assert.rejects(stash.push(Buffer.alloc(0)), StashFull); // a zero-byte blob still needs a sidecar
       await assert.rejects(stash.push(Buffer.alloc(1, 2)), StashFull);
+      assert.equal((await stash.list()).length, 1);
     });
 
-    test("with both bounds set, a per-entry overflow is SizeExceeded even when the store is also full", async () => {
-      const stash = new Stash({ backend: create(), maxSize: 4, maxTotal: 6 });
-      await stash.push(Buffer.alloc(3, 1)); // residual 3, maxSize 4
-      // a 5-byte push crosses maxSize (4) AND the residual (3); the permanent
-      // verdict (SizeExceeded) is reported, since a retry can't shrink the entry
-      await assert.rejects(stash.push(Buffer.alloc(5, 2)), (e) => e instanceof SizeExceeded);
+    test("with both bounds set, a per-entry overflow reports SizeExceeded, not StashFull", async () => {
+      // maxSize is the per-entry cap, maxTotal the whole-store cap. A blob over
+      // maxSize reports the permanent verdict (SizeExceeded) -- a retry can't shrink
+      // the entry -- rather than the transient StashFull, since _boundedSource
+      // checks the per-entry bound before the stash-wide residual on each chunk.
+      const stash = new Stash({ backend: create(), maxSize: 4, maxTotal: "1gb" });
+      await assert.rejects(stash.push(Buffer.alloc(5, 2)), (e) => e instanceof SizeExceeded && e.code === "E2BIG");
+    });
+
+    test("maxTotal counts the entry's own metadata: a tiny blob with a large meta is StashFull, not a bypass", async () => {
+      // stats().bytes counts blob + sidecar, and the sidecar serializes meta. If
+      // the pre-check bounded only the blob, a caller could push unbounded metadata
+      // under maxTotal by keeping the blob tiny. The entry's own sidecar counts
+      // against the headroom, so an oversized meta is refused before it lands.
+      const stash = new Stash({ backend: create(), maxTotal: 400 });
+      await assert.rejects(
+        stash.push(Buffer.alloc(1, 1), { meta: { big: "a".repeat(2000) } }),
+        (e) => e instanceof StashFull && e.code === "EFULL",
+      );
+      assert.deepEqual(await stash.list(), []); // nothing landed
+    });
+
+    test("maxTotal counts every entry's sidecar: repeated zero-byte pushes cannot grow the store without bound", async () => {
+      // A zero-byte blob still costs a sidecar. Once the footprint reaches maxTotal
+      // even an empty push is refused -- the sidecar alone no longer fits -- so a
+      // loop of zero-byte pushes can't creep past the limit one sidecar at a time.
+      const stash = new Stash({ backend: create(), maxTotal: 600 });
+      let stored = 0;
+      for (let i = 0; i < 50; i += 1) {
+        try {
+          await stash.push(Buffer.alloc(0));
+          stored += 1;
+        } catch (e) {
+          assert.ok(e instanceof StashFull);
+          break;
+        }
+      }
+      assert.ok(stored >= 1, "at least one zero-byte entry fits");
+      assert.ok(stored < 50, "the store fills and rejects rather than admitting all 50");
     });
 
     test("an unlimited stash never reads backend.stats()", async () => {
@@ -582,8 +647,11 @@ for (const { name, create } of BACKENDS) {
       assert.equal((await s1.show(live1)).id, live1);
       assert.deepEqual((await s1.list({ includeExpired: true })).map((e) => e.id), [live1]);
 
-      const s2 = new Stash({ backend: create(), maxTotal: 12 });
-      await s2.push(Buffer.alloc(12, 9), { ttl: 0 }); // fat and expired
+      const gauge = create();
+      await new Stash({ backend: gauge }).push(Buffer.alloc(12, 9));
+      const oneEntry = (await gauge.stats()).bytes; // one 12-byte-blob entry: blob plus sidecar
+      const s2 = new Stash({ backend: create(), maxTotal: oneEntry }); // room for exactly one
+      await s2.push(Buffer.alloc(12, 9), { ttl: 0 }); // fat and expired, fills the store
       const live2 = await s2.push(Buffer.alloc(12, 1)); // fits only once the dead one is reaped
       assert.equal((await s2.show(live2)).id, live2);
     });
@@ -839,7 +907,7 @@ for (const { name, create } of BACKENDS) {
       await backend.write(id, [Buffer.alloc(9, 1)], skeleton);
       const s = await backend.stats();
       assert.equal(s.entries, 1);
-      assert.equal(s.bytes, 9);
+      assert.ok(s.bytes > 9, "footprint counts the sidecar metadata, not just the 9 blob bytes");
       assert.equal(s.claimed, 0);
       for (const v of [s.entries, s.bytes, s.claimed]) assert.equal(Number.isSafeInteger(v) && v >= 0, true);
       await backend.remove(id);
@@ -943,8 +1011,21 @@ suite("config-time failures", () => {
     for (const bad of [0, -1, 1.5, NaN, Infinity, "100", "10mb", true, {}]) {
       assert.throws(() => new Stash({ backend: new MemoryBackend(), maxEntries: bad }), TypeError);
     }
-    // valid bounds construct without throwing
-    new Stash({ backend: new MemoryBackend(), maxSize: "100mb", maxTotal: 1024, maxEntries: 10 });
+    // valid bounds construct without throwing (maxSize within maxTotal)
+    new Stash({ backend: new MemoryBackend(), maxSize: "100mb", maxTotal: "1gb", maxEntries: 10 });
+  });
+
+  test("maxSize above maxTotal is a config-time TypeError (a per-entry cap that can never bind)", () => {
+    // An empty store admits at most maxTotal bytes, so a maxSize larger than
+    // maxTotal is a cap that never fires -- surface the contradiction at boot,
+    // not as silent dead configuration.
+    assert.throws(() => new Stash({ backend: new MemoryBackend(), maxSize: 100, maxTotal: 50 }), TypeError);
+    assert.throws(() => new Stash({ backend: new MemoryBackend(), maxSize: "2gb", maxTotal: "1gb" }), TypeError);
+    // equal is coherent (an entry of exactly maxTotal fits an empty store), and
+    // either bound alone imposes no cross-constraint.
+    new Stash({ backend: new MemoryBackend(), maxSize: 50, maxTotal: 50 });
+    new Stash({ backend: new MemoryBackend(), maxSize: 100 });
+    new Stash({ backend: new MemoryBackend(), maxTotal: 50 });
   });
 
   test("push rejects unimplemented and unknown options", async () => {
