@@ -162,6 +162,24 @@ for (const { name, create } of BACKENDS) {
       assert.equal("chunks" in entry, false);
     });
 
+    test("meta that JSON-serializes to a non-object is refused at push", async () => {
+      // meta is stored as its JSON round-trip, and serialization hooks --
+      // a Date's toJSON, a caller's own -- can change the value's TYPE
+      // between validation and storage. A stored meta that is not a plain
+      // object violates the Entry shape the read path enforces: the entry
+      // would land unreadable, and any listing that reads it would fail
+      // with it. The push must refuse at config time and store nothing.
+      const stash = new Stash({ backend: create() });
+      for (const meta of [new Date(), { toJSON: () => "flat" }, { toJSON: () => [1] }, { toJSON: () => undefined }]) {
+        await assert.rejects(stash.push("x", { meta }), TypeError);
+      }
+      assert.deepEqual(await stash.list(), []);
+      // a non-JSON value nested INSIDE a plain object still round-trips by
+      // JSON's own rules -- the top-level object shape is the contract
+      const ref = await stash.push("y", { meta: { at: new Date(0) } });
+      assert.deepEqual((await stash.show(ref)).meta, { at: "1970-01-01T00:00:00.000Z" });
+    });
+
     test("meta round-trips verbatim as JSON and stays caller-isolated", async () => {
       const stash = new Stash({ backend: create() });
       const meta = { nested: { deep: [1, 2, 3] }, text: "x" };

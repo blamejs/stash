@@ -160,7 +160,13 @@ export class Stash {
     let meta = {};
     if (opts.meta !== undefined) {
       plainObject(opts.meta, "push: meta");
-      meta = JSON.parse(JSON.stringify(opts.meta));
+      // meta is stored as its JSON round-trip, and serialization hooks (a
+      // Date's toJSON, a caller's own) can change the value's type between
+      // the check above and the bytes stored. The value actually stored
+      // must hold the same plain-object shape the read path enforces, or
+      // the entry lands unreadable.
+      const serialized = JSON.stringify(opts.meta);
+      meta = plainObject(serialized === undefined ? null : JSON.parse(serialized), "push: meta");
     }
     const chunks = _toChunkSource(source);
     const id = generate();
