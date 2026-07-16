@@ -15,7 +15,7 @@ import { join, resolve } from "node:path";
 import { C } from "../constants.js";
 import { assertShape } from "../entry.js";
 import { IntegrityError, InvalidRef, RefNotFound } from "../errors.js";
-import { assertValid, isValid } from "../ref.js";
+import { assertValid, constantTimeEqual, isValid } from "../ref.js";
 import { options } from "../validate.js";
 
 const SUBDIRS = ["blobs", "meta", "claims", "tombstones"];
@@ -260,7 +260,7 @@ export class DiskBackend {
       throw new IntegrityError("sidecar is not valid JSON");
     }
     assertShape(parsed, IntegrityError);
-    if (parsed.id !== id) throw new IntegrityError("sidecar identity mismatch");
+    if (!constantTimeEqual(parsed.id, id)) throw new IntegrityError("sidecar identity mismatch");
     return parsed;
   }
 
