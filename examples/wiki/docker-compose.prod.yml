@@ -13,9 +13,12 @@
 
 services:
   wiki:
-    # Pull the published image; pin to a version in production so a
-    # forgotten `docker compose pull` doesn't silently upgrade.
-    image: ghcr.io/blamejs/stash-wiki:0.1.3
+    # Pull the published image. The tag interpolates with a pinned
+    # default: production stays on the default until the operator selects
+    # a version (WIKI_IMAGE_TAG in an .env file alongside this compose
+    # file), so a forgotten `docker compose pull` doesn't silently
+    # upgrade, and an upgrade is one variable away.
+    image: ghcr.io/blamejs/stash-wiki:${WIKI_IMAGE_TAG:-0.1.3}
     build: !reset null
     container_name: stash-wiki
     # Not exposed on the host -- only Caddy reaches it on the internal net.

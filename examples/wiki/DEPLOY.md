@@ -43,6 +43,7 @@ never exposed on the host. See `Caddyfile` for the reverse-proxy config.
 | `WIKI_PORT`     | `3011`                | HTTP listen port                         |
 | `WIKI_BIND`     | `0.0.0.0`             | Bind address                             |
 | `WIKI_SITE_URL` | `https://stashjs.com` | Canonical public URL used in page markup |
+| `WIKI_IMAGE_TAG` | pinned per release   | Published image tag the prod overlay pulls (set in `.env` to upgrade) |
 
 No secrets are ever baked into the image.
 
