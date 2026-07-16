@@ -772,27 +772,47 @@ test("wiki port agrees across the Dockerfile, composes, Caddyfile, and release-c
     }
   }
 
+  // A compose port field is either a bare literal ("3011") or the
+  // ${WIKI_PORT:-NNNN} interpolation form the operator overrides via .env
+  // (server.js reads process.env.WIKI_PORT, so the override is live). The
+  // effective default is the number after ":-". Extract it from EITHER shape
+  // so parameterizing the fields does not silently disable this check -- a
+  // regex that only matched a bare literal would go green on the
+  // interpolated form and stop gating those artifacts entirely.
+  const PORT_TOKEN = "(?:\\$\\{WIKI_PORT:-\\d+\\}|\\d+)";
+  const mapRe    = new RegExp('-\\s+"(' + PORT_TOKEN + '):(' + PORT_TOKEN + ')"');
+  const envRe    = new RegExp('WIKI_PORT:\\s*"(' + PORT_TOKEN + ')"');
+  const exposeRe = new RegExp('-\\s+"(' + PORT_TOKEN + ')"\\s*$');
+  // token -> effective port default: the number inside ${WIKI_PORT:-NNNN},
+  // or the bare literal itself.
+  const _portDefault = (token) => {
+    const interp = /\$\{WIKI_PORT:-(\d+)\}/.exec(token);
+    if (interp) return interp[1];
+    const literal = /^\d+$/.exec(token);
+    return literal ? literal[0] : null;
+  };
+
   for (const composeName of ["docker-compose.yml", "docker-compose.prod.yml"]) {
     const rel = "examples/wiki/" + composeName;
     let compose = null;
     try { compose = _read(path.join(REPO_ROOT, "examples", "wiki", composeName)); } catch (_e) { continue; }
     const lines = _lines(compose);
     for (let i = 0; i < lines.length; i++) {
-      const mapMatch = /-\s+"(\d+):(\d+)"/.exec(lines[i]);
+      const mapMatch = mapRe.exec(lines[i]);
       if (mapMatch && composeName === "docker-compose.yml" &&
-          (mapMatch[1] !== wikiPort || mapMatch[2] !== wikiPort)) {
+          (_portDefault(mapMatch[1]) !== wikiPort || _portDefault(mapMatch[2]) !== wikiPort)) {
         bad.push({ file: rel, line: i + 1,
           content: "port mapping `" + mapMatch[1] + ":" + mapMatch[2] +
                    "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
       }
-      const envMatch = /WIKI_PORT:\s*"(\d+)"/.exec(lines[i]);
-      if (envMatch && envMatch[1] !== wikiPort) {
+      const envMatch = envRe.exec(lines[i]);
+      if (envMatch && _portDefault(envMatch[1]) !== wikiPort) {
         bad.push({ file: rel, line: i + 1,
           content: "WIKI_PORT `" + envMatch[1] +
                    "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
       }
-      const exposeMatch = /-\s+"(\d+)"\s*$/.exec(lines[i]);
-      if (exposeMatch && composeName === "docker-compose.prod.yml" && exposeMatch[1] !== wikiPort) {
+      const exposeMatch = exposeRe.exec(lines[i]);
+      if (exposeMatch && composeName === "docker-compose.prod.yml" && _portDefault(exposeMatch[1]) !== wikiPort) {
         bad.push({ file: rel, line: i + 1,
           content: "expose `" + exposeMatch[1] +
                    "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });

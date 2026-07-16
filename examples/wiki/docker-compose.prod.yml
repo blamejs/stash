@@ -24,9 +24,9 @@ services:
     # Not exposed on the host -- only Caddy reaches it on the internal net.
     ports: !override []
     expose:
-      - "3011"
+      - "${WIKI_PORT:-3011}"
     environment:
-      WIKI_PORT: "3011"
+      WIKI_PORT: "${WIKI_PORT:-3011}"
 
   caddy:
     image: caddy:2-alpine
@@ -40,7 +40,7 @@ services:
     environment:
       # Passed through so Caddy's reverse_proxy upstream stays in step with
       # an operator override of WIKI_PORT.
-      WIKI_PORT: "3011"
+      WIKI_PORT: "${WIKI_PORT:-3011}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

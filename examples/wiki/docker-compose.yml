@@ -17,9 +17,9 @@ services:
     container_name: stash-wiki
     restart: unless-stopped
     ports:
-      - "3011:3011"
+      - "${WIKI_PORT:-3011}:${WIKI_PORT:-3011}"
     environment:
-      WIKI_PORT: "3011"
+      WIKI_PORT: "${WIKI_PORT:-3011}"
       WIKI_SITE_URL: ${WIKI_SITE_URL:-https://stashjs.com}
     security_opt:
       - no-new-privileges:true
