@@ -1,6 +1,12 @@
+<div align="center">
+
+<img src="assets/stashjs-logo.png" alt="@blamejs/stash" width="200" />
+
 # @blamejs/stash
 
 **A zero-dependency, ephemeral, crypto-agnostic content store for Node.js.**
+
+</div>
 
 You put bytes in. You get a ref back. You take the bytes out once, and they're
 gone.
