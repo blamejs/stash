@@ -310,22 +310,41 @@ jobs:
       - name: Extract release notes from CHANGELOG
         # Single source of truth: the CHANGELOG.md section whose header is
         # `## X.Y.Z` (the generator's grammar; a leading v is tolerated).
-        # awk prints lines from the matching header up to (not including)
-        # the next `## ` header.
+        # The header's version token is compared to the requested version by
+        # exact string equality -- the version is never interpolated into a
+        # regex, so no character in it can widen or shift the match. (awk -v
+        # would also reprocess backslash escapes in the value, silently
+        # undoing any escaping; ENVIRON delivers the bytes untouched.) awk
+        # prints lines from the matching header up to (not including) the
+        # next `## ` header, and writes the matched header aside so the
+        # shell can independently assert it names the literal requested
+        # version before the notes are allowed near a release.
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           set -euo pipefail
-          VER_RE=$(printf '%s' "${VERSION}" | sed 's/./\./g')
-          awk -v ver="${VER_RE}" '
-            $0 ~ "^## (v)?" ver "( |$)" { grab=1; next }
-            grab && /^## / { exit }
+          rm -f release-notes-header.txt
+          awk '
+            /^## / {
+              if (grab) exit
+              v = $2
+              sub(/^v/, "", v)
+              if (v == ENVIRON["VERSION"]) { grab = 1; print > "release-notes-header.txt"; next }
+            }
             grab { print }
           ' CHANGELOG.md > release-notes.md
+          HEADER=""
+          if [ -f release-notes-header.txt ]; then HEADER=$(head -n 1 release-notes-header.txt); fi
+          case "$HEADER" in
+            "## ${VERSION}"|"## ${VERSION} "*|"## v${VERSION}"|"## v${VERSION} "*) ;;
+            *)
+              echo "::error::CHANGELOG.md has no '## ${VERSION}' section header -- refusing to publish notes for a different version."
+              exit 1
+              ;;
+          esac
           BYTE_COUNT=$(wc -c < release-notes.md | tr -d ' ')
           if [ "$BYTE_COUNT" -lt 16 ]; then
-            echo "::error::Could not extract a CHANGELOG.md section for v${VERSION} (got ${BYTE_COUNT} bytes)."
-            echo "::error::Confirm CHANGELOG.md has a '## ${VERSION}' header."
+            echo "::error::The CHANGELOG.md section for v${VERSION} is empty (got ${BYTE_COUNT} bytes)."
             exit 1
           fi
           echo "[release-notes] extracted ${BYTE_COUNT} bytes for v${VERSION}"
