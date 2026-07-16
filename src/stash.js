@@ -142,7 +142,7 @@ export class Stash {
    * @since      0.1.0
    * @status     experimental
    * @spec       SPEC.md 4, SPEC.md 5, FIPS 180-4, RFC 4648, RFC 8259
-   * @defends    CWE-330, CWE-400
+   * @defends    CWE-330
    * @related    stash.apply, stash.show, stash.drop
    *
    * Store bytes; resolve to the entry's ref. The source may be a Buffer, a
