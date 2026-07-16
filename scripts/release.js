@@ -264,7 +264,16 @@ function ghJson(args) {
 // issue comments. All three gate: a P1/P2 finding on the head blocks the
 // merge until a root fix lands via push-fix and a fresh verdict clears
 // it. Overriding requires the explicit flag -- loudly.
-const REVIEW_BOT_PATTERN = /codex/i;
+//
+// The gate trusts EXACTLY these reviewer logins -- the GitHub App's two
+// author forms (reviews post as the app, inline comments as its [bot]
+// user). A pattern or substring match is spoofable on a public repo: any
+// account whose login merely contains the reviewer's name could cite the
+// head and mint a "clean" verdict before the real reviewer responds.
+const REVIEW_BOT_LOGINS = Object.freeze([
+  "chatgpt-codex-connector",
+  "chatgpt-codex-connector[bot]",
+]);
 
 // reviewDecision(headSha, surfaces) -- pure, fail-closed reviewer verdict
 // for one head commit. surfaces:
@@ -284,7 +293,7 @@ export function reviewDecision(headSha, surfaces) {
   }
   const s = surfaces || {};
   const short = headSha.slice(0, 7);
-  const fromBot = function (author) { return REVIEW_BOT_PATTERN.test(author || ""); };
+  const fromBot = function (author) { return REVIEW_BOT_LOGINS.indexOf(author) !== -1; };
   const cites = function (text) {
     return typeof text === "string" &&
       (text.indexOf(headSha) !== -1 || text.indexOf(short) !== -1);

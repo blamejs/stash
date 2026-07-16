@@ -154,7 +154,7 @@ test("checksVerdict: mixed shapes all green with one pending stays not-green", (
 
 const HEAD = "a1b2c3d4e5f60718293645546372819a0bcdef12";
 const OLD = "9999999888888877777776666666555555444444";
-const BOT = "codex-reviewer";
+const BOT = "chatgpt-codex-connector[bot]";
 
 test("reviewDecision: inline P1 anchored to the head commit blocks", () => {
   const v = reviewDecision(HEAD, {
@@ -229,3 +229,22 @@ test("reviewDecision: a missing or truncated head sha throws instead of matching
   assert.throws(() => reviewDecision(undefined, {}), TypeError);
   assert.throws(() => reviewDecision("abc12", {}), TypeError);
 });
+
+test("reviewDecision: an author merely containing the reviewer name is not the reviewer", () => {
+  for (const spoof of ["codexfan", "my-codex-mirror[bot]", "Codex"]) {
+    const v = reviewDecision(HEAD, {
+      reviews: [{ author: spoof, body: "Looks good. Reviewed commit: `" + HEAD.slice(0, 10) + "`" }],
+    });
+    assert.equal(v.state, "pending", spoof + " must not mint a verdict");
+  }
+});
+
+test("reviewDecision: both reviewer identity forms are trusted", () => {
+  for (const login of ["chatgpt-codex-connector", "chatgpt-codex-connector[bot]"]) {
+    const v = reviewDecision(HEAD, {
+      reviews: [{ author: login, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "` -- no findings." }],
+    });
+    assert.equal(v.state, "clean");
+  }
+});
+
