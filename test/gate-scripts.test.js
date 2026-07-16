@@ -64,6 +64,29 @@ test("api-snapshot: an un-snapshotted added member fails the gate as stale", () 
   assert.equal(isClean(diff), false);
 });
 
+test("api-snapshot: an array that grew beyond the snapshot fails the gate as stale", () => {
+  const base = snapshotFixture();
+  base.surface.index.members.codes = { kind: "array", length: 3 };
+  const current = snapshotFixture();
+  current.surface.index.members.codes = { kind: "array", length: 4 };
+  const diff = diffSnapshot(base, current, "1.0.0");
+  assert.equal(diff.breaking.length, 0);
+  assert.equal(diff.stale.length, 1);
+  assert.match(diff.stale[0], /codes: array grew 3 -> 4/);
+  assert.equal(isClean(diff), false);
+});
+
+test("api-snapshot: an array that shrank below the snapshot fails the gate as breaking", () => {
+  const base = snapshotFixture();
+  base.surface.index.members.codes = { kind: "array", length: 3 };
+  const current = snapshotFixture();
+  current.surface.index.members.codes = { kind: "array", length: 2 };
+  const diff = diffSnapshot(base, current, "1.0.0");
+  assert.equal(diff.breaking.length, 1);
+  assert.match(diff.breaking[0], /codes: array shrank 3 -> 2/);
+  assert.equal(isClean(diff), false);
+});
+
 test("api-snapshot: an un-snapshotted added entry point fails the gate as stale", () => {
   const current = snapshotFixture();
   current.surface["backends/tape"] = { kind: "object", members: {} };

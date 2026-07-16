@@ -38,6 +38,10 @@ function compare(baseline, current, path, breaking, stale) {
   }
   if ("length" in baseline && current.length < baseline.length) {
     breaking.push(path + ": array shrank " + baseline.length + " -> " + current.length);
+  } else if ("length" in baseline && current.length > baseline.length) {
+    // Growth is not breaking, but the added members are not in the snapshot
+    // -- a refresh would rewrite it, so the check must not pass silently.
+    stale.push(path + ": array grew " + baseline.length + " -> " + current.length + " but not snapshotted");
   }
   for (const nested of ["members", "methods"]) {
     if (!(nested in baseline) && !(nested in current)) continue;
