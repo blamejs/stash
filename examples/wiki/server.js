@@ -11,7 +11,7 @@
 // function of the source - no database, no seeders, no runtime deps.
 //
 // Env vars:
-//   WIKI_PORT       HTTP port (default 3009)
+//   WIKI_PORT       HTTP port (default 3011)
 //   WIKI_BIND       bind address (default 0.0.0.0)
 //   WIKI_SITE_URL   canonical public URL (default https://stashjs.com)
 
@@ -22,7 +22,7 @@ import { pathToFileURL } from "node:url";
 
 import * as generator from "./lib/page-generator.js";
 
-var PORT = parseInt(process.env.WIKI_PORT, 10) || 3009;
+var PORT = parseInt(process.env.WIKI_PORT, 10) || 3011;
 var BIND = process.env.WIKI_BIND || "0.0.0.0";
 
 var PUBLIC_DIR = path.join(import.meta.dirname, "public");
