@@ -32,6 +32,7 @@ const INTERNAL_ONLY = [
   ".references/",
   ".scratch/",
   "." + AGENT_CFG.toLowerCase() + "/",
+  ".clusterfuzzlite/",
   ".github/",
   ".test-stash/",
   ".test-output/",
