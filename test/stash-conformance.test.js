@@ -315,6 +315,20 @@ for (const { name, create } of BACKENDS) {
       assert.equal((await stash.list({ includeExpired: true })).length, 2);
     });
 
+    test("list rejects a non-boolean includeExpired instead of leaking expired entries", async () => {
+      const stash = new Stash({ backend: create() });
+      const live = await stash.push("live", { ttl: "1h" });
+      await stash.push("dead", { ttl: 0 });
+      // a truthy non-boolean (e.g. the string "false" from a config parse) must
+      // NOT expose the expired entry the default hides
+      for (const bad of ["false", "true", 1, 0, {}, []]) {
+        await assert.rejects(stash.list({ includeExpired: bad }), (err) => err instanceof TypeError && !(err instanceof StashError));
+      }
+      // the booleans still work
+      assert.deepEqual((await stash.list({ includeExpired: false })).map((e) => e.id), [live]);
+      assert.equal((await stash.list({ includeExpired: true })).length, 2);
+    });
+
     test("prune destroys expired only and returns the real count", async () => {
       const stash = new Stash({ backend: create() });
       await stash.push("dead1", { ttl: 0 });
@@ -638,6 +652,17 @@ suite("M3 lifecycle: sweeper, close, disposal (SPEC.md 7, 7.1)", () => {
     // a value exactly at the ceiling is accepted
     const ok = new Stash({ backend: new MemoryBackend(), sweepInterval: C.TIME.MAX_TIMER_MS });
     await ok.close();
+  });
+
+  test("a default ttl whose expiresAt would overflow is refused at construction, not at first push", () => {
+    // A valid duration whose createdAt + ttl leaves the safe integer range must
+    // fail at config time -- not construct fine and then break every push.
+    assert.throws(() => new Stash({ backend: new MemoryBackend(), ttl: Number.MAX_SAFE_INTEGER }), TypeError);
+    // a duration string large enough to overflow against the current clock too
+    assert.throws(() => new Stash({ backend: new MemoryBackend(), ttl: "104249991d" }), TypeError);
+    // an ordinary default still constructs and pushes
+    const ok = new Stash({ backend: new MemoryBackend(), ttl: "24h" });
+    return ok.push("x").then((ref) => ok.show(ref)).then((e) => assert.equal(e.expiresAt, e.createdAt + 86400000));
   });
 
   test("a process with an open sweeping Stash exits on its own (the unref rule)", { skip: SANDBOXED, timeout: 15000 }, async () => {

@@ -160,6 +160,13 @@ export class Stash {
     }
     this.#backend = backend;
     this.#ttlMs = parse(opts.ttl, "ttl");
+    // A ttl can be a valid duration yet place expiresAt (createdAt + ttl) past
+    // the safe integer range, which make() refuses at push. Catch an unusable
+    // DEFAULT here, against the current clock, so a bad configuration fails at
+    // construction -- not silently on every later push.
+    if (this.#ttlMs !== null && !Number.isSafeInteger(Date.now() + this.#ttlMs)) {
+      throw new TypeError("new Stash: ttl places expiresAt beyond the safe integer range");
+    }
     const sweepMs = parse(opts.sweepInterval, "sweepInterval");
     if (sweepMs !== null) {
       if (sweepMs <= 0 || sweepMs > C.TIME.MAX_TIMER_MS) {
@@ -341,6 +348,12 @@ export class Stash {
    */
   async list(opts = {}) {
     options(opts, "list", { allowed: ["includeExpired"] });
+    // A boolean switch, validated as one: a truthy non-boolean (e.g. the string
+    // "false" from a config parse) must not silently expose the expired entries
+    // the default hides. Fail loud at config time, never fail open.
+    if (opts.includeExpired !== undefined && typeof opts.includeExpired !== "boolean") {
+      throw new TypeError("list: includeExpired must be a boolean");
+    }
     const entries = await this.#backend.list();
     if (opts.includeExpired) return entries;
     const now = Date.now();
