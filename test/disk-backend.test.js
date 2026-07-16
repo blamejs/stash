@@ -153,6 +153,39 @@ suite("disk: layout and atomicity", () => {
     assert.deepEqual(readdirSync(join(root, "blobs")), []);
   });
 
+  test("a push whose blob rename cannot land cleans up its tmp and rejects", async () => {
+    // The source blocks the final rename by squatting a directory at the
+    // blob's destination (any EPERM/EISDIR at rename lands here -- an AV
+    // hold or a planted obstacle behaves the same). The push must reject
+    // AND remove the .tmp partial: a failed push leaves nothing behind.
+    const { root, stash } = freshStash();
+    async function* saboteur() {
+      yield Buffer.from("first");
+      const tmp = readdirSync(join(root, "blobs")).find((n) => n.endsWith(".tmp"));
+      mkdirSync(join(root, "blobs", tmp.slice(0, -".tmp".length)));
+      yield Buffer.from("second");
+    }
+    await assert.rejects(stash.push(saboteur()));
+    assert.equal(readdirSync(join(root, "blobs")).some((n) => n.endsWith(".tmp")), false);
+    assert.deepEqual(readdirSync(join(root, "meta")), []);
+    assert.deepEqual(await stash.list(), []);
+  });
+
+  test("a push whose sidecar rename cannot land cleans up blob and sidecar tmp and rejects", async () => {
+    const { root, stash } = freshStash();
+    async function* saboteur() {
+      yield Buffer.from("first");
+      const tmp = readdirSync(join(root, "blobs")).find((n) => n.endsWith(".tmp"));
+      mkdirSync(join(root, "meta", tmp.slice(0, -".tmp".length) + ".json"));
+      yield Buffer.from("second");
+    }
+    await assert.rejects(stash.push(saboteur()));
+    assert.equal(readdirSync(join(root, "meta")).some((n) => n.endsWith(".tmp")), false);
+    assert.deepEqual(readdirSync(join(root, "blobs")), []);
+    // the planted obstacle itself still reads as damage -- loud, not lossy
+    await assert.rejects(stash.list(), IntegrityError);
+  });
+
   test("a sidecar write that cannot land removes the blob and rethrows", async () => {
     const { root, stash } = freshStash();
     // the source itself sabotages the meta dir mid-stream: the blob lands,

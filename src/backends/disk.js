@@ -133,31 +133,35 @@ export class DiskBackend {
     return stats;
   }
 
+  // Write bytes to <name>.tmp, fsync, rename into place. ANY failure after
+  // the handle opens -- a write/sync fault or a rename that cannot land
+  // (an obstacle at the destination, a directory swapped away) -- removes
+  // the tmp before rethrowing: a rejected write leaves no partial behind.
   async #writeAtomic(dir, name, bytes) {
     const tmpPath = join(dir, name + ".tmp");
     const finalPath = join(dir, name);
     const fh = await open(tmpPath, "wx", FILE_MODE);
     try {
-      await fh.write(bytes);
-      await fh.sync();
+      try {
+        await fh.write(bytes);
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+      await rename(tmpPath, finalPath);
     } catch (err) {
-      // coverage residual: this arm needs a write/sync fault on an already
-      // open descriptor (disk full, EIO) -- reachable only under fault
-      // injection; the cleanup contract it shares with the blob path is
-      // pinned by the failed-push vectors.
-      await fh.close();
       await rm(tmpPath, { force: true });
       throw err;
     }
-    await fh.close();
-    await rename(tmpPath, finalPath);
     return finalPath;
   }
 
   // write(id, source, entry) -> Entry. Streams chunks to blobs/<id>.tmp
   // computing size and digest as they pass, fsyncs, renames into place,
   // THEN writes the sidecar -- so a crash at any point leaves either
-  // nothing or an invisible blob orphan, never a served half-entry.
+  // nothing or an invisible blob orphan, never a served half-entry. Any
+  // REJECTION (a source error, a sync fault, a rename that cannot land)
+  // removes the tmp partial: a failed push leaves nothing behind.
   async write(id, source, entry) {
     assertValid(id);
     const blobDir = await this.#containedDir("blobs");
@@ -168,20 +172,22 @@ export class DiskBackend {
     let size = 0;
     const fh = await open(tmpPath, "wx", FILE_MODE);
     try {
-      for await (const chunk of source) {
-        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        hash.update(buf);
-        size += buf.length;
-        await fh.write(buf);
+      try {
+        for await (const chunk of source) {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          hash.update(buf);
+          size += buf.length;
+          await fh.write(buf);
+        }
+        await fh.sync();
+      } finally {
+        await fh.close();
       }
-      await fh.sync();
+      await rename(tmpPath, blobPath);
     } catch (err) {
-      await fh.close();
       await rm(tmpPath, { force: true });
       throw err;
     }
-    await fh.close();
-    await rename(tmpPath, blobPath);
 
     const stored = structuredClone(entry);
     stored.size = size;
