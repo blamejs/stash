@@ -67,6 +67,9 @@ jobs:
       - name: Suite under --permission (SPEC.md 13.1 invariant 2)
         run: node scripts/run-sandboxed.js
 
+      - name: Fuzz-target smoke (targets load + seed corpus discriminates)
+        run: node .clusterfuzzlite/local-smoke.js
+
       - name: Forbidden-token invariant (SPEC.md 13.1 invariant 1)
         run: |
           set -euo pipefail

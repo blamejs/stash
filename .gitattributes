@@ -8,6 +8,10 @@ examples/wiki/public/vendor/** -text binary
 # bash chokes on CRLF with "$'\r': command not found".
 *.sh text eol=lf
 
+# Fuzz seed corpora are byte-exact fuzzer inputs (truncated JSON, NUL
+# bytes, boundary sizes) — line-ending normalization would corrupt them.
+.clusterfuzzlite/seeds/** -text
+
 # Derived artifacts owned end-to-end by generators emit LF, so the
 # on-disk file is pinned to LF on every platform.
 CHANGELOG.md text eol=lf

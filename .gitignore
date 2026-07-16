@@ -15,6 +15,7 @@
 !.gitleaks.toml
 !.pinact.yaml
 !.semgrep/
+!.clusterfuzzlite/
 
 # Build / dependencies
 node_modules/
