@@ -279,7 +279,7 @@ function _shell(opts) {
     '<link rel="icon" type="image/png" href="/stashjs-logo.png">',
     '<link rel="apple-touch-icon" href="/stashjs-logo.png">',
     '<link rel="manifest" href="/manifest.webmanifest">',
-    '<meta name="theme-color" content="#0d1117">',
+    '<meta name="theme-color" content="#0a68ec">',
     '<meta name="application-name" content="' + BRAND + '">',
     '<meta name="apple-mobile-web-app-title" content="' + BRAND + '">',
     '<meta name="apple-mobile-web-app-capable" content="yes">',

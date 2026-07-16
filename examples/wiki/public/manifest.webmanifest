@@ -6,7 +6,7 @@
   "scope": "/",
   "display": "standalone",
   "background_color": "#0d1117",
-  "theme_color": "#0d1117",
+  "theme_color": "#0a68ec",
   "icons": [
     { "src": "/stashjs-logo.png", "type": "image/png", "sizes": "1254x1254", "purpose": "any" }
   ]
