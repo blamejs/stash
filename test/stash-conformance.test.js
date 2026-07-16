@@ -99,6 +99,33 @@ for (const { name, create } of BACKENDS) {
       assert.equal((await stash.show(ref)).size, got.length);
     });
 
+    test("a zero-byte source round-trips: size 0, digest recorded, bytes empty", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push(Buffer.alloc(0));
+      const entry = await stash.show(ref);
+      assert.equal(entry.size, 0);
+      assert.match(entry.digest, /^sha256:[0-9a-f]{64}$/);
+      assert.equal((await drain(await stash.apply(ref))).length, 0);
+      const fromString = await stash.push("");
+      assert.equal((await stash.show(fromString)).size, 0);
+      assert.equal(await stash.drop(ref), true);
+    });
+
+    test("an abandoned apply leaves the entry intact and releases its handle", async () => {
+      // Destroy the stream after the first chunk: apply is non-destructive,
+      // so the entry must survive a partial read, a later apply must drain
+      // in full, and drop must succeed immediately -- a read handle left
+      // open by the abort would block the delete on Windows.
+      const stash = new Stash({ backend: create() });
+      const payload = Buffer.alloc(256 * 1024, 7);
+      const ref = await stash.push(payload);
+      const readable = await stash.apply(ref);
+      readable.once("data", () => readable.destroy());
+      await new Promise((resolve) => readable.once("close", resolve));
+      assert.deepEqual(await drain(await stash.apply(ref)), payload);
+      assert.equal(await stash.drop(ref), true);
+    });
+
     test("list accepts includeExpired and rejects unknown options", async () => {
       const stash = new Stash({ backend: create() });
       const ref = await stash.push("listed");
@@ -312,6 +339,7 @@ suite("config-time failures", () => {
 
   test("push rejects unimplemented and unknown options", async () => {
     const stash = new Stash({ backend: new MemoryBackend() });
+    await assert.rejects(stash.push("x", null), TypeError);
     await assert.rejects(stash.push("x", { ttl: "1h" }), TypeError);
     await assert.rejects(stash.push("x", { reads: 3 }), TypeError);
     await assert.rejects(stash.push("x", { unknown: true }), TypeError);

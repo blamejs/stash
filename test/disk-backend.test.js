@@ -7,6 +7,7 @@
 import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -14,6 +15,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -113,6 +115,30 @@ suite("disk: layout and atomicity", () => {
     await assert.rejects(stash.show(orphan), RefNotFound);
     await assert.rejects(stash.apply(orphan), RefNotFound);
   });
+
+  // Rot on the stored blob file itself -- every shape must die as a typed
+  // stream verdict, never as silently wrong bytes.
+  const BLOB_CORRUPTIONS = [
+    ["bit-flipped", (p) => {
+      const bytes = readFileSync(p);
+      bytes[0] ^= 0x01;
+      writeFileSync(p, bytes);
+    }],
+    ["truncated", (p) => truncateSync(p, 3)],
+    ["extended", (p) => appendFileSync(p, "xx")],
+  ];
+
+  for (const [name, corrupt] of BLOB_CORRUPTIONS) {
+    test("a " + name + " blob file errors the apply stream with IntegrityError", async () => {
+      const { root, stash } = freshStash();
+      const ref = await stash.push("victim bytes for corruption");
+      corrupt(join(root, "blobs", ref));
+      await assert.rejects(
+        drain(await stash.apply(ref)),
+        (err) => err instanceof IntegrityError && err.code === "EINTEGRITY"
+      );
+    });
+  }
 
   test("a sidecar without its blob is corruption, not silence", async () => {
     const { root, stash } = freshStash();
