@@ -66,6 +66,28 @@ function capture(cmd, args) {
   };
 }
 
+// captureNpm(command) -- run an npm invocation and capture stdout. Windows
+// resolves `npm` as an `npm.cmd` shim that Node refuses to spawn directly, so a
+// bare spawnSync("npm", [...]) returns ENOENT on Windows and the caller misreads
+// the empty stdout as a failed query (this is what falsely failed the 0.1.4
+// publish verification). Use the shell form -- a single command string, since
+// shell:true with an args array is deprecated (DEP0190) -- matching
+// check-pack-against-gitignore.js. `command` is built from package.json (a
+// semver spec), never external input.
+function captureNpm(command) {
+  const rv = spawnSync(command, [], {
+    cwd: ROOT,
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+    shell: true,
+  });
+  return {
+    status: rv.status,
+    stdout: (rv.stdout || "").trim(),
+    stderr: (rv.stderr || "").trim(),
+  };
+}
+
 function readVersion() {
   return JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
 }
@@ -996,7 +1018,7 @@ function cmdPublish() {
   // and the workflow-run conclusion above remains the primary success signal.
   let served = "";
   for (let i = 0; i < 30; i++) {
-    served = capture("npm", ["view", "@blamejs/stash@" + version, "version"]).stdout;
+    served = captureNpm("npm view @blamejs/stash@" + version + " version").stdout;
     if (served === version) break;
     console.log("  registry not yet serving " + version + " (got " +
       (served || "no answer") + "); re-checking (" + (i + 1) + ")...");
