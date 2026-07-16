@@ -10,14 +10,16 @@ their status. One milestone ships at a time, each ending green and committed.
 Round-trips a Buffer and a Readable through memory, all errors typed,
 traversal refs rejected before any storage access, digest-verified reads.
 
-## M2 -- Disk -- NEXT
+## M2 -- Disk -- SHIPPED (0.1.1)
 
-`DiskBackend`: sidecar metadata, tmp+rename writes, `0700`/`0600` permissions,
-realpath containment, streaming both directions. Done when M1's conformance
-suite passes unmodified against both backends and the whole suite passes under
-`--permission` scoped to the test root.
+`DiskBackend`: sidecar metadata, atomic tmp+fsync+rename writes,
+`0700`/`0600` permissions, realpath containment (a planted symlink is
+refused, never followed), strict size-bounded sidecar validation, streaming
+both directions. The M1 conformance suite passes unmodified against both
+backends, and the library suite passes under `--permission` scoped to the
+test root.
 
-## M3 -- Expiry
+## M3 -- Expiry -- NEXT
 
 `expiresAt`, lazy expiry on read, `prune()`, `sweepInterval` (unref'd),
 `close()`, `Symbol.asyncDispose`.

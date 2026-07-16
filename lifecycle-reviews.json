@@ -41,6 +41,12 @@
     "reviewedAt": "0.1.0",
     "reviewBy": "0.2.0"
   },
+  "stash.backends.DiskBackend": {
+    "decision": "keep-experimental",
+    "reason": "The M2 surface (five methods, containment, hostile-sidecar rejection) is hardened, but the backend contract it implements grows its claim machinery at M5, verify at M6, and tombstones at M7 -- each reshapes what this class must hold on disk. Graduate once the full SPEC.md 9 method set ships and survives its milestones' vectors.",
+    "reviewedAt": "0.1.1",
+    "reviewBy": "0.2.0"
+  },
   "stash.backends.MemoryBackend": {
     "decision": "keep-experimental",
     "reason": "The backend contract (SPEC.md 9) is exercised by one implementation; the claim/tombstone/verify surface it must grow arrives at M5-M7, and the disk backend (M2) is the second implementation that proves the conformance suite is backend-neutral. Graduate once both backends pass the full contract.",

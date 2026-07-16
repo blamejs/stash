@@ -263,6 +263,58 @@ export function validate(config) {
 
   var known = _knownPrimitiveSet(docs, source_by_file);
 
+  // ---- Pass: one page-metadata block per namespace ----
+  // A namespace may span files, but exactly ONE @module block carries the
+  // page metadata (@nav and friends); the rest are bare continuation
+  // blocks. Two metadata blocks would race for the page; a continuation
+  // block carrying page tags without @nav is orphaned metadata that
+  // renders nowhere.
+  var PAGE_TAGS = ["title", "card", "intro", "slug", "order", "featured"];
+  var navByNs = {};
+  Object.keys(docs).forEach(function (file) {
+    var rec = docs[file];
+    if (!rec.module) return;
+    var rel = path.relative(libDir, file);
+    var tags = rec.module.tags || {};
+    var ns = _moduleNs(tags.module);
+    if (!ns) return;
+    if (tags.nav) {
+      if (navByNs[ns]) {
+        findings.push({
+          kind: "metadata", file: rel, primitive: "@module " + ns,
+          msg: "duplicate page metadata: @nav for `" + ns + "` already declared in " + navByNs[ns],
+        });
+      } else {
+        navByNs[ns] = rel;
+      }
+    } else {
+      PAGE_TAGS.forEach(function (t) {
+        if (tags[t] != null) {
+          findings.push({
+            kind: "metadata", file: rel, primitive: "@module " + ns,
+            msg: "continuation @module block carries @" + t + " without @nav - page metadata renders nowhere; move it to the namespace's @nav block",
+          });
+        }
+      });
+    }
+  });
+  // A namespace that documents primitives needs exactly one @nav block
+  // somewhere; continuation files alone would leave the page unreachable.
+  var primNsSeen = {};
+  Object.keys(docs).forEach(function (file) {
+    var rec = docs[file];
+    if (!rec.module || !(rec.primitives || []).length) return;
+    var ns = _moduleNs((rec.module.tags || {}).module);
+    if (!ns || primNsSeen[ns]) return;
+    primNsSeen[ns] = true;
+    if (!navByNs[ns]) {
+      findings.push({
+        kind: "metadata", file: path.relative(libDir, file), primitive: "@module " + ns,
+        msg: "namespace `" + ns + "` documents primitives but no file declares its @nav page block",
+      });
+    }
+  });
+
   Object.keys(docs).forEach(function (file) {
     var rec = docs[file];
     var rel = path.relative(libDir, file);
@@ -476,14 +528,12 @@ export function validate(config) {
     });
 
     // ---- Pass: @module metadata completeness ----
-    if (rec.module && rec.primitives.length > 0) {
+    // Completeness binds the namespace's page-metadata (@nav) block; a
+    // bare continuation block in a second file is exempt. A namespace
+    // whose primitives have NO @nav block anywhere is caught by the
+    // orphan-namespace pass.
+    if (rec.module && rec.primitives.length > 0 && (rec.module.tags || {}).nav) {
       var modTags = rec.module.tags || {};
-      if (!modTags.nav) {
-        findings.push({
-          kind: "metadata", file: rel, primitive: "@module " + modNs,
-          msg: "@module block lacks @nav - namespace will land in the catch-all 'Other' sidebar group. Add `@nav <GroupName>`.",
-        });
-      }
       if (!modTags.card) {
         findings.push({
           kind: "metadata", file: rel, primitive: "@module " + modNs,

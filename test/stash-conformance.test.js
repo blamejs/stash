@@ -4,16 +4,21 @@
 // The backend conformance suite. Every backend runs the same cases through
 // the shipped consumer path (new Stash({ backend })); a new backend joins
 // by adding a factory to BACKENDS.
-import { suite, test } from "node:test";
+import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 
 import { Stash, RefNotFound, InvalidRef, IntegrityError, StashError } from "../src/index.js";
 import { MemoryBackend } from "../src/backends/memory.js";
+import { DiskBackend } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
+import { freshScratchDir, cleanupScratch } from "./_scratch.js";
+
+after(() => cleanupScratch());
 
 const BACKENDS = [
   { name: "memory", create: () => new MemoryBackend() },
+  { name: "disk", create: () => new DiskBackend({ root: freshScratchDir("conf") }) },
 ];
 
 async function drain(readable) {

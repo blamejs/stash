@@ -1,6 +1,6 @@
 {
   "generator": "scripts/refresh-api-snapshot.js",
-  "packageVersion": "0.1.0",
+  "packageVersion": "0.1.1",
   "surface": {
     "index": {
       "kind": "object",
@@ -105,9 +105,41 @@
           }
         }
       }
+    },
+    "backends/disk": {
+      "kind": "object",
+      "members": {
+        "DiskBackend": {
+          "kind": "class",
+          "arity": 1,
+          "methods": {
+            "list": {
+              "kind": "function",
+              "arity": 0
+            },
+            "read": {
+              "kind": "function",
+              "arity": 1
+            },
+            "remove": {
+              "kind": "function",
+              "arity": 1
+            },
+            "stat": {
+              "kind": "function",
+              "arity": 1
+            },
+            "write": {
+              "kind": "function",
+              "arity": 3
+            }
+          }
+        }
+      }
     }
   },
   "sinceByPrimitive": {
+    "stash.backends.DiskBackend": "0.1.1",
     "stash.backends.MemoryBackend": "0.1.0",
     "stash.Stash": "0.1.0",
     "stash.push": "0.1.0",

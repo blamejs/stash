@@ -58,6 +58,11 @@ Pre-1.0, only the latest published `0.x.y` receives fixes. See
   Note that `--permission` does not gate the network on Node 24.x; StashJS
   opens no sockets regardless.
 
+- **Let the store own its directory.** The disk backend creates its layout
+  `0700`/`0600` and enforces realpath containment itself -- a symlink
+  planted inside the root is refused, not followed (the permission model
+  alone does not stop symlink escapes). Point `root` at a dedicated
+  directory and let the backend create it rather than pre-seeding it.
 - **Never log refs or `meta` values.** A ref is a capability; a ref in a log
   file is a leaked capability. Log counts and error codes.
 - **Treat `StashError` codes as the branch surface.** Messages may change

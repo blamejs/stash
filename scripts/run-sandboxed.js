@@ -2,9 +2,10 @@
 // Copyright (c) blamejs contributors
 //
 // SPEC.md 13.1 invariant 2: the full suite passes under --permission with
-// filesystem grants scoped to the repository (read) and the test scratch
-// root (write). A change that quietly needs a broader grant fails here, at
-// the moment it is made.
+// grants scoped to the repository (read: module + test sources) and the
+// test scratch root (read+write: where disk-backed stashes live). A
+// change that quietly needs a broader grant fails here, at the moment it
+// is made.
 //
 // --test-isolation=none runs every test file in-process: the permission
 // model denies child-process spawn, which is exactly the posture the
@@ -17,20 +18,21 @@
 // LIBRARY never needs a grant beyond its storage root.
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { SCRATCH_BASE, ensureBase } from "../test/_scratch.js";
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const SCRATCH = join(ROOT, ".test-stash");
-mkdirSync(SCRATCH, { recursive: true });
+ensureBase();
 
 const result = spawnSync(
   process.execPath,
   [
     "--permission",
     "--allow-fs-read=" + ROOT,
-    "--allow-fs-write=" + SCRATCH,
+    "--allow-fs-read=" + SCRATCH_BASE,
+    "--allow-fs-write=" + SCRATCH_BASE,
     "--test",
     "--test-isolation=none",
     "test/*.test.js",

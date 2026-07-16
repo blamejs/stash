@@ -504,7 +504,16 @@ export function build(opts) {
     var rec = docsByPath[file];
     if (!rec.module) return;
     var ns = _moduleNs(rec.module.tags && rec.module.tags.module);
-    if (ns) docsByNs[ns] = rec;
+    if (!ns) return;
+    // A namespace may span files: exactly one @module block carries the
+    // page metadata (@nav -- validator-enforced), and continuation blocks
+    // contribute their primitives to the same page.
+    if (!docsByNs[ns]) {
+      docsByNs[ns] = { module: rec.module, primitives: (rec.primitives || []).slice() };
+      return;
+    }
+    if (rec.module.tags && rec.module.tags.nav) docsByNs[ns].module = rec.module;
+    docsByNs[ns].primitives = docsByNs[ns].primitives.concat(rec.primitives || []);
   });
 
   var index = _primitiveIndex(entries, docsByNs);

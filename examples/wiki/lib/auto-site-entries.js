@@ -52,10 +52,11 @@ export function deriveFromLib(libDir) {
     var modTags = rec.module.tags || {};
     var ns = _moduleNs(modTags.module);
     if (!ns) return;
-    // A namespace earns a page by documenting primitives OR by carrying
-    // explicit @nav placement (a metadata-only module like the error
-    // namespace, whose members render on the reference catalog).
-    if ((!rec.primitives || rec.primitives.length === 0) && !modTags.nav) return;
+    // A page exists per @nav-carrying @module block. A continuation block
+    // (a second file in the same namespace, bare @module tag) earns no
+    // entry of its own -- its primitives render on the namespace's page
+    // via the generator's per-namespace merge.
+    if (!modTags.nav) return;
     var slug = modTags.slug || _kebab(ns);
     if (seenSlugs[slug]) return;
     seenSlugs[slug] = true;

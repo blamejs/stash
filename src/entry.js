@@ -13,8 +13,10 @@
 // bug class this file exists to prevent -- the readsLeft field-literal
 // shape is detector-enforced.
 
-// The frozen field set, in canonical order. M2's sidecar codec derives
-// its accept-list from THIS array, not a second copy.
+import { isValid } from "./ref.js";
+
+// The frozen field set, in canonical order. The sidecar codec derives its
+// accept-list from THIS array, not a second copy.
 export const FIELDS = Object.freeze([
   "id",
   "size",
@@ -25,6 +27,57 @@ export const FIELDS = Object.freeze([
   "readsLeft",
   "meta",
 ]);
+
+const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+
+function _isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function _isCount(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+// assertShape(value, ErrorClass) -> value | throws new ErrorClass(...).
+// The read direction of the canonical shape: a STORED entry (a disk
+// sidecar, a replicated insert) must carry exactly the FIELDS set with
+// every field well-typed -- extra keys, missing keys, or a type drift are
+// the caller's verdict class, never a partially-trusted object. Messages
+// name the failing FIELD, never a value: field names are contract, values
+// are capabilities.
+// @enforced-by behavioral -- the hostile-sidecar battery drives every
+//   rejection branch through the shipped read path; the shape itself has
+//   no rename-proof code signature apart from entry.make's, which the
+//   guard detector already owns.
+export function assertShape(value, ErrorClass) {
+  if (!_isPlainObject(value)) throw new ErrorClass("stored entry rejected: not an object");
+  const keys = Object.keys(value);
+  if (keys.length !== FIELDS.length) throw new ErrorClass("stored entry rejected: field set");
+  for (const field of FIELDS) {
+    if (!(field in value)) throw new ErrorClass("stored entry rejected: field set");
+  }
+  if (!isValid(value.id)) throw new ErrorClass("stored entry rejected: id");
+  if (!_isCount(value.size)) throw new ErrorClass("stored entry rejected: size");
+  if (typeof value.digest !== "string" || !DIGEST_PATTERN.test(value.digest)) {
+    throw new ErrorClass("stored entry rejected: digest");
+  }
+  if (!_isCount(value.createdAt)) throw new ErrorClass("stored entry rejected: createdAt");
+  if (value.expiresAt !== null && !_isCount(value.expiresAt)) {
+    throw new ErrorClass("stored entry rejected: expiresAt");
+  }
+  const budgeted = value.reads !== null;
+  if (budgeted && !(Number.isSafeInteger(value.reads) && value.reads > 0)) {
+    throw new ErrorClass("stored entry rejected: reads");
+  }
+  if (budgeted !== (value.readsLeft !== null)) {
+    throw new ErrorClass("stored entry rejected: read budget coherence");
+  }
+  if (budgeted && (!_isCount(value.readsLeft) || value.readsLeft > value.reads)) {
+    throw new ErrorClass("stored entry rejected: readsLeft");
+  }
+  if (!_isPlainObject(value.meta)) throw new ErrorClass("stored entry rejected: meta");
+  return value;
+}
 
 // make(id, meta) -> a fresh M1 entry. Size and digest are the backend's to
 // fill during the write stream; lifecycle fields start at their inert

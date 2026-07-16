@@ -37,10 +37,13 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REMOTE_ONLY = ["prepare", "push", "watch", "merge", "publish"];
 
 function run(cmd, args, opts) {
+  const input = opts && opts.input;
   const rv = spawnSync(cmd, args, {
     cwd: ROOT,
-    stdio: (opts && opts.stdio) || "inherit",
-    input: opts && opts.input,
+    // spawnSync delivers input only through a piped stdin; an inherited
+    // stdin silently drops it and the child reads EOF.
+    stdio: (opts && opts.stdio) || (input != null ? ["pipe", "inherit", "inherit"] : "inherit"),
+    input,
     encoding: "utf8",
   });
   if (rv.status !== 0 && !(opts && opts.allowFail)) {

@@ -3,24 +3,28 @@
 /**
  * @module     stash.backends
  * @nav        Backends
- * @title      Memory backend
+ * @title      Backends
  * @order      20
- * @slug       backends-memory
+ * @slug       backends
  *
  * @intro
- *   The Map-backed reference backend: same interface as the disk backend,
- *   no persistence, no pretense. It exists for tests and for consumers
- *   whose stash is legitimately process-lifetime -- everything vanishes
- *   when the process does.
+ *   The storage layer, behind one contract (SPEC.md 9): the backend holds
+ *   bytes; `Stash` holds policy. A backend never validates lifecycle,
+ *   never interprets `meta`, and never decides destruction -- it stores
+ *   what it is handed under the id it is handed, computes size and sha256
+ *   digest as the bytes stream through, and reports what it holds. The
+ *   same conformance suite runs against every backend, unmodified.
  *
- *   The backend holds bytes; `Stash` holds policy. A backend never
- *   validates refs, never interprets `meta`, and never decides lifecycle --
- *   it stores what it is handed under the id it is handed, computes size
- *   and digest as the bytes stream through, and reports what it holds.
+ *   Two implementations ship. The memory backend is Map-backed -- no
+ *   persistence, no pretense; for tests and legitimately process-lifetime
+ *   stashes. The disk backend is sidecar-file storage: one blob and one
+ *   JSON sidecar per entry, no central index to corrupt, atomic
+ *   tmp-fsync-rename writes, 0700/0600 modes, and realpath containment
+ *   that refuses a planted symlink instead of following it.
  *
  * @card
- *   Map-backed storage backend -- the same contract as disk, for tests and
- *   process-lifetime stashes.
+ *   The storage contract and both shipped backends -- Map-backed memory,
+ *   and sidecar-file disk with atomic writes and realpath containment.
  */
 
 import { createHash } from "node:crypto";

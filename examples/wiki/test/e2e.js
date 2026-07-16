@@ -137,7 +137,7 @@ async function run() {
       var rec = docs[f];
       if (!rec.module) return;
       var ns = String(rec.module.tags.module || "").trim();
-      if (ns) primCountByNs[ns] = rec.primitives.length;
+      if (ns) primCountByNs[ns] = (primCountByNs[ns] || 0) + rec.primitives.length;
     });
 
     for (var i = 0; i < entries.length; i++) {

@@ -47,11 +47,19 @@ Requires Node `>= 24.18.0`.
 
 ## What ships today
 
-The M1 surface (see `SPEC.md` section 12 for the full delivery plan):
+The M1 + M2 surface (see `SPEC.md` section 12 for the full delivery plan):
 
-- `push` / `apply` / `show` / `list` / `drop` / `clear` over the in-memory
-  backend, with size and `sha256` digest computed as the bytes stream through
-  and digest-verified reads.
+- `push` / `apply` / `show` / `list` / `drop` / `clear` over either backend,
+  with size and `sha256` digest computed as the bytes stream through and
+  digest-verified reads.
+- **The disk backend** (`@blamejs/stash/backends/disk`): one blob + one JSON
+  sidecar per entry, no central index to corrupt, atomic
+  tmp-fsync-rename writes, `0700`/`0600` modes, realpath containment that
+  refuses planted symlinks instead of following them, and strict
+  size-bounded sidecar validation -- corruption is a typed `IntegrityError`,
+  never silently bad bytes and never a silent skip.
+- The in-memory backend, same contract, for tests and process-lifetime
+  stashes. One conformance suite runs against both, unmodified.
 - The full typed error set (`RefNotFound`, `RefClaimed`, `IntegrityError`,
   `SizeExceeded`, `StashFull`, `InvalidRef` -- all `StashError`, all with
   frozen codes).
@@ -62,10 +70,10 @@ Spec'd options whose milestone has not shipped (`ttl`, `maxSize`,
 unenforced -- a security option that is accepted but ignored would be a
 fail-open default.
 
-Next up, in order: the disk backend with realpath containment, expiry,
-mid-stream limits, the claim/commit `pop` cycle with read budgets, audit
-(`verify`), and the replication primitives (`store`, tombstones). `ROADMAP.md`
-tracks status; `SPEC.md` is the contract.
+Next up, in order: expiry, mid-stream limits, the claim/commit `pop` cycle
+with read budgets, audit (`verify`), and the replication primitives
+(`store`, tombstones). `ROADMAP.md` tracks status; `SPEC.md` is the
+contract.
 
 ## Run it sandboxed
 
