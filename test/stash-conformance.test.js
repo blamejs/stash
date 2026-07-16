@@ -511,6 +511,37 @@ for (const { name, create } of BACKENDS) {
       await assert.rejects(stash.push(one()), (e) => e instanceof SizeExceeded);
     });
 
+    test("maxSize bounds an ArrayBuffer chunk: no .length is not a bypass", async () => {
+      // An ArrayBuffer has no `.length`, so measuring it as chunk.length yields
+      // undefined and the running total goes NaN -- every comparison false -- and
+      // an oversized ArrayBuffer slips past maxSize entirely. It must be measured
+      // by byteLength.
+      const stash = new Stash({ backend: create(), maxSize: 16 });
+      async function* one() { yield new ArrayBuffer(64); } // 4x maxSize
+      await assert.rejects(stash.push(one()), (e) => e instanceof SizeExceeded && e.code === "E2BIG");
+    });
+
+    test("maxSize measures a typed array by its bytes, not its element count", async () => {
+      // A Uint16Array's `.length` is its element count; its byte size is twice
+      // that. Measuring by `.length` lets a 128-byte view slip past a 100-byte
+      // maxSize -- the byte length is what fills the store.
+      const stash = new Stash({ backend: create(), maxSize: 100 });
+      async function* one() { yield new Uint16Array(64); } // 64 elements = 128 bytes
+      await assert.rejects(stash.push(one()), (e) => e instanceof SizeExceeded && e.code === "E2BIG");
+    });
+
+    test("a typed-array chunk is stored by its exact bytes, not reinterpreted element-wise", async () => {
+      // Buffer.from(uint16array) copies element VALUES (each mod 256), losing the
+      // high byte of every element. The chunk must be normalized over its own
+      // bytes so a multi-byte view round-trips intact.
+      const stash = new Stash({ backend: create() });
+      const view = new Uint16Array([0x0102, 0x0304]); // 4 bytes in memory order
+      async function* one() { yield view; }
+      const ref = await stash.push(one());
+      const out = await drain(await stash.apply(ref));
+      assert.deepEqual(out, Buffer.from(view.buffer, view.byteOffset, view.byteLength));
+    });
+
     test("an unbounded source is abandoned at the boundary, not drained", async () => {
       const stash = new Stash({ backend: create(), maxSize: 64 });
       let finallyRan = false;
@@ -654,6 +685,22 @@ for (const { name, create } of BACKENDS) {
       await s2.push(Buffer.alloc(12, 9), { ttl: 0 }); // fat and expired, fills the store
       const live2 = await s2.push(Buffer.alloc(12, 1)); // fits only once the dead one is reaped
       assert.equal((await s2.show(live2)).id, live2);
+    });
+
+    test("maxTotal: an expired entry in the sidecar band does not block a live push", async () => {
+      // The rejection threshold with the sidecar charged is maxTotal - sidecar,
+      // BELOW maxTotal. If the prune only fires at stats.bytes >= maxTotal, a dead
+      // entry that leaves the footprint in the band (maxTotal - sidecar, maxTotal)
+      // is never reaped, and a live push is wrongly refused. Expired entries must
+      // be reclaimed before the headroom is judged.
+      const gauge = create();
+      await new Stash({ backend: gauge }).push(Buffer.alloc(8, 1), { ttl: 0 });
+      const oneDead = (await gauge.stats()).bytes; // a dead 8-byte entry's footprint
+      const stash = new Stash({ backend: create(), maxTotal: oneDead + 1 });
+      await stash.push(Buffer.alloc(8, 1), { ttl: 0 }); // fills to oneDead: inside the band
+      const live = await stash.push(Buffer.alloc(8, 2)); // must reap the dead one first
+      assert.equal((await stash.show(live)).id, live);
+      assert.deepEqual((await stash.list({ includeExpired: true })).map((e) => e.id), [live]);
     });
 
     test("StashFull/SizeExceeded are StashErrors; a bad limit value is a config TypeError, not a StashError", async () => {

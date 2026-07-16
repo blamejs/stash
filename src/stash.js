@@ -127,15 +127,29 @@ async function* _boundedSource(source, maxSize, residual) {
   let total = 0;
   for await (const chunk of source) {
     // Measure the chunk's byte length WITHOUT copying it, so a single hostile
-    // oversized chunk is rejected before Buffer.from duplicates it in memory --
-    // the advertised limit has to bound this allocation too, not just what is
-    // written. A string is measured by its UTF-8 byte length; a Buffer or
-    // Uint8Array by its own length.
-    const len = typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+    // oversized chunk is rejected before it is duplicated in memory -- the
+    // advertised limit has to bound this allocation too, not just what is
+    // written. A string measures its UTF-8 byte length; an ArrayBuffer, a typed
+    // array, or a DataView measures byteLength -- a raw ArrayBuffer has no
+    // `.length` (reading it as chunk.length is undefined -> NaN -> every bound
+    // comparison false), and a multi-byte typed array's `.length` counts
+    // elements, not bytes; either would slip an oversized chunk past the check.
+    // Any other array-like falls back to `.length`.
+    let len;
+    if (typeof chunk === "string") len = Buffer.byteLength(chunk);
+    else if (ArrayBuffer.isView(chunk)) len = chunk.byteLength;
+    else if (chunk instanceof ArrayBuffer) len = chunk.byteLength;
+    else len = chunk.length;
     total += len;
     if (maxSize !== null && total > maxSize) throw new SizeExceeded();
     if (residual !== null && total > residual) throw new StashFull();
-    yield Buffer.from(chunk); // only materialized once it is known to fit
+    // Materialize the chunk only now that it is known to fit, over its EXACT
+    // bytes: a typed array or a byte-offset view is normalized through its
+    // backing buffer so its real bytes are stored, not its element values
+    // reinterpreted (Buffer.from(uint16array) would copy each element mod 256).
+    if (typeof chunk === "string") yield Buffer.from(chunk, "utf8");
+    else if (ArrayBuffer.isView(chunk)) yield Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    else yield Buffer.from(chunk);
   }
 }
 
@@ -349,22 +363,21 @@ export class Stash {
     // Stash-wide bounds, enforced in the policy layer before the backend stores
     // a byte. maxEntries is a hard pre-check (a new entry always adds one) and
     // rejects before the stream starts. maxTotal is enforced mid-stream against
-    // the residual headroom (see _boundedSource). Both are expiry-aware: if a
-    // bound is at its edge, prune the provably-expired and re-read stats ONCE, so
-    // a dead-but-unswept entry never rejects a live push. The stats read and the
-    // write are not atomic; concurrent pushes can overshoot by the in-flight
-    // count, which bounds the overshoot without a lock the sidecar design omits.
+    // the residual headroom (see _boundedSource). Both are expiry-aware: a
+    // backend counts every stored entry, expired or not, so provably-expired
+    // entries are reclaimed BEFORE the store is judged full -- otherwise a
+    // dead-but-unswept entry inflates the footprint and rejects a live push,
+    // including in the band below maxTotal where the new entry's sidecar alone
+    // would tip it over. Only the bounded path pays this; an unlimited stash
+    // reads neither prune nor stats. The stats read and the write are not
+    // atomic; concurrent pushes can overshoot by the in-flight count, which
+    // bounds the overshoot without a lock the sidecar design omits.
     const id = generate();
     const entry = make(id, meta, ttlMs);
     let residual = null;
     if (this.#maxEntries !== null || this.#maxTotal !== null) {
-      let stats = await this.#backend.stats();
-      const atEdge = (this.#maxEntries !== null && stats.entries >= this.#maxEntries) ||
-        (this.#maxTotal !== null && stats.bytes >= this.#maxTotal);
-      if (atEdge) {
-        await this.prune();
-        stats = await this.#backend.stats();
-      }
+      await this.prune();
+      const stats = await this.#backend.stats();
       if (this.#maxEntries !== null && stats.entries >= this.#maxEntries) {
         throw new StashFull();
       }

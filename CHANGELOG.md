@@ -19,8 +19,10 @@ live push. Every rejected push leaves nothing behind.
   running byte count is checked before each chunk is handed to the backend,
   so a push that crosses the limit aborts with `SizeExceeded` (code `E2BIG`)
   and an unbounded or hostile source is cut off at the boundary instead of
-  filling the disk. Bytes are counted after encoding, so a multibyte string
-  is measured by its real size.
+  filling the disk. Every chunk is counted by its real byte length -- a
+  multibyte string by its encoded size, a typed array or ArrayBuffer by its
+  byte count rather than its element count -- so no chunk shape slips past
+  the limit, and each is stored by its exact bytes.
 - `maxEntries` and `maxTotal` (constructor options) bound the whole store. A
   push that would exceed the entry count or the total byte size is refused
   with `StashFull` (code `EFULL`), and no existing entry is evicted to make
