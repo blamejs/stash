@@ -1,0 +1,27 @@
+# stashjs.com docs site -- single-container deploy.
+#
+# Run from this directory:
+#   docker compose up --build
+#
+# The site is stateless: every page is generated at boot from the
+# library's @module / @primitive comment blocks, so there is no database
+# and no volume -- a restart or rebuild always reflects the current source.
+# The container runs nonroot with all capabilities dropped.
+
+services:
+  wiki:
+    build:
+      context: ../..
+      dockerfile: examples/wiki/Dockerfile
+    image: blamejs-stash-wiki:0.1.3
+    container_name: stash-wiki
+    restart: unless-stopped
+    ports:
+      - "${WIKI_PORT:-3011}:${WIKI_PORT:-3011}"
+    environment:
+      WIKI_PORT: "${WIKI_PORT:-3011}"
+      WIKI_SITE_URL: ${WIKI_SITE_URL:-https://stashjs.com}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

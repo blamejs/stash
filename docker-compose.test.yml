@@ -1,0 +1,33 @@
+# Test-only CI-runtime oracle for @blamejs/stash.
+#
+# CI runs on Node 24; a newer local Node can mask runtime differences in
+# streams, crypto, the permission model, and `node --test` argument
+# handling. This compose file provides the pinned CI runtime so a
+# developer laptop verifies against the same Node line CI uses.
+#
+# The `suite` service is a run-to-completion container that executes the
+# full smoke gate (static gates, the library suite, the sandboxed
+# permission-model run, and the wiki e2e) on node:24-alpine.
+#
+# Run the whole suite in the CI runtime:
+#   docker compose -f docker-compose.test.yml run --rm suite
+#
+# Run it locally instead:
+#   npm run smoke
+
+services:
+
+  suite:
+    image: node:24-alpine
+    container_name: stash-test-suite
+    working_dir: /stash
+    volumes:
+      - .:/stash
+    # Alpine's node image ships npm but not git; the pack gate shells
+    # `git ls-files`, so install git first. The mounted repo is owned by a
+    # different uid than the container user, so mark it safe for git before
+    # the gates run.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "apk add --no-cache git >/dev/null && git config --global safe.directory /stash && npm run smoke"
+    restart: "no"
