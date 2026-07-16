@@ -1,0 +1,15 @@
+# pinact configuration -- refuses any tag-shaped `uses:` reference.
+#
+# Policy: every third-party action in .github/workflows/ is pinned to a
+# 40-char commit SHA with a trailing tag-shaped version comment, and the
+# actions-lint workflow verifies both the pin (`pinact run --check`) and
+# the comment/SHA agreement against the upstream registry
+# (`pinact run --verify`). This is the structural defense against the
+# CVE-2025-30066 class (retroactive tag rewrite).
+#
+# There are currently NO exceptions. If a future action genuinely cannot
+# be SHA-pinned (e.g. a reusable workflow whose internals refuse non-tag
+# refs), document the reason here as an `ignore_actions` entry with the
+# tightest `ref` regex that matches the one sanctioned reference.
+
+version: 3

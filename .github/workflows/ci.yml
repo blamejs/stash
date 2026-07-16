@@ -50,6 +50,15 @@ jobs:
       - name: API snapshot
         run: node scripts/check-api-snapshot.js
 
+      - name: Status lifecycle
+        run: node scripts/check-status-lifecycle.js
+
+      - name: Changelog regen check
+        run: node scripts/regen-changelog.js --check
+
+      - name: Pack gate
+        run: node scripts/check-pack-against-gitignore.js
+
       - name: Suite
         run: node --test
 

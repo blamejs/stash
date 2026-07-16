@@ -1,0 +1,142 @@
+# Custom Semgrep rules for the store -- preventative checks the generic
+# registry packs (p/security-audit, p/secrets) do not cover. Scoping to src/
+# (the shipped code) comes from the workflow's scan target, matching the
+# ci.yml forbidden-token gate's scope. Findings upload to the Security tab; they complement the
+# in-repo codebase-patterns detectors and the ci.yml forbidden-token gate
+# (SPEC.md 13.1 invariant 1), they do not replace them.
+rules:
+  # SPEC.md section 1: the store cannot decrypt anything -- there is nowhere
+  # in it to put a key. node:crypto is allowed for hashing and random ID
+  # generation only (createHash, randomBytes, timingSafeEqual). Any cipher
+  # construction, including the deprecated no-IV forms, is a violation of the
+  # architecture, not a style problem.
+  - id: stash-no-cipher-construction
+    languages: [generic]
+    severity: ERROR
+    message: >
+      Cipher construction is forbidden anywhere in the source tree (SPEC.md
+      section 1). The store is crypto-agnostic by architecture: encryption is
+      the consumer's job, and the absence of the capability is the product.
+      Remove the createCipher/createCipheriv/createDecipher/createDecipheriv
+      reference entirely.
+    patterns:
+      - pattern-regex: create(De)?[Cc]ipher(iv)?
+
+  # SPEC.md section 3: node:sqlite is rejected even though it is a builtin.
+  # It is still experimental on 24.x, sidecar files win on crash-safety, and
+  # decisively: the permission model does not gate filesystem access made
+  # through node:sqlite, so adopting it would punch a hole through the
+  # --permission sandbox posture (SPEC.md section 2.1).
+  - id: stash-no-node-sqlite
+    languages: [generic]
+    severity: ERROR
+    message: >
+      node:sqlite is forbidden (SPEC.md section 3): filesystem access made
+      through it bypasses the --permission sandbox (SPEC.md section 2.1).
+      Sidecar metadata files are the storage design; there is no index
+      database.
+    patterns:
+      - pattern-regex: "node:sqlite"
+
+  # SPEC.md 13.1 invariant 1: there is no password anywhere in this store.
+  # A password-named identifier, option, or comment is the first step toward
+  # key material having a place to live.
+  - id: stash-no-password-token
+    languages: [generic]
+    severity: ERROR
+    message: >
+      The token "password" must not appear anywhere under src/ (SPEC.md 13.1
+      invariant 1). The store has no key parameter, no passphrase, no secret
+      option -- encryption belongs to the consumer.
+    patterns:
+      - pattern-regex: (?i)password
+
+  # Refs are unguessable capabilities (SPEC.md section 5): they must come
+  # from node:crypto randomBytes, never a non-cryptographic PRNG.
+  - id: stash-math-random-not-csprng
+    languages: [javascript]
+    severity: ERROR
+    message: >
+      Math.random() is not a CSPRNG. A ref is a bearer capability (SPEC.md
+      section 5) and any security-relevant value (ref, id, token) must come
+      from node:crypto randomBytes.
+    pattern: Math.random(...)
+
+  # Integrity digests guard against silent bad bytes (IntegrityError,
+  # SPEC.md section 10); a broken hash makes the corruption check forgeable.
+  - id: stash-weak-hash-md5-sha1
+    languages: [javascript]
+    severity: WARNING
+    message: >
+      MD5 / SHA-1 are broken for collision resistance. Blob integrity digests
+      must use SHA-256 or stronger; a colliding digest turns IntegrityError
+      into a bypassable check.
+    patterns:
+      - pattern-either:
+          - pattern: crypto.createHash("md5")
+          - pattern: crypto.createHash("sha1")
+          - pattern: crypto.createHash("md5-sha1")
+          - pattern: createHash("md5")
+          - pattern: createHash("sha1")
+          - pattern: createHash("md5-sha1")
+
+  # Comparing a secret-bearing value with === / !== / Buffer.equals is
+  # timing-variable. Refs and digests compared on a decision path use
+  # crypto.timingSafeEqual (one of the three node:crypto imports SPEC.md
+  # section 1 allows).
+  - id: stash-non-constant-time-secret-compare
+    languages: [javascript]
+    severity: WARNING
+    message: >
+      Comparing a secret-bearing value (expected/computed digest, hmac,
+      secret) with ===, !==, or Buffer.equals is timing-variable. Use
+      crypto.timingSafeEqual for secret-dependent equality.
+    patterns:
+      - pattern-either:
+          - pattern: $A.equals($MAC)
+          - pattern: $A === $MAC
+          - pattern: $MAC === $A
+          - pattern: $A !== $MAC
+          - pattern: $MAC !== $A
+      # Word-bounded secret-bearing identifiers only. The bare tokens ref /
+      # digest / id are deliberately excluded: they name public structural
+      # values throughout the store (entry.digest in a report, ref parse
+      # results), and comparing those is not automatically a timing oracle.
+      # A genuine guarded comparison names it expectedDigest / computedDigest.
+      - metavariable-regex:
+          metavariable: $MAC
+          regex: (?i)(hmac|\bmac\b|secret|expected(ref|mac|tag|digest|hmac)|computed(ref|mac|tag|digest|hmac))
+
+  # A catch that absorbs the error into a returned default is fail-open by
+  # shape: the caller cannot distinguish "verified absent" from "the check
+  # itself failed". Every catch either rethrows (typed) or narrowly matches
+  # the one expected error code and documents why the fallback is a verdict.
+  - id: stash-fail-open-catch
+    languages: [javascript]
+    severity: WARNING
+    message: >
+      This catch swallows the error into a return instead of rethrowing.
+      A verify/lookup path that returns a default on failure is fail-open:
+      malformed state reads as a clean verdict. Rethrow a typed StashError,
+      or narrow the catch to the single expected error code and document the
+      fallback.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              try { ... } catch ($E) { return $X; }
+          - pattern: |
+              try { ... } catch ($E) { return; }
+          - pattern: |
+              try { ... } catch ($E) { }
+
+  # Shipped source carries no authorship attribution for tools or vendors;
+  # the same token set is refused in commit bodies by the repo conventions.
+  - id: stash-no-attribution-tokens
+    languages: [generic]
+    severity: ERROR
+    message: >
+      Attribution tokens do not belong in shipped source. Remove the tool /
+      vendor / trailer reference; code comments describe the invariant, not
+      the authorship.
+    patterns:
+      - pattern-regex: (?i)\b(claude|anthropic|co-authored-by|chatgpt|openai|copilot|gemini|llm-generated|ai-generated)\b

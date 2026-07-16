@@ -12,6 +12,9 @@
 !.nvmrc
 !.node-version
 !.npmrc
+!.gitleaks.toml
+!.pinact.yaml
+!.semgrep/
 
 # Build / dependencies
 node_modules/

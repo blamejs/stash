@@ -1,0 +1,39 @@
+title = "blamejs stash gitleaks config"
+
+# Inherit gitleaks' default ruleset (AWS keys, GCP creds, GitHub tokens,
+# npm tokens, generic high-entropy strings, etc.). The store holds no key
+# material by design -- there is nowhere in it to put a key (SPEC.md
+# section 1) -- so the defaults are the policy; the allowlists below only
+# quiet fixture entropy that is not a credential. New rules CAN be added
+# here if the repo ever gains a credential shape it wants the scan to
+# catch.
+[extend]
+useDefault = true
+
+# gitleaks 8.21+ requires the [[allowlists]] (plural) form; the
+# singular [allowlist] is deprecated and rejected when [[allowlists]]
+# is also present. Each [[allowlists]] block is independent -- a finding
+# is suppressed if ANY block matches.
+
+[[allowlists]]
+description = "Test fixtures: random refs, digests, and hostile-input corpora"
+paths = [
+  # Tests embed deterministic hex digests, random-looking ref strings,
+  # and deliberately hostile ref shapes (traversal, URL-encoded, over-
+  # long) for the fail-closed vectors. High-entropy by construction,
+  # never credentials -- the store has no key parameter to leak.
+  '''test/.*\.test\.js''',
+  '''test/helpers/.*''',
+  '''test/fixtures/.*''',
+]
+
+[[allowlists]]
+description = "Doc-string credential-shaped placeholders"
+# Operator-facing docs and examples show ref strings and sha256 digests
+# in prose and code blocks. Refs are random base64url-shaped tokens, so
+# the entropy detector can trip on an example ref; a documented example
+# ref points at nothing.
+regexes = [
+  '''v1_[A-Za-z0-9_-]{20,}''',
+  '''sha256-[A-Za-z0-9+/=]{40,}''',
+]

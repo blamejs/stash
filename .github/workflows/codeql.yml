@@ -1,0 +1,56 @@
+name: CodeQL SAST
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "31 5 * * 1"
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  analyze:
+    name: CodeQL analysis (javascript-typescript)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      # CodeQL maintains a single combined language ID for JavaScript +
+      # TypeScript. The store ships plain ESM JavaScript only (no build
+      # step, no transpilation); the language ID picks up the .js files
+      # under src/ regardless.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
+        with:
+          languages: javascript-typescript
+          # Scope (paths) + query suite (security-extended) are inline so
+          # analysis covers only the shipped product (src/) -- the npm
+          # package surface -- not test/example code. security-extended
+          # catches prototype pollution, command injection, ReDoS, unsafe
+          # deserialization, hardcoded credentials, path traversal;
+          # findings surface as SARIF in the Security tab.
+          config: |
+            queries:
+              - uses: security-extended
+            paths:
+              - src
+            paths-ignore:
+              - "**/node_modules"
+
+      # Auto-build is skipped because plain ESM files don't need a build
+      # step; CodeQL extracts straight from source.
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
+        with:
+          category: "/language:javascript-typescript"

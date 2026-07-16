@@ -1,0 +1,67 @@
+name: Dependency review
+
+# Two guards on a PR:
+#  1. dependency-review-action blocks a dependency change that adds a KNOWN
+#     vulnerability (>= high) or a disallowed license.
+#  2. an explicit check that package.json declares NO dependencies of any
+#     kind -- runtime AND dev. dependency-review only fails on advisories/
+#     licenses, so a clean-but-new permissive dep would slip it; this step is
+#     the actual zero-dependency gate. The store is built on Node builtins
+#     only: tests run on node:test, there is no linter package, no framework,
+#     no lockfile.
+on:
+  pull_request:
+    branches: [main]
+
+permissions: read-all
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Enforce zero dependencies, dev included (SPEC.md section 2)
+        run: |
+          deps=$(node -e "
+            const p = JSON.parse(require('node:fs').readFileSync('./package.json', 'utf8'));
+            const fields = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
+            const found = {};
+            fields.forEach((f) => { Object.keys(p[f] || {}).forEach((k) => { found[f + ':' + k] = p[f][k]; }); });
+            (p.bundledDependencies || p.bundleDependencies || []).forEach((k) => { found['bundledDependencies:' + k] = true; });
+            process.stdout.write(JSON.stringify(found));
+          ")
+          if [ "$deps" != "{}" ]; then
+            echo "::error::package.json declares dependencies: $deps -- SPEC.md section 2 forbids ANY dependency (dependencies / devDependencies / optionalDependencies / peerDependencies / bundledDependencies). Node builtins only."
+            exit 1
+          fi
+          echo "no dependencies in any field -- the zero-dependency contract holds."
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
+        with:
+          fail-on-severity: high
+          # fail-on-scopes defaults to `runtime` only; this repo ships zero
+          # dependencies in every scope, so `development` is included to keep
+          # the whole surface checked should one ever appear in a PR (the gate
+          # above rejects it regardless).
+          fail-on-scopes: runtime, development
+          # Default-DENY licenses: only these permissive SPDX identifiers are
+          # allowed, so any copyleft variant (GPL-2.0-only / -or-later, LGPL,
+          # AGPL, and forms not enumerated) is rejected without relying on a
+          # denylist of deprecated IDs. A compound `A AND B` license passes
+          # only when every clause is allow-listed.
+          allow-licenses: Apache-2.0, MIT, BSD-2-Clause, BSD-2-Clause-Views, BSD-3-Clause, ISC, 0BSD, Unlicense, CC0-1.0, BlueOak-1.0.0, Python-2.0
+          comment-summary-in-pr: on-failure

@@ -4,7 +4,7 @@
     "version": "1.30.0",
     "license": "MIT",
     "homepage": "https://prismjs.com",
-    "usedFor": "Syntax highlighting of the wiki's code blocks (javascript/js, bash/sh). Client-side only; never ships in the @blamejs/pki package.",
+    "usedFor": "Syntax highlighting of the wiki's code blocks (javascript/js, bash/sh). Client-side only; never ships in the @blamejs/stash package.",
     "files": {
       "prism.js": {
         "sha256": "a1ab925b786c653d5a4ae493141531b964778dc5ec95003342670664c6e816d3",

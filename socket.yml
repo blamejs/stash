@@ -1,0 +1,11 @@
+# Socket Security configuration -- https://docs.socket.dev/docs/socket-yml
+version: 2
+
+issueRules:
+  # This store is a zero-dependency local-storage primitive with no network
+  # surface (no fetch, socket, or child process anywhere in the tarball; the
+  # permission-model posture in SPEC.md 2.1 forbids widening it). URL-like
+  # strings in the published package are documentation examples only --
+  # never a live endpoint. The low-severity "URL strings" alert on those is
+  # a false positive for a library that makes no network calls.
+  urlStrings: false
