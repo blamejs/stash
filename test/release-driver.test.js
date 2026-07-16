@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { checksVerdict, mergeArgs, reviewDecision } from "../scripts/release.js";
+import { checksVerdict, mergeArgs, reviewDecision, tagTarget } from "../scripts/release.js";
 
 // ---------------------------------------------------------------------------
 // checksVerdict -- CheckRun entries (status / conclusion)
@@ -338,3 +338,49 @@ test("mergeArgs: a missing or truncated head sha throws instead of merging unbou
   assert.throws(() => mergeArgs("release-v0.1.4", "a1b2c"), TypeError);
 });
 
+
+// ---------------------------------------------------------------------------
+// tagTarget -- the signed tag pins the reviewed PR's merge commit
+// ---------------------------------------------------------------------------
+
+const SHA = "a1b2c3d4e5f60718293645546372819a0bcdef12";
+
+test("tagTarget: recorded merge commit for this version is the tag target", () => {
+  assert.equal(tagTarget({ version: "0.1.4", mergeSha: SHA }, "0.1.4"), SHA);
+});
+
+test("tagTarget: a version mismatch falls back to HEAD (null), never a stale commit", () => {
+  assert.equal(tagTarget({ version: "0.1.3", mergeSha: SHA }, "0.1.4"), null);
+});
+
+test("tagTarget: absent / malformed state falls back to HEAD (null)", () => {
+  assert.equal(tagTarget(null, "0.1.4"), null);
+  assert.equal(tagTarget({}, "0.1.4"), null);
+  assert.equal(tagTarget({ version: "0.1.4" }, "0.1.4"), null);
+  assert.equal(tagTarget({ version: "0.1.4", mergeSha: "not-a-sha" }, "0.1.4"), null);
+  assert.equal(tagTarget({ version: "0.1.4", mergeSha: "" }, "0.1.4"), null);
+});
+
+// cmdWatch records the merge commit and cmdTag pins the signed tag to it: a
+// concurrent PR that advances main after our merge must never be dragged
+// under this version's tag. Structural, over comment-stripped source.
+test("cmdTag pins the tag to the recorded merge commit, not HEAD", () => {
+  const raw = readFileSync(new URL("../scripts/release.js", import.meta.url), "utf8");
+  const src = raw
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+
+  const tagStart = src.indexOf("function cmdTag");
+  const tagEnd = src.indexOf("\nfunction ", tagStart + 1);
+  const tagBody = src.slice(tagStart, tagEnd === -1 ? undefined : tagEnd);
+  assert.ok(/tagTarget\s*\(/.test(tagBody), "cmdTag must resolve the tag target via tagTarget");
+  assert.ok(/tagArgs\.push\(\s*target\s*\)/.test(tagBody),
+    "cmdTag must append the resolved target to the git tag args");
+
+  const watchStart = src.indexOf("function cmdWatch");
+  const watchEnd = src.indexOf("\nfunction ", watchStart + 1);
+  const watchBody = src.slice(watchStart, watchEnd === -1 ? undefined : watchEnd);
+  assert.ok(/mergeCommit/.test(watchBody), "cmdWatch must request the PR mergeCommit");
+  assert.ok(/writeFileSync\(\s*releaseStatePath\(\)/.test(watchBody),
+    "cmdWatch must record the merge commit to the release-state file");
+});

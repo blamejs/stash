@@ -28,7 +28,7 @@
 //     be configured before the first signed commit or tag.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -210,6 +210,37 @@ function cmdCommit() {
   verifyCommitSignature();
 }
 
+// The release-state file bridges `watch` and `tag` across their separate
+// invocations: watch records the exact commit its reviewed PR merged into
+// so tag can pin the signed tag to THAT commit. Dot-prefixed, so the
+// deny-all-dotfiles gitignore keeps it out of the repo and the tarball.
+function releaseStatePath() {
+  return join(ROOT, ".release-state.json");
+}
+
+function readReleaseState() {
+  try {
+    return JSON.parse(readFileSync(releaseStatePath(), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// tagTarget(state, version) -- the commit a signed tag must point at. When a
+// prior `watch` recorded the merge commit for THIS version, the tag pins that
+// exact commit; a concurrent PR that lands on main after ours must never be
+// dragged under this version's tag. Absent, malformed, or version-mismatched
+// state -> null: tag HEAD (the standalone path, when tag runs without watch).
+export function tagTarget(state, version) {
+  if (state && typeof state === "object" &&
+      state.version === version &&
+      typeof state.mergeSha === "string" &&
+      /^[0-9a-f]{7,40}$/.test(state.mergeSha)) {
+    return state.mergeSha;
+  }
+  return null;
+}
+
 function cmdTag() {
   section("tag");
   if (!gitClean()) {
@@ -220,7 +251,15 @@ function cmdTag() {
   if (capture("git", ["tag", "-l", tag]).stdout === tag) {
     throw new Error("tag " + tag + " already exists -- this version is already tagged");
   }
-  run("git", ["tag", "-s", tag, "-m", tag]);
+  // Pin the tag to the reviewed PR's merge commit when watch recorded it, so
+  // a concurrent merge that advanced main after ours is never tagged.
+  const target = tagTarget(readReleaseState(), version);
+  const tagArgs = ["tag", "-s", tag, "-m", tag];
+  if (target) {
+    tagArgs.push(target);
+    console.log("tagging the recorded merge commit " + target.slice(0, 12) + " (not HEAD)");
+  }
+  run("git", tagArgs);
 
   // Verify the signature immediately; a bad signature deletes the tag so a
   // re-run after fixing the signing setup starts clean.
@@ -232,7 +271,14 @@ function cmdTag() {
       "allowed_signers populated). The local tag was removed.\n" +
       (verify.stderr || verify.stdout));
   }
-  ok("annotated signed tag " + tag + " created (signature: Good)");
+  // The tag is signed and verified; the recorded merge commit has served its
+  // purpose, so retire the state file (a stale one must never mis-pin the next
+  // release's tag).
+  if (target) {
+    try { unlinkSync(releaseStatePath()); } catch { /* already gone */ }
+  }
+  ok("annotated signed tag " + tag + " created (signature: Good)" +
+    (target ? " on merge commit " + target.slice(0, 12) : ""));
 }
 
 function requireRemote() {
@@ -489,9 +535,16 @@ function cmdWatch() {
   // watch that exhausts its polls throws, so it can never sync main and
   // delete a branch whose PR never merged.
   let merged = false;
+  let mergeSha = "";
   for (let i = 0; i < 90; i++) {
-    const pr = ghJson(["pr", "view", branch, "--json", "state,headRefOid,statusCheckRollup"]);
-    if (pr.state === "MERGED") { merged = true; break; }
+    const pr = ghJson(["pr", "view", branch, "--json", "state,headRefOid,statusCheckRollup,mergeCommit"]);
+    if (pr.state === "MERGED") {
+      merged = true;
+      // The exact commit our reviewed PR merged into main. Tag pins THIS,
+      // not whatever HEAD advances to if another PR lands concurrently.
+      mergeSha = (pr.mergeCommit && pr.mergeCommit.oid) || "";
+      break;
+    }
     if (pr.state !== "OPEN") throw new Error("PR is " + pr.state);
     const checks = checksVerdict(pr.statusCheckRollup);
     if (checks.blocking.length > 0) {
@@ -536,6 +589,14 @@ function cmdWatch() {
   run("git", ["checkout", "main"]);
   run("git", ["pull", "--ff-only"]);
   run("git", ["branch", "-D", branch]);
+  // Record the merge commit so `tag` pins the signed tag to it even if a
+  // concurrent PR has since advanced main past it.
+  if (mergeSha) {
+    writeFileSync(releaseStatePath(), JSON.stringify({ version: readVersion(), mergeSha }) + "\n");
+    console.log("recorded merge commit " + mergeSha.slice(0, 12) + " for tag");
+  } else {
+    console.log("!! could not read the PR merge commit -- tag will fall back to HEAD; verify it before publish");
+  }
   ok("merged; main synced; branch " + branch + " removed");
 }
 
