@@ -8,8 +8,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { lstat, mkdir, open, readdir, readFile, realpath, rename, rm } from "node:fs/promises";
+import { constants as FS } from "node:fs";
+import { lstat, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { C } from "../constants.js";
@@ -28,11 +28,34 @@ const MAX_SIDECAR_BYTES = 64 * C.BYTES.KIB;
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 
+// A stored file is read through its own descriptor: open once, verify the
+// descriptor, then read or stream from that same handle. The check and the
+// use share one fd, so nothing re-resolves the path between them -- a blob
+// or sidecar swapped for a symlink (or a different file) after a path check
+// but before the read is the time-of-check/time-of-use class (CWE-367), and
+// a path-based read follows the swap. O_NOFOLLOW refuses a symlink where a
+// blob or sidecar belongs at open time on POSIX. O_RDONLY is 0.
+const READ_FLAGS = FS.O_RDONLY | (FS.O_NOFOLLOW || 0);
+
+// Windows lacks O_NOFOLLOW (0 above), so the open cannot refuse a symlink on
+// its own there; a post-open lstat cross-checks the final component instead.
+// The open already bound the descriptor, so that lstat can only REJECT a
+// symlinked name -- it never redirects the read, which draws from the fd.
+// File-symlink creation on Windows also needs a privilege the sandbox denies.
+const SYMLINK_GUARD_NEEDED = (FS.O_NOFOLLOW || 0) === 0;
+
 // absent(err) -> true for ENOENT, rethrows anything else. The one place
 // "file not found" legitimately converts to a fact instead of a failure.
 function _absent(err) {
   if (err && err.code === "ENOENT") return true;
   throw err;
+}
+
+// A symlink refused at open (ELOOP, POSIX O_NOFOLLOW) or a non-file the
+// open itself rejected (EISDIR on platforms that block opening a directory)
+// is store tampering, not absence.
+function _openTamper(err) {
+  return err && (err.code === "ELOOP" || err.code === "EISDIR");
 }
 
 /**
@@ -41,7 +64,7 @@ function _absent(err) {
  * @since      0.1.1
  * @status     experimental
  * @spec       SPEC.md 9, SPEC.md 2.1, RFC 8259
- * @defends    CWE-22, CWE-59, CWE-377, CWE-770, path traversal (CWE-23)
+ * @defends    CWE-22, CWE-59, CWE-367, CWE-377, CWE-770, path traversal (CWE-23)
  * @related    stash.backends.MemoryBackend, stash.Stash
  *
  * Construct the sidecar-file disk backend over `opts.root`. The layout is
@@ -56,7 +79,11 @@ function _absent(err) {
  * Containment is the backend's own job, not the sandbox's: the root is
  * realpath-pinned at init, every operation re-asserts that its directory
  * still resolves inside it, and a symlink where a blob should be is
- * refused as corruption rather than followed.
+ * refused as corruption rather than followed. Blob and sidecar reads open
+ * a descriptor and verify it there -- fstat gates the shape, the read
+ * draws from the same handle -- so the path is never re-resolved between
+ * the check and the read, and a file swapped in behind the check cannot
+ * redirect it.
  *
  * @example
  *   import { Stash } from "@blamejs/stash";
@@ -118,19 +145,34 @@ export class DiskBackend {
     return expected;
   }
 
-  // Read a blob's lstat through the corruption lens: a symlink where a
-  // blob should be is never followed.
-  async #lstatBlob(path) {
-    let stats;
+  // #openStored(path, onAbsent, damaged) -> FileHandle. The read discipline
+  // in one place: open the file (O_NOFOLLOW refuses a symlink at open on
+  // POSIX), fstat the descriptor to confirm a regular file, and -- only
+  // where the platform lacks O_NOFOLLOW -- lstat the final component so a
+  // symlink is refused there too. The open already bound the descriptor, so
+  // that lstat only ever REJECTS; it never redirects the read, which draws
+  // from the returned handle. ENOENT is the caller's chosen absence
+  // (`onAbsent()`); a non-regular or symlinked name is `damaged`. The caller
+  // owns closing the handle.
+  async #openStored(path, onAbsent, damaged) {
+    let fh;
     try {
-      stats = await lstat(path);
+      fh = await open(path, READ_FLAGS);
     } catch (err) {
-      if (_absent(err)) return null;
+      if (err && err.code === "ENOENT") throw onAbsent();
+      if (_openTamper(err)) throw new IntegrityError(damaged);
+      throw err;
     }
-    if (stats.isSymbolicLink() || !stats.isFile()) {
-      throw new IntegrityError("blob storage shape is damaged");
+    try {
+      if (!(await fh.stat()).isFile()) throw new IntegrityError(damaged);
+      if (SYMLINK_GUARD_NEEDED && (await lstat(path)).isSymbolicLink()) {
+        throw new IntegrityError(damaged);
+      }
+    } catch (err) {
+      await fh.close();
+      throw err;
     }
-    return stats;
+    return fh;
   }
 
   async #writeAtomic(dir, name, bytes) {
@@ -201,61 +243,68 @@ export class DiskBackend {
   }
 
   // read(id) -> Readable over the blob. The entry must exist (sidecar
-  // present and valid); a sidecar without its blob is corruption.
+  // present and valid); a sidecar without its blob is corruption. The blob
+  // is opened once and streamed from that descriptor, so no path is
+  // re-resolved after the check -- a symlink swapped in for the blob cannot
+  // redirect the read.
   async read(id) {
     const entry = await this.stat(id);
     const blobDir = await this.#containedDir("blobs");
     const blobPath = join(blobDir, entry.id);
-    const stats = await this.#lstatBlob(blobPath);
-    if (stats === null) throw new IntegrityError("blob storage shape is damaged");
-    return createReadStream(blobPath);
+    const damaged = "blob storage shape is damaged";
+    // A blob missing under a present sidecar is corruption, not absence.
+    const fh = await this.#openStored(blobPath, () => new IntegrityError(damaged), damaged);
+    return fh.createReadStream();
   }
 
   // remove(id) -> boolean. Sidecar first (the entry stops existing), then
-  // the blob. Absent is a fact, not a failure.
+  // the blob. Absent is a fact, not a failure. `rm` unlinks the directory
+  // entry itself -- it never follows a final-component symlink -- so the
+  // sidecar's existence and its deletion are one operation, not a
+  // check-then-use: a swap cannot redirect the unlink to another file.
   async remove(id) {
     assertValid(id);
     const metaDir = await this.#containedDir("meta");
     const blobDir = await this.#containedDir("blobs");
-    const sidecarPath = join(metaDir, id + ".json");
     let had = true;
     try {
-      await lstat(sidecarPath);
+      await rm(join(metaDir, id + ".json"));
     } catch (err) {
       if (_absent(err)) had = false;
     }
-    await rm(sidecarPath, { force: true });
     await rm(join(blobDir, id), { force: true });
     return had;
   }
 
   // stat(id) -> Entry, strictly validated: bounded read, JSON.parse under
   // a corruption verdict, exact shape via the canonical entry module, and
-  // the sidecar's own id must be the id addressed.
+  // the sidecar's own id must be the id addressed. The sidecar is opened
+  // once and every check runs on that descriptor -- fstat gates the shape
+  // and the size bound, and the read draws from the same fd -- so no path is
+  // re-resolved after the check (a symlink swapped in for the sidecar cannot
+  // redirect the read to attacker-chosen metadata).
   async stat(id) {
     assertValid(id);
     const metaDir = await this.#containedDir("meta");
     const sidecarPath = join(metaDir, id + ".json");
-    let stats;
+    const fh = await this.#openStored(sidecarPath, () => new RefNotFound(), "sidecar storage shape is damaged");
     try {
-      stats = await lstat(sidecarPath);
-    } catch (err) {
-      if (_absent(err)) throw new RefNotFound();
+      if ((await fh.stat()).size > MAX_SIDECAR_BYTES) {
+        throw new IntegrityError("sidecar exceeds its size bound");
+      }
+      const raw = await fh.readFile("utf8");
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new IntegrityError("sidecar is not valid JSON");
+      }
+      assertShape(parsed, IntegrityError);
+      if (parsed.id !== id) throw new IntegrityError("sidecar identity mismatch");
+      return parsed;
+    } finally {
+      await fh.close();
     }
-    if (stats.isSymbolicLink() || !stats.isFile()) {
-      throw new IntegrityError("sidecar storage shape is damaged");
-    }
-    if (stats.size > MAX_SIDECAR_BYTES) throw new IntegrityError("sidecar exceeds its size bound");
-    const raw = await readFile(sidecarPath, "utf8");
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      throw new IntegrityError("sidecar is not valid JSON");
-    }
-    assertShape(parsed, IntegrityError);
-    if (parsed.id !== id) throw new IntegrityError("sidecar identity mismatch");
-    return parsed;
   }
 
   // list() -> Entry[]. Loud, not lossy: a sidecar that fails validation

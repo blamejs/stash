@@ -7,7 +7,9 @@
 import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  constants,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -16,6 +18,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { open } from "node:fs/promises";
 import { join } from "node:path";
 
 import { Stash, RefNotFound, InvalidRef, IntegrityError } from "../src/index.js";
@@ -243,6 +246,63 @@ suite("disk: containment", () => {
     assert.equal(statSync(join(root, "blobs")).mode & 0o777, 0o700);
     assert.equal(statSync(join(root, "blobs", ref)).mode & 0o777, 0o600);
     assert.equal(statSync(join(root, "meta", ref + ".json")).mode & 0o777, 0o600);
+  });
+});
+
+suite("disk: fd-based read discipline (CWE-367)", () => {
+  const O_NOFOLLOW_AVAILABLE = (constants.O_NOFOLLOW || 0) !== 0;
+  const POSIX_LINKS = FILE_SYMLINKS && O_NOFOLLOW_AVAILABLE;
+
+  // A direct reproduction of the time-of-check/time-of-use window the fix
+  // closes. The old shape checked a path (lstat) and then handed the SAME
+  // path to a second read: a symlink swapped in between the check and the
+  // read is re-resolved when the read opens it, and followed out of the
+  // root. The fixed shape opens a descriptor with O_NOFOLLOW and reads THAT
+  // handle -- the swap cannot redirect a read bound to an open fd.
+  test("a path re-resolved after its check follows a swapped symlink; O_NOFOLLOW refuses it", { skip: !POSIX_LINKS }, async () => {
+    const dir = freshScratchDir("toctou");
+    mkdirSync(dir, { recursive: true });
+    const guarded = join(dir, "sidecar.json");
+    writeFileSync(guarded, JSON.stringify({ trusted: true }));
+
+    const outsideDir = freshScratchDir("toctou-outside");
+    mkdirSync(outsideDir, { recursive: true });
+    const secret = join(outsideDir, "secret");
+    writeFileSync(secret, "BYTES OUTSIDE THE ROOT");
+
+    // check: the name is a regular file (what the removed lstat saw)
+    assert.equal(lstatSync(guarded).isFile(), true);
+    // an attacker with write access to the directory swaps it for a symlink
+    rmSync(guarded);
+    symlinkSync(secret, guarded, "file");
+
+    // re-resolving the path (the old readFile(path)) FOLLOWS the swap:
+    assert.equal(readFileSync(guarded, "utf8"), "BYTES OUTSIDE THE ROOT");
+
+    // opening a descriptor with O_NOFOLLOW refuses the symlink outright, so
+    // a read bound to that descriptor can never be redirected:
+    await assert.rejects(
+      open(guarded, constants.O_RDONLY | constants.O_NOFOLLOW),
+      (err) => err.code === "ELOOP"
+    );
+  });
+
+  // Shipped path: a symlinked sidecar is refused, never followed to
+  // attacker-chosen metadata -- on POSIX at open (O_NOFOLLOW), and on a
+  // platform without the flag by the post-open lstat guard.
+  test("a symlinked sidecar is refused, never followed to foreign metadata", { skip: !FILE_SYMLINKS }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("legit", { meta: { k: "v" } });
+    const sidecarPath = join(root, "meta", ref + ".json");
+    const foreign = freshScratchDir("foreign-sidecar");
+    const original = JSON.parse(readFileSync(sidecarPath, "utf8"));
+    // a shape-valid sidecar for the same id, but with metadata the attacker
+    // chose -- exactly what following the symlink would substitute in
+    writeFileSync(foreign, JSON.stringify({ ...original, meta: { injected: true } }));
+    rmSync(sidecarPath);
+    symlinkSync(foreign, sidecarPath, "file");
+    await assert.rejects(stash.show(ref), IntegrityError);
+    await assert.rejects(stash.apply(ref), IntegrityError);
   });
 });
 
