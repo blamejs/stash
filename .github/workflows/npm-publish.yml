@@ -27,7 +27,11 @@
 #     then npm's own --provenance is the attestation surface.
 #
 # `workflow_dispatch.dry_run` exercises validate (gates + pack) without
-# release-creation or npm publish.
+# release-creation or npm publish. A publishing dispatch (dry_run=false)
+# must target the version's pushed tag ref -- the npm-publish environment
+# deploys tag refs only, so a branch-ref dispatch would be rejected at the
+# environment gate; validate refuses it up front with the working command:
+#   gh workflow run 'npm publish' --ref vX.Y.Z -f dry_run=false
 
 name: npm publish
 
@@ -74,23 +78,42 @@ jobs:
 
       - name: Compute version + is_tag flag
         id: version
+        # is_tag reports whether the run built a v* tag ref, whatever event
+        # started it -- a dispatch on the tag ref counts, so the version/tag
+        # match check and the summary cover both paths. A publishing
+        # dispatch on a branch ref is refused here, in the earliest step:
+        # the npm-publish environment deploys tag refs only, and without
+        # this check the run passes every gate and then dies at the
+        # environment gate with only a protection-rules annotation.
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           PKG_VERSION=$(node -p "JSON.parse(require('node:fs').readFileSync('./package.json', 'utf8')).version")
+          if ! printf '%s\n' "$PKG_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::package.json version ($PKG_VERSION) is not X.Y.Z -- the release grammar admits no other shape."
+            exit 1
+          fi
           echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
-          if [ "$EVENT_NAME" = "push" ] && [[ "$REF" == refs/tags/v* ]]; then
+          if [[ "$REF" == refs/tags/v* ]]; then
             TAG_VERSION="${REF#refs/tags/v}"
             echo "is_tag=true" >> "$GITHUB_OUTPUT"
             if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-              echo "::error::package.json version ($PKG_VERSION) does not match pushed tag (v$TAG_VERSION)"
+              echo "::error::package.json version ($PKG_VERSION) does not match the built tag (v$TAG_VERSION)"
               exit 1
             fi
-            echo "package.json version $PKG_VERSION matches pushed tag v$TAG_VERSION"
+            echo "package.json version $PKG_VERSION matches tag v$TAG_VERSION"
           else
             echo "is_tag=false" >> "$GITHUB_OUTPUT"
+            if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]; then
+              echo "::error::A publishing dispatch must run on the version's pushed tag ref, not a branch:"
+              echo "::error::the npm-publish environment deploys tag refs only, so this run would be"
+              echo "::error::rejected at the environment gate after every gate passes."
+              echo "::error::Re-run as: gh workflow run 'npm publish' --ref v${PKG_VERSION} -f dry_run=false"
+              exit 1
+            fi
           fi
 
       # Zero dependencies, dev included: there is no npm install anywhere in
@@ -433,7 +456,7 @@ jobs:
             echo "|---|---|"
             echo "| **Package**          | \`@blamejs/stash\` |"
             echo "| **Version**          | \`${VERSION}\` |"
-            echo "| **Tag push**         | ${IS_TAG} |"
+            echo "| **Tag ref**          | ${IS_TAG} |"
             echo "| **Dry run**          | ${DRY_RUN} |"
             echo "| **Validate job**     | ${VALIDATE_RESULT} |"
             echo "| **Publish + release**| ${PUBLISH_RESULT} |"
