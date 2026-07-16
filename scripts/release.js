@@ -337,37 +337,44 @@ export function mergeArgs(branch, headSha) {
 
 // reviewDecision(headSha, surfaces) -- pure, fail-closed reviewer verdict
 // for one head commit. surfaces:
-//   reviews  -- submitted PR reviews        [{ author, body }]
+//   reviews  -- submitted PR reviews        [{ author, body, commit }]
 //   inline   -- per-file review comments    [{ author, body, commit }]
 //   comments -- issue comments              [{ author, body }]
-// findings: any reviewer P1/P2 on the head (an inline comment anchored to
-// it or citing it, or a review/comment body citing it). A finding on the
-// head is permanent for that head -- no later post erases it; only a new
-// head (push-fix) starts a fresh verdict. clean: a reviewer post cites the
-// head and no such finding exists; P3-and-lower findings are advisory and
-// do not gate. Anything else is pending -- absence of a verdict is never
-// a pass.
+// A post is "on the head" only via a FULL commit anchor -- never a short
+// prefix. An abbreviated commit id is not globally unique, so a stale post
+// whose 7-char prefix collides with a newer head must never satisfy the
+// gate. Reviews and inline comments carry the reviewed commit_id (the exact
+// 40-char oid from the API); issue comments have no commit field, so they
+// count only when the body names the full SHA. findings: any reviewer P0-P2
+// on the head. A finding on the head is permanent for that head -- no later
+// post erases it; only a new head (push-fix) starts a fresh verdict. clean:
+// a reviewer post is on the head and no such finding exists; P3-and-lower
+// are advisory. Anything else is pending -- absence of a verdict is never a
+// pass.
 export function reviewDecision(headSha, surfaces) {
   if (typeof headSha !== "string" || headSha.length < 7) {
     throw new TypeError("reviewDecision requires the head commit sha");
   }
   const s = surfaces || {};
-  const short = headSha.slice(0, 7);
   const fromBot = function (author) { return REVIEW_BOT_LOGINS.indexOf(author) !== -1; };
-  const cites = function (text) {
-    return typeof text === "string" &&
-      (text.indexOf(headSha) !== -1 || text.indexOf(short) !== -1);
+  const onHead = function (commit) { return commit === headSha; };
+  const namesFullHead = function (text) {
+    return typeof text === "string" && text.indexOf(headSha) !== -1;
   };
   // P0 is the highest-severity finding format; P1/P2 gate as well. P3 and
   // lower are advisory. Match the whole blocking band, not a subset -- a
   // missed severity is a fail-open verdict that merges an unfixed finding.
   const hasFinding = function (text) { return /\bP[0-2]\b/.test(text || ""); };
   const inlineOnHead = (s.inline || []).filter(function (c) {
-    return fromBot(c.author) && (c.commit === headSha || cites(c.body));
+    return fromBot(c.author) && onHead(c.commit);
   });
-  const postsOnHead = (s.reviews || []).concat(s.comments || []).filter(function (p) {
-    return fromBot(p.author) && cites(p.body);
+  const reviewsOnHead = (s.reviews || []).filter(function (r) {
+    return fromBot(r.author) && (onHead(r.commit) || namesFullHead(r.body));
   });
+  const commentsOnHead = (s.comments || []).filter(function (p) {
+    return fromBot(p.author) && namesFullHead(p.body);
+  });
+  const postsOnHead = reviewsOnHead.concat(commentsOnHead);
   if (inlineOnHead.some(function (c) { return hasFinding(c.body); }) ||
       postsOnHead.some(function (p) { return hasFinding(p.body); })) {
     return { state: "findings" };
@@ -388,16 +395,19 @@ function reviewVerdict(branch, headSha) {
       inline.push({ author: c.user && c.user.login, body: c.body, commit: c.commit_id });
     }
   }
-  const posts = function (list) {
-    return (list || []).map(function (p) {
-      return { author: p.author && p.author.login, body: p.body };
-    });
-  };
-  return reviewDecision(headSha, {
-    reviews: posts(pr.reviews),
-    comments: posts(pr.comments),
-    inline,
+  // Reviews carry the reviewed commit oid (gh exposes it as `commit.oid`);
+  // issue comments do not, so they are matched by a full-SHA body mention.
+  const reviews = (pr.reviews || []).map(function (p) {
+    return {
+      author: p.author && p.author.login,
+      body: p.body,
+      commit: p.commit && p.commit.oid,
+    };
   });
+  const comments = (pr.comments || []).map(function (p) {
+    return { author: p.author && p.author.login, body: p.body };
+  });
+  return reviewDecision(headSha, { reviews, comments, inline });
 }
 
 function requestReview(branch) {

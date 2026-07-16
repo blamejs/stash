@@ -166,10 +166,10 @@ test("reviewDecision: inline P1 anchored to the head commit blocks", () => {
   assert.equal(v.state, "findings");
 });
 
-test("reviewDecision: inline P2 citing the head sha in its body blocks", () => {
+test("reviewDecision: inline P2 anchored to the head commit blocks", () => {
   const v = reviewDecision(HEAD, {
-    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "`" }],
-    inline: [{ author: BOT, body: "P2 finding on " + HEAD.slice(0, 7) }],
+    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "`", commit: HEAD }],
+    inline: [{ author: BOT, body: "P2 finding here", commit: HEAD }],
   });
   assert.equal(v.state, "findings");
 });
@@ -182,33 +182,49 @@ test("reviewDecision: a later clean post never erases inline findings on the hea
   assert.equal(v.state, "findings");
 });
 
-test("reviewDecision: review citing the head with no findings is clean", () => {
+test("reviewDecision: review on the head with no findings is clean", () => {
   const v = reviewDecision(HEAD, {
-    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "`" }],
+    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "`", commit: HEAD }],
   });
   assert.equal(v.state, "clean");
 });
 
 test("reviewDecision: stale inline finding on a previous commit does not block the new head", () => {
   const v = reviewDecision(HEAD, {
-    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "`" }],
+    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "`", commit: HEAD }],
     inline: [{ author: BOT, body: "P1 Badge: fixed since", commit: OLD }],
   });
   assert.equal(v.state, "clean");
 });
 
-test("reviewDecision: issue comment from the reviewer citing the head with a P1 blocks", () => {
+test("reviewDecision: issue comment from the reviewer naming the full head with a P1 blocks", () => {
   const v = reviewDecision(HEAD, {
-    comments: [{ author: BOT, body: "P1 on " + HEAD.slice(0, 7) + ": verify path" }],
+    comments: [{ author: BOT, body: "P1 on " + HEAD + ": verify path" }],
   });
   assert.equal(v.state, "findings");
 });
 
-test("reviewDecision: no surface citing the head stays pending", () => {
+test("reviewDecision: no surface on the head stays pending", () => {
   assert.equal(reviewDecision(HEAD, {}).state, "pending");
   assert.equal(reviewDecision(HEAD, {
-    reviews: [{ author: BOT, body: "Reviewed commit: `" + OLD.slice(0, 10) + "`" }],
+    reviews: [{ author: BOT, body: "Reviewed commit: `" + OLD.slice(0, 10) + "`", commit: OLD }],
   }).state, "pending");
+});
+
+test("reviewDecision: a short-SHA collision does not satisfy the gate", () => {
+  // A stale post reviewed a DIFFERENT commit whose first 7 hex chars happen
+  // to match the new head. It carries the old full commit and only the
+  // colliding short prefix in its body -- it must NOT count as on the head.
+  const COLLIDER = HEAD.slice(0, 7) + "ffffffffffffffffffffffffffffffffff";
+  const cleanReview = { author: BOT, body: "Reviewed `" + HEAD.slice(0, 10) + "`", commit: HEAD };
+  // A stale P1 whose body cites only the 7-char prefix and whose commit is
+  // the collider must not turn a clean head into findings.
+  const staleFinding = { author: BOT, body: "P1 on " + HEAD.slice(0, 7), commit: COLLIDER };
+  const v = reviewDecision(HEAD, { reviews: [cleanReview], inline: [staleFinding] });
+  assert.equal(v.state, "clean");
+  // And a stale finding alone (no genuine head review) stays pending, never findings.
+  const v2 = reviewDecision(HEAD, { inline: [staleFinding], comments: [{ author: BOT, body: "P1 on " + HEAD.slice(0, 7) }] });
+  assert.equal(v2.state, "pending");
 });
 
 test("reviewDecision: a non-reviewer post citing the head is not a verdict", () => {
@@ -219,9 +235,9 @@ test("reviewDecision: a non-reviewer post citing the head is not a verdict", () 
   assert.equal(v.state, "pending");
 });
 
-test("reviewDecision: P3-only review citing the head is clean (advisory, not a gate)", () => {
+test("reviewDecision: P3-only review on the head is clean (advisory, not a gate)", () => {
   const v = reviewDecision(HEAD, {
-    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "` P3 style nit" }],
+    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "` P3 style nit", commit: HEAD }],
   });
   assert.equal(v.state, "clean");
 });
@@ -240,9 +256,9 @@ test("reviewDecision: inline P0 anchored to the head commit blocks (highest seve
   assert.equal(v.state, "findings");
 });
 
-test("reviewDecision: an issue comment citing the head with a P0 blocks", () => {
+test("reviewDecision: an issue comment naming the full head with a P0 blocks", () => {
   const v = reviewDecision(HEAD, {
-    comments: [{ author: BOT, body: "P0 on `" + HEAD.slice(0, 10) + "`: release blocker" }],
+    comments: [{ author: BOT, body: "P0 on `" + HEAD + "`: release blocker" }],
   });
   assert.equal(v.state, "findings");
 });
@@ -297,7 +313,7 @@ test("reviewDecision: both reviewer identity forms are trusted", () => {
   // allow:ai-attribution -- the reviewer service's account logins (identity fixture)
   for (const login of ["chatgpt-codex-connector", "chatgpt-codex-connector[bot]"]) {
     const v = reviewDecision(HEAD, {
-      reviews: [{ author: login, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "` -- no findings." }],
+      reviews: [{ author: login, body: "Reviewed -- no findings.", commit: HEAD }],
     });
     assert.equal(v.state, "clean");
   }
