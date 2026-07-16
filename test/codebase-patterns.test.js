@@ -144,6 +144,7 @@ const VALID_ALLOW_CLASSES = {
   "raw-time-scale-literal": 1,
   "inline-dynamic-import": 1,
   "dead-underscore-function": 1,
+  "wiki-port-cross-artifact-drift": 1,
 };
 
 // Drop matches suppressed by a file-level
@@ -729,4 +730,91 @@ test("guard/validator shape reinlined -- no module re-implements a tagged choke 
   if (kinds.has("guard")) filtered = _filterMarkers(filtered, "guard-shape-reinlined");
   if (kinds.has("validator")) filtered = _filterMarkers(filtered, "validator-shape-reinlined");
   _report("no src module re-inlines a shape owned by a tagged guard/validator", filtered);
+});
+
+test("wiki port agrees across the Dockerfile, composes, Caddyfile, and release-container smoke", () => {
+  // class: wiki-port-cross-artifact-drift
+  // reason: the wiki's HTTP port is declared in examples/wiki/Dockerfile
+  // (ENV WIKI_PORT + EXPOSE + HEALTHCHECK) and repeated in the compose
+  // files' port mappings, the Caddyfile's reverse-proxy fallback, and
+  // release-container.yml's post-publish smoke (`-p X:X` + `curl
+  // localhost:X/healthz`). A silent mismatch ships a container whose
+  // proxy or smoke targets a port nothing listens on -- the release
+  // passes CI but the published site is unreachable. Anchor on the
+  // Dockerfile's ENV WIKI_PORT (the one authoritative declaration) and
+  // assert every port token in the sibling artifacts matches it.
+  const bad = [];
+  let dockerfile;
+  try { dockerfile = _read(path.join(REPO_ROOT, "examples", "wiki", "Dockerfile")); }
+  catch (_e) { return; }
+  const dfMatch = /WIKI_PORT\s*=\s*(\d+)/.exec(dockerfile);
+  if (!dfMatch) return;
+  const wikiPort = dfMatch[1];
+
+  const workflowRel = ".github/workflows/release-container.yml";
+  let workflow = null;
+  try { workflow = _read(path.join(REPO_ROOT, workflowRel)); } catch (_e) { /* optional artifact */ }
+  if (workflow !== null) {
+    const lines = _lines(workflow);
+    for (let i = 0; i < lines.length; i++) {
+      const portMap = /-p\s+(\d+):(\d+)/.exec(lines[i]);
+      if (portMap && (portMap[1] !== wikiPort || portMap[2] !== wikiPort)) {
+        bad.push({ file: workflowRel, line: i + 1,
+          content: "smoke `-p " + portMap[1] + ":" + portMap[2] +
+                   "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+      }
+      const curlMatch = /localhost:(\d+)\/healthz/.exec(lines[i]);
+      if (curlMatch && curlMatch[1] !== wikiPort) {
+        bad.push({ file: workflowRel, line: i + 1,
+          content: "smoke curls localhost:" + curlMatch[1] +
+                   " but examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+      }
+    }
+  }
+
+  for (const composeName of ["docker-compose.yml", "docker-compose.prod.yml"]) {
+    const rel = "examples/wiki/" + composeName;
+    let compose = null;
+    try { compose = _read(path.join(REPO_ROOT, "examples", "wiki", composeName)); } catch (_e) { continue; }
+    const lines = _lines(compose);
+    for (let i = 0; i < lines.length; i++) {
+      const mapMatch = /-\s+"(\d+):(\d+)"/.exec(lines[i]);
+      if (mapMatch && composeName === "docker-compose.yml" &&
+          (mapMatch[1] !== wikiPort || mapMatch[2] !== wikiPort)) {
+        bad.push({ file: rel, line: i + 1,
+          content: "port mapping `" + mapMatch[1] + ":" + mapMatch[2] +
+                   "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+      }
+      const envMatch = /WIKI_PORT:\s*"(\d+)"/.exec(lines[i]);
+      if (envMatch && envMatch[1] !== wikiPort) {
+        bad.push({ file: rel, line: i + 1,
+          content: "WIKI_PORT `" + envMatch[1] +
+                   "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+      }
+      const exposeMatch = /-\s+"(\d+)"\s*$/.exec(lines[i]);
+      if (exposeMatch && composeName === "docker-compose.prod.yml" && exposeMatch[1] !== wikiPort) {
+        bad.push({ file: rel, line: i + 1,
+          content: "expose `" + exposeMatch[1] +
+                   "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+      }
+    }
+  }
+
+  let caddy = null;
+  const caddyRel = "examples/wiki/Caddyfile";
+  try { caddy = _read(path.join(REPO_ROOT, "examples", "wiki", "Caddyfile")); } catch (_e) { /* optional artifact */ }
+  if (caddy !== null) {
+    const lines = _lines(caddy);
+    for (let i = 0; i < lines.length; i++) {
+      const fbMatch = /\{\$WIKI_PORT:(\d+)\}/.exec(lines[i]);
+      if (fbMatch && fbMatch[1] !== wikiPort) {
+        bad.push({ file: caddyRel, line: i + 1,
+          content: "Caddy fallback `{$WIKI_PORT:" + fbMatch[1] +
+                   "}` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+      }
+    }
+  }
+
+  const filtered = _filterMarkers(bad, "wiki-port-cross-artifact-drift");
+  _report("wiki port agrees across examples/wiki/Dockerfile + composes + Caddyfile + release-container.yml", filtered);
 });
