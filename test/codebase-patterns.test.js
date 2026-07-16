@@ -388,7 +388,10 @@ test("catch-return-swallow -- no catch absorbs an error into a return", () => {
   // into a silent verdict: the caller proceeds on a value that encodes
   // "something broke" as "fine". Malformed input and storage failure are
   // permanent verdicts and must surface as typed throws.
-  const re = /catch\s*(?:\(\s*[\w$]*\s*\)\s*)?\{\s*(?:return\b|\})/;
+  // The parameter matcher is `[^)]*`, not a bare identifier: a
+  // destructured binding (`catch ({ code }) { return ... }`) is the same
+  // swallow shape and must not slip past on its parameter syntax.
+  const re = /catch\s*(?:\([^)]*\)\s*)?\{\s*(?:return\b|\})/;
   const files = _srcFiles();
   let bad = [];
   for (const file of files) {
