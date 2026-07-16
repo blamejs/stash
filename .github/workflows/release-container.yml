@@ -35,8 +35,8 @@ env:
   IMAGE:    ghcr.io/${{ github.repository_owner }}/stash-wiki
 
 jobs:
-  gates:
-    name: Static gates (patterns + comment blocks + api snapshot)
+  suite:
+    name: Full gates + suite (static, runtime, sandboxed, wiki e2e)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -47,8 +47,10 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: '24.18.0'
-      - name: Run the static gates (zero dependencies, plain node)
-        run: npm run gates
+      - name: Run the full smoke pipeline (zero dependencies, plain node)
+        run: npm run smoke
+      - name: Run the wiki e2e (the site this image serves)
+        run: npm run wiki:e2e
 
   lint-hadolint:
     name: Hadolint (Dockerfiles)
@@ -92,7 +94,7 @@ jobs:
 
   publish:
     name: Build, scan, publish
-    needs: [gates, lint-hadolint, lint-shellcheck]
+    needs: [suite, lint-hadolint, lint-shellcheck]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -223,10 +225,10 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.description=stashjs.com documentation site
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           provenance: true
           sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Sign image with cosign (keyless, GitHub OIDC)
         if: ${{ !inputs.dry_run && steps.tags.outputs.is_tag == 'true' && steps.push.outputs.digest }}
