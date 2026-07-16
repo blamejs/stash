@@ -239,6 +239,37 @@ suite("disk: containment", () => {
     await assert.rejects(stash.push("escapes"), (err) => err instanceof InvalidRef || err instanceof IntegrityError);
   });
 
+  // The containment check of a directory must gate the write INTO it, not a
+  // moment far earlier. A blob streams for as long as its source runs; if
+  // the meta directory is resolved and verified before that stream begins
+  // but the sidecar is written only after it ends, an attacker who swaps
+  // meta for a link out of the root DURING the stream writes the sidecar
+  // outside the pinned root -- the check passed on the pre-swap directory,
+  // the write landed on the post-swap one. The source here performs that
+  // swap mid-stream, so the sidecar write must re-assert containment and
+  // refuse, never land a file in the outside directory.
+  test("the meta dir is contained at the sidecar write, not before the blob stream", { skip: SANDBOXED }, async () => {
+    const { root, stash } = freshStash();
+    await stash.push("materialize the layout");
+    const outside = freshScratchDir("outside-meta");
+    mkdirSync(outside, { recursive: true });
+
+    async function* swapsMetaMidStream() {
+      yield Buffer.from("chunk one");
+      // between the early containment check and the late sidecar write
+      rmSync(join(root, "meta"), { recursive: true, force: true });
+      symlinkSync(outside, join(root, "meta"), process.platform === "win32" ? "junction" : "dir");
+      yield Buffer.from("chunk two");
+    }
+
+    await assert.rejects(
+      stash.push(swapsMetaMidStream()),
+      (err) => err instanceof InvalidRef || err instanceof IntegrityError
+    );
+    // the sidecar never followed the swapped link into the outside directory
+    assert.deepEqual(readdirSync(outside), []);
+  });
+
   test("blob files are 0600 and directories 0700", { skip: process.platform === "win32" }, async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("modes");

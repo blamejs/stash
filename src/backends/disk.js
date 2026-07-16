@@ -144,6 +144,15 @@ export class DiskBackend {
   // InvalidRef; a subdirectory that vanished is store tampering ->
   // IntegrityError. The permission-model sandbox follows symlinks out of
   // granted paths, so this check is the actual wall (SPEC.md 2.1, 9).
+  //
+  // Verified limitation: a path check cannot defend against a same-privilege
+  // attacker who swaps the directory in the microseconds between this
+  // realpath and the open/rename that consumes its result. It refuses links
+  // that persist across the check; the 0700 operator-owned root (SPEC.md 2.1)
+  // is the boundary against a same-privilege swap. Callers therefore resolve
+  // this immediately before the write into the directory -- never once at the
+  // top of an operation that then streams for an unbounded time -- so the
+  // window is the tightest the runtime allows.
   // @enforced-by guard-shape-reinlined
   // @guard-shape \brealpath(?:Sync)?\s*\(
   async #containedDir(subdir) {
@@ -239,10 +248,20 @@ export class DiskBackend {
   // computing size and digest as they pass, fsyncs, renames into place,
   // THEN writes the sidecar -- so a crash at any point leaves either
   // nothing or an invisible blob orphan, never a served half-entry.
+  //
+  // A directory's containment is re-asserted immediately before the write
+  // that lands in it, never once at the top: the blob stream runs for as
+  // long as its source chooses, and a containment check taken before the
+  // stream would vouch for the meta directory across that whole window. An
+  // attacker who swaps meta for a link out of the root mid-stream would then
+  // land the sidecar outside the root, because the check passed on the
+  // pre-swap directory and the write followed the post-swap one -- the
+  // time-of-check/time-of-use class (CWE-367) on the directory path.
+  // Resolving #containedDir("meta") right before the sidecar write narrows
+  // that window to the microseconds between the realpath and the open.
   async write(id, source, entry) {
     assertValid(id);
     const blobDir = await this.#containedDir("blobs");
-    const metaDir = await this.#containedDir("meta");
     const tmpPath = join(blobDir, id + ".tmp");
     const blobPath = join(blobDir, id);
     const hash = createHash("sha256");
@@ -273,6 +292,7 @@ export class DiskBackend {
       throw new TypeError("push: meta too large for a sidecar");
     }
     try {
+      const metaDir = await this.#containedDir("meta");
       await this.#writeAtomic(metaDir, id + ".json", sidecar);
     } catch (err) {
       await rm(blobPath, { force: true });
@@ -303,14 +323,18 @@ export class DiskBackend {
   // check-then-use: a swap cannot redirect the unlink to another file.
   async remove(id) {
     assertValid(id);
+    // Each directory is contained immediately before its own unlink, not
+    // both up front: a resolve-early/use-late gap is the same directory
+    // time-of-check/time-of-use window write() closes, so meta resolves
+    // right before the sidecar unlink and blobs right before the blob one.
     const metaDir = await this.#containedDir("meta");
-    const blobDir = await this.#containedDir("blobs");
     let had = true;
     try {
       await rm(join(metaDir, id + ".json"));
     } catch (err) {
       if (_absent(err)) had = false;
     }
+    const blobDir = await this.#containedDir("blobs");
     await rm(join(blobDir, id), { force: true });
     return had;
   }
