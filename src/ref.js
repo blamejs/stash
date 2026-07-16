@@ -8,12 +8,14 @@
 // ref -- generate, validate, and compare stash refs.
 //
 // A ref is a capability, not an address: 'v1_' + 32 random bytes as
-// base64url (43 chars, no padding), 256 bits of entropy, unguessable. It is
-// never derived from content (a content hash is an enumeration oracle --
-// anyone holding the plaintext could probe for the ref).
+// base64url (RFC 4648 section 5; 43 chars, no padding), 256 bits of CSPRNG
+// entropy (the CWE-330/CWE-340 predictable-identifier classes),
+// unguessable. It is never derived from content (a content hash is an
+// enumeration oracle -- anyone holding the plaintext could probe for the
+// ref).
 //
 // Refs become filenames in the disk backend, so validation here is the
-// path-traversal defense: a ref that is not character-for-character
+// path-traversal defense (CWE-22/CWE-23, the Zip-Slip class): a ref that is not character-for-character
 // well-formed dies at the regex, before any storage access. Whitelist, no
 // normalization, no path.resolve rescue.
 
@@ -53,7 +55,8 @@ export function assertValid(ref) {
 }
 
 // constantTimeEqual(a, b) -> boolean. Timing-safe string equality for
-// capability and digest comparison. Length is not secret; content is.
+// capability and digest comparison (CWE-208, the observable-timing
+// class). Length is not secret; content is.
 // @enforced-by guard-shape-reinlined
 // @guard-shape \btimingSafeEqual\s*\(
 export function constantTimeEqual(a, b) {

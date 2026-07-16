@@ -1,0 +1,19 @@
+{
+  "version": "0.1.3",
+  "date": "2026-07-16",
+  "headline": "Standards conformance surfaces on every primitive; the publish pipeline lands.",
+  "summary": "Every documented primitive now names the external standards it implements and the weakness classes it defends, and the npm publish pipeline ships its first working end-to-end run.",
+  "sections": {
+    "Added": [
+      "Conformance tags across the documented surface: primitives cite the standards they implement (FIPS 180-4 digests, RFC 4648 base64url refs, RFC 8259 sidecar JSON) alongside their SPEC.md sections, and name the CWE classes they defend (CWE-22/23 path traversal at the ref whitelist, CWE-59 link following at the containment check, CWE-208 timing at the constant-time compare, CWE-330/340 ref predictability, CWE-354 silent corruption, CWE-377 temp-file exposure, CWE-770 sidecar allocation bounds, CWE-209/532 capability leakage, CWE-1188 refused-not-ignored options). The documentation site renders both on every primitive.",
+      "THREAT-MODEL.md maps each threat class to its CWE identifiers."
+    ],
+    "Changed": [
+      "ARCHITECTURE.md and THREAT-MODEL.md implementation statuses reflect the shipped disk backend."
+    ],
+    "Fixed": [
+      "The publish workflow extracts release notes with the changelog's actual header grammar (the previous matcher expected a v-prefixed header with an ASCII suffix and could never match the generated file).",
+      "An explicit workflow dispatch may publish when the built commit is exactly the commit the version's pushed tag points at -- a fix to the publish path itself can now ship a release without minting a new tag for it, while a dispatch can never publish bytes no tag vouches for."
+    ]
+  }
+}

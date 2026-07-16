@@ -14,7 +14,7 @@ stashjs/
 |   |-- errors.js         # StashError base + the typed subclasses with stable codes
 |   `-- backends/
 |       |-- memory.js     # Map-backed backend -- shipped
-|       `-- disk.js       # Sidecar-file backend -- specified (SPEC.md section 9), not yet built
+|       `-- disk.js       # Sidecar-file backend -- shipped: atomic writes, realpath containment
 |-- test/                 # node:test suites; one conformance suite shared across backends
 |-- examples/
 |-- SPEC.md               # The contract
@@ -41,7 +41,7 @@ The load-bearing split is SPEC.md section 9: **`Stash` holds the policy; the bac
 
 Because the policy layer never touches storage directly, both backends run the same conformance test suite, and a behavior implemented once in `Stash` (lazy expiry, budget accounting, the claim cycle) cannot diverge between them.
 
-Two backends are the complete v1 set -- disk and memory, per the spec's "no cloud backends" rule. **MemoryBackend** (shipped) is Map-backed with no persistence and no pretense; it exists so tests and consumers can exercise the full contract without a filesystem. **DiskBackend** (specified, not yet built) uses sidecar metadata files rather than a central index -- no index to corrupt, no lock contention, crash-safe by construction -- with tmp-write-then-rename so a reader never sees a partial blob, and `0700` / `0600` modes throughout.
+Two backends are the complete v1 set -- disk and memory, per the spec's "no cloud backends" rule. **MemoryBackend** (shipped) is Map-backed with no persistence and no pretense; it exists so tests and consumers can exercise the full contract without a filesystem. **DiskBackend** (shipped, M2) uses sidecar metadata files rather than a central index -- no index to corrupt, no lock contention, crash-safe by construction -- with tmp-fsync-rename writes so a reader never sees a partial blob, realpath containment that refuses planted symlinks, strict size-bounded sidecar validation, and `0700` / `0600` modes throughout.
 
 ## Refs are capabilities, not addresses
 
@@ -98,7 +98,7 @@ SPEC.md section 3 is load-bearing and binds contributors and maintainer alike. T
 Honest map of built versus specified, tracking the milestone plan in SPEC.md section 12:
 
 - **Built (M1 -- skeleton):** the typed errors, ref generation + whitelist validation, the `MemoryBackend`, and the `push` / `apply` / `show` / `list` / `drop` / `clear` verbs. No TTL, no claims, no limits yet.
-- **Specified, not yet built (M2-M8):** the `DiskBackend` with realpath containment and the `--permission` gate (M2); expiry, `prune()`, the sweep timer, `Symbol.asyncDispose` (M3); `maxSize` / `maxEntries` / `maxTotal` enforcement (M4); `pop`, claims, `onPopFailure`, crash recovery, read budgets (M5); `has` / `stats` / `verify` and the event set (M6); tombstones and `store()` replication (M7); README and examples (M8).
+- **Specified, not yet built (M3-M8):** expiry, `prune()`, the sweep timer, `Symbol.asyncDispose` (M3); `maxSize` / `maxEntries` / `maxTotal` enforcement (M4); `pop`, claims, `onPopFailure`, crash recovery, read budgets (M5); `has` / `stats` / `verify` and the event set (M6); tombstones and `store()` replication (M7); README and examples (M8).
 
 Where this document describes M2+ behavior, it is describing the specification the implementation must meet, not shipped code.
 
