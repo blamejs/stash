@@ -271,8 +271,10 @@ function ghJson(args) {
 // account whose login merely contains the reviewer's name could cite the
 // head and mint a "clean" verdict before the real reviewer responds.
 const REVIEW_BOT_LOGINS = Object.freeze([
+  // allow:ai-attribution -- the reviewer service's exact account logins;
+  // an identity whitelist for the merge gate, not authorship attribution.
   "chatgpt-codex-connector",
-  "chatgpt-codex-connector[bot]",
+  "chatgpt-codex-connector[bot]", // allow:ai-attribution -- reviewer account login
 ]);
 
 // mergeArgs(branch, headSha) -- the gh argv for a merge BOUND to the head

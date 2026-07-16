@@ -155,6 +155,7 @@ test("checksVerdict: mixed shapes all green with one pending stays not-green", (
 
 const HEAD = "a1b2c3d4e5f60718293645546372819a0bcdef12";
 const OLD = "9999999888888877777776666666555555444444";
+// allow:ai-attribution -- the reviewer service's account login (identity fixture)
 const BOT = "chatgpt-codex-connector[bot]";
 
 test("reviewDecision: inline P1 anchored to the head commit blocks", () => {
@@ -241,6 +242,7 @@ test("reviewDecision: an author merely containing the reviewer name is not the r
 });
 
 test("reviewDecision: both reviewer identity forms are trusted", () => {
+  // allow:ai-attribution -- the reviewer service's account logins (identity fixture)
   for (const login of ["chatgpt-codex-connector", "chatgpt-codex-connector[bot]"]) {
     const v = reviewDecision(HEAD, {
       reviews: [{ author: login, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "` -- no findings." }],
