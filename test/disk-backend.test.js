@@ -25,7 +25,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
 import { Stash, RefNotFound, InvalidRef, IntegrityError } from "../src/index.js";
-import { DiskBackend, descriptorMatchesName } from "../src/backends/disk.js";
+import { DiskBackend, descriptorMatchesName, verifyDescriptorAgainstName } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
 import { freshScratchDir, cleanupScratch } from "./_scratch.js";
 
@@ -276,6 +276,24 @@ suite("disk: layout and atomicity", () => {
     }
   });
 
+  test("a lazy expiry drop that cannot delete surfaces the OS fault, not RefNotFound", { skip: CANNOT_FAULT }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("expired but locked", { ttl: 0 });
+    const { chmodSync } = await import("node:fs");
+    // read+exec but no write: stat reads the sidecar, but the lazy drop's unlink
+    // in the meta dir fails. SPEC 2.1: the denial surfaces, never degrades into
+    // a swallowed not-found.
+    chmodSync(join(root, "meta"), 0o500);
+    try {
+      await stash.apply(ref).then(
+        () => assert.fail("expected the lazy drop's EACCES to surface"),
+        (err) => assert.equal(err.code, "EACCES")
+      );
+    } finally {
+      chmodSync(join(root, "meta"), 0o700);
+    }
+  });
+
   test("entries persist across backend instances over the same root", async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("durable bytes", { meta: { kind: "note" } });
@@ -283,6 +301,55 @@ suite("disk: layout and atomicity", () => {
     const entry = await reopened.show(ref);
     assert.equal(entry.meta.kind, "note");
     assert.equal((await drain(await reopened.apply(ref))).toString("utf8"), "durable bytes");
+  });
+
+  test("expiry policy binds across backend instances over the same root", async () => {
+    const { root, stash: writer } = freshStash();
+    const ref = await writer.push("expired at birth", { ttl: 0 });
+    const reopened = new Stash({ backend: new DiskBackend({ root }) });
+    // the reopened instance re-derives expiresAt from the sidecar: the policy
+    // binds without the writer in memory. Before any read verb, list hides it
+    // and includeExpired reveals it.
+    assert.deepEqual(await reopened.list(), []);
+    assert.equal((await reopened.list({ includeExpired: true })).length, 1);
+    // a read verb applies the policy and drops it in passing
+    await assert.rejects(reopened.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+    assert.equal((await reopened.list({ includeExpired: true })).length, 0);
+    assert.deepEqual(readdirSync(join(root, "meta")), []);
+    assert.deepEqual(readdirSync(join(root, "blobs")), []);
+  });
+
+  test("list tolerates a sidecar removed between readdir and stat (concurrent sweep/drop)", async () => {
+    // The sweeper (or a concurrent drop) can unlink an expired sidecar between
+    // the readdir and the per-entry stat, so stat throws RefNotFound for a name
+    // readdir just reported. That entry has simply left the listing -- list must
+    // not reject. Reproduced deterministically: unlink one sidecar the instant
+    // its stat is reached.
+    const { root, stash } = freshStash();
+    const vanishing = await stash.push("removed mid-scan");
+    const kept = await stash.push("survives the scan");
+    const backend = new DiskBackend({ root });
+    const realStat = backend.stat.bind(backend);
+    let removeOnStat = vanishing;
+    backend.stat = async (id) => {
+      if (id === removeOnStat) {
+        removeOnStat = null;
+        rmSync(join(root, "meta", id + ".json")); // a concurrent removal, mid-scan
+      }
+      return realStat(id);
+    };
+    const listed = await backend.list();
+    assert.deepEqual(listed.map((e) => e.id), [kept]); // the vanished entry is absent, not an error
+  });
+
+  test("list still fails loudly on a corrupt sidecar, never silently skipped", async () => {
+    // The RefNotFound skip must not swallow corruption: a rotten sidecar is an
+    // IntegrityError the listing surfaces.
+    const { root, stash } = freshStash();
+    const ref = await stash.push("to be corrupted");
+    writeFileSync(join(root, "meta", ref + ".json"), "{ not valid json");
+    const backend = new DiskBackend({ root });
+    await assert.rejects(backend.list(), IntegrityError);
   });
 });
 
@@ -456,6 +523,62 @@ suite("disk: fd-based read discipline (CWE-367)", () => {
     const opened = { dev: 42, ino: 1001, isSymbolicLink: () => false };
     const otherVolume = { dev: 99, ino: 1001, isSymbolicLink: () => false };
     assert.equal(descriptorMatchesName(opened, otherVolume), false);
+  });
+
+  // verifyDescriptorAgainstName -- the lstat-after-open orchestration that only
+  // runs on a platform without O_NOFOLLOW (dead on Linux, where O_NOFOLLOW
+  // refuses a symlink at the open itself). Driven directly so every branch --
+  // the match, the swap mismatch, the vanished name, and a non-absence lstat
+  // fault -- is pinned on EVERY platform, with no symlink-creation privilege.
+  test("verifyDescriptorAgainstName: a name resolving to the open descriptor passes", async () => {
+    const dir = freshScratchDir("vd-ok");
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, "f");
+    writeFileSync(p, "bytes");
+    const fh = await open(p, "r");
+    try {
+      await verifyDescriptorAgainstName(await fh.stat(), p, "damaged"); // resolves, no throw
+    } finally {
+      await fh.close();
+    }
+  });
+
+  test("verifyDescriptorAgainstName: a name resolving to a different object is refused", async () => {
+    const dir = freshScratchDir("vd-swap");
+    mkdirSync(dir, { recursive: true });
+    const a = join(dir, "a");
+    writeFileSync(a, "a");
+    const b = join(dir, "b");
+    writeFileSync(b, "b");
+    const fh = await open(a, "r");
+    try {
+      // the descriptor is a's; the name b lstats to a different inode
+      await assert.rejects(verifyDescriptorAgainstName(await fh.stat(), b, "damaged"), IntegrityError);
+    } finally {
+      await fh.close();
+    }
+  });
+
+  test("verifyDescriptorAgainstName: a name that vanished after the open is IntegrityError", async () => {
+    const dir = freshScratchDir("vd-gone");
+    mkdirSync(dir, { recursive: true });
+    const gone = join(dir, "never-created");
+    const openedStat = { dev: 1, ino: 1, isSymbolicLink: () => false };
+    await assert.rejects(verifyDescriptorAgainstName(openedStat, gone, "damaged"), IntegrityError);
+  });
+
+  // A path under a regular file is ENOTDIR on POSIX but ENOENT on Windows
+  // (which reports it as plain absence), so the non-absence branch is exercised
+  // on POSIX -- where CI runs. The absence branch above is portable.
+  test("verifyDescriptorAgainstName: a non-absence lstat fault propagates, not swallowed", { skip: process.platform === "win32" }, async () => {
+    const dir = freshScratchDir("vd-fault");
+    mkdirSync(dir, { recursive: true });
+    const asFile = join(dir, "file");
+    writeFileSync(asFile, "x");
+    const underFile = join(asFile, "child"); // ENOTDIR on POSIX -- a non-absence lstat fault
+    const openedStat = { dev: 1, ino: 1, isSymbolicLink: () => false };
+    await assert.rejects(verifyDescriptorAgainstName(openedStat, underFile, "damaged"),
+      (err) => err.code === "ENOTDIR" && !(err instanceof IntegrityError));
   });
 
   // Shipped path: a symlinked sidecar is refused, never followed to

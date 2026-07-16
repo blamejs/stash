@@ -31,8 +31,12 @@ const DURATION_PATTERN = /^(\d+)(s|m|h|d)$/;
 export function parse(value, label = "duration") {
   if (value === null || value === undefined) return null;
   if (typeof value === "number") {
-    if (!Number.isFinite(value) || value < 0) {
-      throw new TypeError(label + ": expected a non-negative finite number of milliseconds");
+    // A safe integer, not merely finite: a fractional ms (1500.5) or a value
+    // past 2^53-1 (Number.MAX_VALUE) makes expiresAt = createdAt + ms a
+    // non-safe-integer -- which JSON serializes as a lie or trips the stored
+    // shape's integer check on every later read. Reject the bad duration here.
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new TypeError(label + ": expected a non-negative integer number of milliseconds");
     }
     return value;
   }

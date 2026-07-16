@@ -2,6 +2,50 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 0.1.5 — 2026-07-16
+
+Push an entry with a TTL and it reads back as gone once the deadline passes
+-- lazily on the next read, before any sweep has run, and optionally on a
+background timer that never holds your process open. A construct-time default
+applies to every push and is overridable per call; expiry is fixed at push
+and only ever moves an entry toward destruction, never further. prune() reaps
+on demand, list() hides expired entries by default, and close() (or await
+using) stops the sweeper.
+
+### Added
+
+- A construct-time `ttl` default -- `'30m'`, `'24h'`, `'7d'`, a number of
+  milliseconds, or `null` for no expiry -- applied to every push and
+  overridable per call with `push(source, { ttl })`. An explicit `ttl: null`
+  on a push clears a construct-time default back to no expiry; an absent
+  option inherits it. A ttl whose deadline would exceed the safe integer
+  range is refused at config time rather than serialized as a false 'never
+  expires'.
+- Lazy expiry on every read: `apply` and `show` treat an expired entry as
+  `RefNotFound` and drop it in passing, so an expired entry is never served
+  even if the sweeper has not run. `list()` filters expired entries out by
+  default; `list({ includeExpired: true })` includes them, and `list` only
+  filters -- it never drops.
+- `prune()` destroys expired entries on demand and resolves to the count
+  actually destroyed (an entry a concurrent drop removes first is not
+  double-counted).
+- `sweepInterval` arms a background `prune()` on a timer that is
+  `.unref()`'d, so an open `Stash` never holds the process open on exit; it
+  skips overlapping sweeps and cannot crash the process if a sweep fails. A
+  `sweepInterval` above Node's timer ceiling, or of zero, is a config-time
+  error rather than a silent busy loop.
+- `close()` stops the sweep timer and is idempotent; `Symbol.asyncDispose`
+  aliases it, so `await using stash = new Stash(...)` clears the timer when
+  the block exits, even on throw.
+
+### Changed
+
+- `apply` and `show` may now delete: reaping an expired entry in passing
+  calls the backend's remove. Under `--permission`, the read verbs therefore
+  need the same write grant on the stash root the rest of the store already
+  uses; a denied delete surfaces loudly rather than degrading into a silent
+  not-found.
+
 ## 0.1.4 — 2026-07-16
 
 The disk backend closes a family of filesystem-race and denial-of-service

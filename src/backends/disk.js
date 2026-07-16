@@ -85,6 +85,30 @@ export function descriptorMatchesName(opened, named) {
     named.dev === opened.dev && named.ino === opened.ino;
 }
 
+// verifyDescriptorAgainstName(openedStat, path, damaged) -- the fallback swap
+// guard for platforms without O_NOFOLLOW (Windows), where the open cannot
+// refuse a symlink itself. A no-follow lstat of the name is cross-checked
+// against the open descriptor's fstat via descriptorMatchesName: a symlink
+// traversed at open, or a name swapped after it, is refused as corruption. A
+// name that vanished after the open no longer vouches for the descriptor, so
+// its absence becomes IntegrityError; any other lstat fault propagates. Lifted
+// out of the read path -- as descriptorMatchesName was -- so its branches are
+// pinned directly on every platform, not only where O_NOFOLLOW is absent.
+export async function verifyDescriptorAgainstName(openedStat, path, damaged) {
+  let named;
+  try {
+    named = await lstat(path);
+  } catch (err) {
+    // The name vanished or became unreadable after the open -- it no longer
+    // vouches for the descriptor, so refuse rather than serve an unverifiable
+    // handle.
+    throw _absent(err) ? new IntegrityError(damaged) : err;
+  }
+  if (!descriptorMatchesName(openedStat, named)) {
+    throw new IntegrityError(damaged);
+  }
+}
+
 /**
  * @primitive  stash.backends.DiskBackend
  * @signature  new DiskBackend(opts) -> DiskBackend
@@ -215,18 +239,7 @@ export class DiskBackend {
       const opened = await fh.stat();
       if (!opened.isFile()) throw new IntegrityError(damaged);
       if (SYMLINK_GUARD_NEEDED) {
-        let named;
-        try {
-          named = await lstat(path);
-        } catch (err) {
-          // The name vanished or became unreadable after the open -- it no
-          // longer vouches for the descriptor, so refuse rather than serve
-          // an unverifiable handle.
-          throw _absent(err) ? new IntegrityError(damaged) : err;
-        }
-        if (!descriptorMatchesName(opened, named)) {
-          throw new IntegrityError(damaged);
-        }
+        await verifyDescriptorAgainstName(opened, path, damaged);
       }
     } catch (err) {
       await fh.close();
@@ -392,7 +405,12 @@ export class DiskBackend {
 
   // list() -> Entry[]. Loud, not lossy: a sidecar that fails validation
   // fails the listing -- silently skipping corruption would hide it.
-  // In-flight .tmp files are invisible by design.
+  // In-flight .tmp files are invisible by design. The scan is readdir-then-stat,
+  // so an entry can be removed (a concurrent drop, or the sweeper reaping an
+  // expired one) between the two steps: a sidecar seen by readdir is gone by the
+  // stat. That entry has simply left the listing, so a RefNotFound for it is
+  // skipped -- but corruption and every other fault still fail loudly, since a
+  // damaged sidecar must never be silently dropped from a listing.
   async list() {
     const metaDir = await this.#containedDir("meta");
     const out = [];
@@ -400,7 +418,14 @@ export class DiskBackend {
       if (name.endsWith(".tmp")) continue;
       const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
       if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
-      out.push(await this.stat(id));
+      let entry;
+      try {
+        entry = await this.stat(id);
+      } catch (err) {
+        if (err instanceof RefNotFound) continue; // removed between readdir and stat -- no longer listed
+        throw err;
+      }
+      out.push(entry);
     }
     return out;
   }

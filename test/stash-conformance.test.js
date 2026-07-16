@@ -12,7 +12,24 @@ import { Stash, RefNotFound, InvalidRef, IntegrityError, StashError } from "../s
 import { MemoryBackend } from "../src/backends/memory.js";
 import { DiskBackend } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
+import { C } from "../src/constants.js";
 import { freshScratchDir, cleanupScratch } from "./_scratch.js";
+
+// The sandbox denies spawn; the process-exits vector needs a child process, so
+// it skips there (its scaffolding, not the library, needs the capability).
+const SANDBOXED = typeof process.permission !== "undefined";
+
+// pollUntil(fn) -- resolve once fn() is truthy, reject on timeout. The
+// drift-rule-6b wait: poll a condition for an event, never sleep a fixed span.
+// (A fixed passive window appears only to prove the ABSENCE of an event.)
+async function pollUntil(fn, { timeout = 3000, step = 5 } = {}) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    if (await fn()) return;
+    if (Date.now() > deadline) throw new Error("pollUntil timed out");
+    await new Promise((r) => setTimeout(r, step));
+  }
+}
 
 after(() => cleanupScratch());
 
@@ -226,6 +243,231 @@ for (const { name, create } of BACKENDS) {
       await assert.rejects(stash.show(ref), RefNotFound);
       assert.deepEqual(await stash.list(), []);
     });
+
+    // ---- M3 expiry (SPEC.md 7) ------------------------------------------
+    // Determinism: ttl:0 makes an entry expired at birth (isExpired's `<=`
+    // boundary), so no test sleeps or mocks a clock for the expired cases.
+
+    test("ttl stamps expiresAt = createdAt + ttl, and null ttl leaves it null", async () => {
+      const stash = new Stash({ backend: create() });
+      const hourly = await stash.show(await stash.push("a", { ttl: "1h" }));
+      assert.equal(hourly.expiresAt, hourly.createdAt + 3600000);
+      const numeric = await stash.show(await stash.push("b", { ttl: 5000 }));
+      assert.equal(numeric.expiresAt, numeric.createdAt + 5000);
+      const none = await stash.show(await stash.push("c"));
+      assert.equal(none.expiresAt, null);
+    });
+
+    test("ttl attaches regardless of source type (Buffer and Readable)", async () => {
+      const stash = new Stash({ backend: create() });
+      const fromBuf = await stash.show(await stash.push(Buffer.from("buf"), { ttl: "1h" }));
+      assert.equal(fromBuf.expiresAt, fromBuf.createdAt + 3600000);
+      const fromStream = await stash.show(await stash.push(Readable.from([Buffer.from("stream")]), { ttl: "1h" }));
+      assert.equal(fromStream.expiresAt, fromStream.createdAt + 3600000);
+    });
+
+    test("the ttl override matrix: absent inherits, explicit overrides, null clears", async () => {
+      // constructor default UNSET
+      const plain = new Stash({ backend: create() });
+      assert.equal((await plain.show(await plain.push("x"))).expiresAt, null);
+      assert.notEqual((await plain.show(await plain.push("x", { ttl: "1h" }))).expiresAt, null);
+      // constructor default SET -- absent inherits it, explicit (shorter AND
+      // longer) overrides it, and ttl:null clears it back to no expiry (the
+      // cell a naive `opts.ttl || default` gets wrong)
+      const withDefault = new Stash({ backend: create(), ttl: "1h" });
+      const inherited = await withDefault.show(await withDefault.push("x"));
+      assert.equal(inherited.expiresAt, inherited.createdAt + 3600000);
+      const shorter = await withDefault.show(await withDefault.push("x", { ttl: "5m" }));
+      assert.equal(shorter.expiresAt, shorter.createdAt + 300000);
+      const longer = await withDefault.show(await withDefault.push("x", { ttl: "7d" }));
+      assert.equal(longer.expiresAt, longer.createdAt + 604800000);
+      assert.equal((await withDefault.show(await withDefault.push("x", { ttl: null }))).expiresAt, null);
+    });
+
+    test("an expired entry is RefNotFound from apply, before any sweep runs", async () => {
+      const stash = new Stash({ backend: create() }); // NO sweepInterval
+      const ref = await stash.push("gone at birth", { ttl: 0 });
+      await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+    });
+
+    test("an expired entry is RefNotFound from show", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push("gone at birth", { ttl: 0 });
+      await assert.rejects(stash.show(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+    });
+
+    test("the lazy read path drops the entry in passing, not merely hides it", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push("x", { ttl: 0 });
+      await assert.rejects(stash.apply(ref), RefNotFound);
+      // includeExpired would still show a merely-hidden entry; it is EMPTY, so
+      // the lazy path removed it.
+      assert.deepEqual(await stash.list({ includeExpired: true }), []);
+    });
+
+    test("list filters expired by default but never drops; includeExpired shows them", async () => {
+      const stash = new Stash({ backend: create() });
+      const live = await stash.push("live", { ttl: "1h" });
+      await stash.push("dead", { ttl: 0 });
+      assert.deepEqual((await stash.list()).map((e) => e.id), [live]);
+      assert.equal((await stash.list({ includeExpired: true })).length, 2);
+      // calling list() again did not drop the expired entry -- no read verb ran
+      assert.equal((await stash.list({ includeExpired: true })).length, 2);
+    });
+
+    test("list rejects a non-boolean includeExpired instead of leaking expired entries", async () => {
+      const stash = new Stash({ backend: create() });
+      const live = await stash.push("live", { ttl: "1h" });
+      await stash.push("dead", { ttl: 0 });
+      // a truthy non-boolean (e.g. the string "false" from a config parse) must
+      // NOT expose the expired entry the default hides
+      for (const bad of ["false", "true", 1, 0, {}, []]) {
+        await assert.rejects(stash.list({ includeExpired: bad }), (err) => err instanceof TypeError && !(err instanceof StashError));
+      }
+      // the booleans still work
+      assert.deepEqual((await stash.list({ includeExpired: false })).map((e) => e.id), [live]);
+      assert.equal((await stash.list({ includeExpired: true })).length, 2);
+    });
+
+    test("prune destroys expired only and returns the real count", async () => {
+      const stash = new Stash({ backend: create() });
+      await stash.push("dead1", { ttl: 0 });
+      await stash.push("dead2", { ttl: 0 });
+      const live = await stash.push("live", { ttl: "1h" });
+      assert.equal(await stash.prune(), 2);
+      assert.equal(await stash.prune(), 0);
+      // the live entry survived every read path
+      assert.equal((await stash.show(live)).id, live);
+      assert.equal((await stash.list({ includeExpired: true })).length, 1);
+    });
+
+    test("apply opens no read stream on an expired entry: zero reads, one remove", async () => {
+      const inner = create();
+      const calls = [];
+      const backend = {};
+      for (const m of ["write", "read", "remove", "stat", "list"]) {
+        backend[m] = (...args) => { calls.push(m); return inner[m](...args); };
+      }
+      const stash = new Stash({ backend });
+      await stash.push("x", { ttl: 0 });
+      calls.length = 0; // ignore the push's calls
+      await assert.rejects(stash.apply(await inner.list().then((es) => es[0].id)), RefNotFound);
+      assert.equal(calls.filter((c) => c === "read").length, 0, "no read on an expired entry");
+      assert.equal(calls.filter((c) => c === "remove").length, 1, "dropped in passing exactly once");
+    });
+
+    test("apply re-checks expiry after opening the read: an entry lapsing in the open window is dropped, not served", async () => {
+      // The gate and the open are two awaits apart; an entry alive at the gate
+      // can lapse before the stream is handed out. A backend whose read() is
+      // delayed past the deadline reproduces it deterministically.
+      const inner = create();
+      let readCalled = false;
+      const backend = {
+        write: (...a) => inner.write(...a),
+        stat: (...a) => inner.stat(...a),
+        remove: (...a) => inner.remove(...a),
+        list: (...a) => inner.list(...a),
+        read: async (id) => {
+          readCalled = true;
+          const e = await inner.stat(id);
+          while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2)); // poll, don't sleep
+          return inner.read(id);
+        },
+      };
+      const stash = new Stash({ backend });
+      const ref = await stash.push("secret bytes", { ttl: 150 }); // alive at the gate; expires during the delayed open
+      await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+      assert.equal(readCalled, true, "the read WAS opened -- the reject came from the post-open re-check, not the pre-gate");
+      assert.deepEqual(await stash.list({ includeExpired: true }), []); // dropped in passing, source disposed
+    });
+
+    test("apply's expiry re-check tolerates an already-closed read source: still drops, no leak", async () => {
+      // The dispose helper guards a source that is null, not a stream, or
+      // already destroyed -- a backend can legitimately hand one back. Drive
+      // that branch: a lapsing entry whose read() returns an already-destroyed
+      // stream still drops and rejects, without re-destroying or hanging.
+      const inner = create();
+      const backend = {
+        write: (...a) => inner.write(...a),
+        stat: (...a) => inner.stat(...a),
+        remove: (...a) => inner.remove(...a),
+        list: (...a) => inner.list(...a),
+        read: async (id) => {
+          const e = await inner.stat(id);
+          while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2));
+          const s = await inner.read(id);
+          s.destroy(); // hand back an already-closed source
+          return s;
+        },
+      };
+      const stash = new Stash({ backend });
+      const ref = await stash.push("x", { ttl: 100 });
+      await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+      assert.deepEqual(await stash.list({ includeExpired: true }), []);
+    });
+
+    test("apply's expiry re-check does not hang on a non-closing source (emitClose:false)", { timeout: 8000 }, async () => {
+      // A Readable with emitClose:false emits neither 'close' nor 'error' on
+      // destroy -- the SPEC.md 9 contract only promises a Readable. Disposal
+      // must not wait on a close event, or apply would hang forever and never
+      // reject / remove.
+      const inner = create();
+      const backend = {
+        write: (...a) => inner.write(...a),
+        stat: (...a) => inner.stat(...a),
+        remove: (...a) => inner.remove(...a),
+        list: (...a) => inner.list(...a),
+        read: async (id) => {
+          const e = await inner.stat(id);
+          while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2));
+          return new Readable({ read() {}, emitClose: false });
+        },
+      };
+      const stash = new Stash({ backend });
+      const ref = await stash.push("x", { ttl: 100 });
+      await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+      assert.deepEqual(await stash.list({ includeExpired: true }), []);
+    });
+
+    test("apply's expiry re-check disposes a source that errors on teardown, without hanging", async () => {
+      // The dispose helper resolves on the source's 'close' OR 'error' -- a
+      // teardown that errors must not leave apply hung. Drive the error arm: a
+      // lapsing entry whose read() returns a stream that errors when destroyed.
+      const inner = create();
+      const backend = {
+        write: (...a) => inner.write(...a),
+        stat: (...a) => inner.stat(...a),
+        remove: (...a) => inner.remove(...a),
+        list: (...a) => inner.list(...a),
+        read: async (id) => {
+          const e = await inner.stat(id);
+          while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2));
+          return new Readable({ read() {}, destroy(_err, cb) { cb(new Error("teardown boom")); } });
+        },
+      };
+      const stash = new Stash({ backend });
+      const ref = await stash.push("x", { ttl: 100 });
+      await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+      assert.deepEqual(await stash.list({ includeExpired: true }), []);
+    });
+
+    test("a ttl whose expiresAt sum is not a safe integer is refused at push, storing nothing", async () => {
+      const stash = new Stash({ backend: create() });
+      await assert.rejects(stash.push("x", { ttl: Number.MAX_SAFE_INTEGER }), TypeError);
+      assert.deepEqual(await stash.list({ includeExpired: true }), []);
+    });
+
+    test("hostile ttl values are config-time TypeErrors and store nothing", async () => {
+      const stash = new Stash({ backend: create() });
+      for (const ttl of [-1, NaN, Infinity, "abc", "5w", "1H", 1500.5, true, {}]) {
+        await assert.rejects(stash.push("x", { ttl }), (err) => err instanceof TypeError && !(err instanceof StashError));
+      }
+      assert.deepEqual(await stash.list({ includeExpired: true }), []);
+      // the same battery rejected as a constructor default
+      for (const ttl of [-1, NaN, Infinity, "abc", "5w", "1H", 1500.5, true, {}]) {
+        assert.throws(() => new Stash({ backend: create(), ttl }), TypeError);
+      }
+    });
   });
 }
 
@@ -254,6 +496,193 @@ suite("clear under concurrent destruction", () => {
     vanish = await stash.push("already gone");
     assert.equal(await stash.clear(), 1);
     assert.deepEqual(await stash.list(), []);
+  });
+});
+
+suite("prune under concurrent destruction", () => {
+  test("an expired entry that vanishes between list and remove is not counted", async () => {
+    const inner = new MemoryBackend();
+    let vanish = null;
+    const backend = {
+      write: (...a) => inner.write(...a),
+      read: (...a) => inner.read(...a),
+      stat: (...a) => inner.stat(...a),
+      list: (...a) => inner.list(...a),
+      remove: async (id) => {
+        if (id === vanish) { vanish = null; await inner.remove(id); return false; }
+        return inner.remove(id);
+      },
+    };
+    const stash = new Stash({ backend });
+    await stash.push("expired survivor", { ttl: 0 });
+    vanish = await stash.push("expired, already gone", { ttl: 0 });
+    // both are expired; one vanishes mid-prune -- the count is actual
+    // destructions (1), not the number of expired entries seen (2)
+    assert.equal(await stash.prune(), 1);
+  });
+});
+
+suite("M3 lifecycle: sweeper, close, disposal (SPEC.md 7, 7.1)", () => {
+  test("the sweeper destroys expired entries with no read verb", async () => {
+    const stash = new Stash({ backend: new MemoryBackend(), sweepInterval: 5 });
+    await stash.push("x", { ttl: 0 });
+    await pollUntil(async () => (await stash.list({ includeExpired: true })).length === 0);
+    await stash.close();
+  });
+
+  test("close() stops the sweeper", async () => {
+    const stash = new Stash({ backend: new MemoryBackend(), sweepInterval: 5 });
+    await stash.close();
+    await stash.push("x", { ttl: 0 });
+    // absence window (drift rule 6b): prove NO sweep runs after close
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal((await stash.list({ includeExpired: true })).length, 1);
+  });
+
+  test("close is idempotent; Symbol.asyncDispose twice does not throw; close with no timer is safe", async () => {
+    const stash = new Stash({ backend: new MemoryBackend(), sweepInterval: 5 });
+    await stash.close();
+    await stash.close();
+    await stash[Symbol.asyncDispose]();
+    await stash[Symbol.asyncDispose]();
+    const noTimer = new Stash({ backend: new MemoryBackend() });
+    await noTimer.close();
+    await noTimer[Symbol.asyncDispose]();
+  });
+
+  test("await using disposes the sweeper, even when the block throws", async () => {
+    let captured;
+    {
+      await using stash = new Stash({ backend: new MemoryBackend(), sweepInterval: 5 });
+      captured = stash;
+      await stash.push("x", { ttl: 0 });
+    }
+    // after the block the timer is cleared: a new expired entry is not swept
+    await captured.push("y", { ttl: 0 });
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal((await captured.list({ includeExpired: true })).length, 2);
+
+    let captured2;
+    await assert.rejects((async () => {
+      await using stash = new Stash({ backend: new MemoryBackend(), sweepInterval: 5 });
+      captured2 = stash;
+      throw new Error("boom");
+    })());
+    await captured2.push("z", { ttl: 0 });
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal((await captured2.list({ includeExpired: true })).length, 1);
+  });
+
+  test("a throwing sweep does not crash the process and keeps firing", async () => {
+    const inner = new MemoryBackend();
+    let ticks = 0;
+    const backend = {
+      write: (...a) => inner.write(...a),
+      read: (...a) => inner.read(...a),
+      stat: (...a) => inner.stat(...a),
+      remove: (...a) => inner.remove(...a),
+      list: async () => { ticks += 1; throw new Error("sweep boom"); },
+    };
+    const stash = new Stash({ backend, sweepInterval: 5 });
+    // fired, failed, and fired AGAIN -- the silent catch did not wedge the timer
+    await pollUntil(() => ticks >= 2);
+    // the store still serves the non-list verbs
+    const ref = await stash.push("still works");
+    assert.equal((await stash.show(ref)).id, ref);
+    await stash.close();
+  });
+
+  test("sweeps do not overlap: a slow prune is never re-entered", async () => {
+    const inner = new MemoryBackend();
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const backend = {
+      write: (...a) => inner.write(...a),
+      read: (...a) => inner.read(...a),
+      stat: (...a) => inner.stat(...a),
+      remove: (...a) => inner.remove(...a),
+      list: async () => {
+        inFlight += 1;
+        maxConcurrent = Math.max(maxConcurrent, inFlight);
+        await gate; // hold the first sweep open while more ticks fire
+        inFlight -= 1;
+        return inner.list();
+      },
+    };
+    const stash = new Stash({ backend, sweepInterval: 5 });
+    await pollUntil(() => inFlight === 1);
+    await new Promise((r) => setTimeout(r, 40)); // absence window: more ticks would fire here
+    assert.equal(maxConcurrent, 1, "the in-flight flag kept sweep concurrency at 1");
+    release();
+    await stash.close();
+  });
+
+  test("close() awaits an in-flight sweep: no deletion lands after it resolves", async () => {
+    const inner = new MemoryBackend();
+    let releaseList;
+    const listGate = new Promise((r) => { releaseList = r; });
+    let sweepEnteredList = false;
+    let closeResolved = false;
+    let removedAfterClose = false;
+    const backend = {
+      write: (...a) => inner.write(...a),
+      read: (...a) => inner.read(...a),
+      stat: (...a) => inner.stat(...a),
+      list: async () => { sweepEnteredList = true; await listGate; return inner.list(); },
+      remove: async (id) => { if (closeResolved) removedAfterClose = true; return inner.remove(id); },
+    };
+    const stash = new Stash({ backend, sweepInterval: 5 });
+    await stash.push("x", { ttl: 0 });
+    await pollUntil(() => sweepEnteredList); // a sweep is now blocked inside list()
+    const closePromise = stash.close().then(() => { closeResolved = true; });
+    // close() must NOT resolve while the sweep it caught is still running
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(closeResolved, false, "close() awaited the in-flight sweep instead of resolving early");
+    releaseList(); // let the sweep finish -- it reaps the expired entry now
+    await closePromise;
+    assert.equal(removedAfterClose, false, "the sweep's deletion happened before close() resolved, not after");
+  });
+
+  test("a sweepInterval above Node's timer ceiling, or of zero, is a config error", async () => {
+    assert.throws(() => new Stash({ backend: new MemoryBackend(), sweepInterval: "30d" }), TypeError);
+    assert.throws(() => new Stash({ backend: new MemoryBackend(), sweepInterval: 0 }), TypeError);
+    assert.throws(() => new Stash({ backend: new MemoryBackend(), sweepInterval: C.TIME.MAX_TIMER_MS + 1 }), TypeError);
+    // a value exactly at the ceiling is accepted
+    const ok = new Stash({ backend: new MemoryBackend(), sweepInterval: C.TIME.MAX_TIMER_MS });
+    await ok.close();
+  });
+
+  test("a default ttl whose expiresAt would overflow is refused at construction, not at first push", () => {
+    // A valid duration whose createdAt + ttl leaves the safe integer range must
+    // fail at config time -- not construct fine and then break every push.
+    assert.throws(() => new Stash({ backend: new MemoryBackend(), ttl: Number.MAX_SAFE_INTEGER }), TypeError);
+    // a duration string large enough to overflow against the current clock too
+    assert.throws(() => new Stash({ backend: new MemoryBackend(), ttl: "104249991d" }), TypeError);
+    // an ordinary default still constructs and pushes
+    const ok = new Stash({ backend: new MemoryBackend(), ttl: "24h" });
+    return ok.push("x").then((ref) => ok.show(ref)).then((e) => assert.equal(e.expiresAt, e.createdAt + 86400000));
+  });
+
+  test("a process with an open sweeping Stash exits on its own (the unref rule)", { skip: SANDBOXED, timeout: 15000 }, async () => {
+    const { spawnSync } = await import("node:child_process");
+    const { fileURLToPath, pathToFileURL } = await import("node:url");
+    const nodePath = await import("node:path");
+    const root = nodePath.resolve(fileURLToPath(import.meta.url), "..", "..");
+    const indexUrl = pathToFileURL(nodePath.join(root, "src", "index.js")).href;
+    const memUrl = pathToFileURL(nodePath.join(root, "src", "backends", "memory.js")).href;
+    const code = [
+      "import { Stash } from " + JSON.stringify(indexUrl) + ";",
+      "import { MemoryBackend } from " + JSON.stringify(memUrl) + ";",
+      "const s = new Stash({ backend: new MemoryBackend(), sweepInterval: '1h' });",
+      "await s.push('x', { ttl: '1h' });",
+      // never close(): if the sweep timer were not unref'd, the process would
+      // hang here and the spawn would time out and be killed.
+    ].join("\n");
+    const rv = spawnSync(process.execPath, ["--input-type=module", "-e", code], { timeout: 10000, encoding: "utf8" });
+    assert.equal(rv.signal, null, "child was not killed -- the unref'd timer let it exit: " + (rv.stderr || ""));
+    assert.equal(rv.status, 0, "child exited cleanly: " + (rv.stderr || ""));
   });
 });
 
@@ -349,7 +778,7 @@ suite("config-time failures", () => {
 
   test("spec options whose milestone has not shipped throw, never sit unenforced", () => {
     const backend = new MemoryBackend();
-    for (const key of ["ttl", "maxSize", "maxEntries", "maxTotal", "onPopFailure", "tombstoneTtl", "sweepInterval", "claimTimeout"]) {
+    for (const key of ["maxSize", "maxEntries", "maxTotal", "onPopFailure", "tombstoneTtl", "claimTimeout"]) {
       assert.throws(() => new Stash({ backend, [key]: "1h" }), TypeError);
     }
     assert.throws(() => new Stash({ backend: new MemoryBackend(), unknownKnob: 1 }), TypeError);
@@ -358,7 +787,6 @@ suite("config-time failures", () => {
   test("push rejects unimplemented and unknown options", async () => {
     const stash = new Stash({ backend: new MemoryBackend() });
     await assert.rejects(stash.push("x", null), TypeError);
-    await assert.rejects(stash.push("x", { ttl: "1h" }), TypeError);
     await assert.rejects(stash.push("x", { reads: 3 }), TypeError);
     await assert.rejects(stash.push("x", { unknown: true }), TypeError);
     await assert.rejects(stash.push("x", { meta: "not an object" }), TypeError);
@@ -377,6 +805,6 @@ suite("config-time failures", () => {
   test("stash errors are distinguishable from config errors", async () => {
     const stash = new Stash({ backend: new MemoryBackend() });
     await assert.rejects(stash.apply("bogus"), (err) => err instanceof StashError);
-    await assert.rejects(stash.push("x", { ttl: "1h" }), (err) => !(err instanceof StashError));
+    await assert.rejects(stash.push("x", { reads: 3 }), (err) => !(err instanceof StashError));
   });
 });

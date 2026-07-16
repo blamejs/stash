@@ -53,11 +53,19 @@ Requires Node `>= 24.18.0`.
 
 ## What ships today
 
-The M1 + M2 surface (see `SPEC.md` section 12 for the full delivery plan):
+The M1 + M2 + M3 surface (see `SPEC.md` section 12 for the full delivery plan):
 
 - `push` / `apply` / `show` / `list` / `drop` / `clear` over either backend,
   with size and `sha256` digest computed as the bytes stream through and
   digest-verified reads.
+- **Expiry**: a construct-time `ttl` default (`'24h'`, `'7d'`, ms, or `null`),
+  overridable per `push`. An expired entry reads back as `RefNotFound` and is
+  dropped in passing, before any sweep. `list()` hides expired entries by
+  default (`{ includeExpired: true }` reveals them); `prune()` reaps on demand;
+  `sweepInterval` arms an `unref()`'d background sweep that never holds the
+  process open. `close()` -- or `await using` via `Symbol.asyncDispose` --
+  stops it. Terms are fixed at push and only ever move an entry toward
+  destruction; there is no touch or extend.
 - **The disk backend** (`@blamejs/stash/backends/disk`): one blob + one JSON
   sidecar per entry, no central index to corrupt, atomic
   tmp-fsync-rename writes, `0700`/`0600` modes, realpath containment that
@@ -71,15 +79,14 @@ The M1 + M2 surface (see `SPEC.md` section 12 for the full delivery plan):
   frozen codes).
 - Ref generation and whitelist validation.
 
-Spec'd options whose milestone has not shipped (`ttl`, `maxSize`,
-`onPopFailure`, ...) **throw at construction** rather than sitting silently
-unenforced -- a security option that is accepted but ignored would be a
-fail-open default.
+Spec'd options whose milestone has not shipped (`maxSize`, `maxEntries`,
+`onPopFailure`, `tombstoneTtl`, ...) **throw at construction** rather than
+sitting silently unenforced -- a security option that is accepted but ignored
+would be a fail-open default.
 
-Next up, in order: expiry, mid-stream limits, the claim/commit `pop` cycle
-with read budgets, audit (`verify`), and the replication primitives
-(`store`, tombstones). `ROADMAP.md` tracks status; `SPEC.md` is the
-contract.
+Next up, in order: mid-stream limits, the claim/commit `pop` cycle with read
+budgets, audit (`verify`), and the replication primitives (`store`,
+tombstones). `ROADMAP.md` tracks status; `SPEC.md` is the contract.
 
 ## Run it sandboxed
 

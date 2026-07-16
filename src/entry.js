@@ -80,18 +80,44 @@ export function assertShape(value, ErrorClass) {
   return value;
 }
 
-// make(id, meta) -> a fresh M1 entry. Size and digest are the backend's to
-// fill during the write stream; lifecycle fields start at their inert
-// values (no TTL, no budget) until the milestones that enforce them ship.
+// isExpired(entry, nowMs) -> boolean. The ONE expiry comparator: a null
+// expiresAt never expires; otherwise the entry is expired once `nowMs` reaches
+// its deadline. The boundary is `<=`, not `<` -- an entry whose deadline is the
+// current instant IS expired, which is what makes a `ttl: 0` push deterministic
+// (expired at birth, no clock-race in the tests). Every read verb's lazy gate,
+// list's filter, and prune() route their expiry decision through here so a
+// second relational comparison of `.expiresAt` can never drift from this one.
+// @enforced-by guard-shape-reinlined
+// @guard-shape \.expiresAt\s*[<>]
+export function isExpired(entry, nowMs) {
+  return entry.expiresAt !== null && entry.expiresAt <= nowMs;
+}
+
+// make(id, meta, ttlMs) -> a fresh M1/M3 entry. Size and digest are the
+// backend's to fill during the write stream; the read budget stays inert until
+// M5. `ttlMs` (null = no expiry) stamps `expiresAt` from the SAME `createdAt`
+// clock read, so the two can never come from two different reads. The sum must
+// land on a safe integer -- an expiresAt past 2^53-1 serializes as a lie (JSON
+// turns a non-finite into null = "never expires") or manufactures an integrity
+// verdict on every later read -- so a ttl that overflows it is a config-time
+// TypeError, caught here at the single construction site.
 // @enforced-by guard-shape-reinlined
 // @guard-shape readsLeft\s*:
-export function make(id, meta) {
+export function make(id, meta, ttlMs = null) {
+  const createdAt = Date.now();
+  let expiresAt = null;
+  if (ttlMs !== null) {
+    expiresAt = createdAt + ttlMs;
+    if (!Number.isSafeInteger(expiresAt)) {
+      throw new TypeError("push: ttl places expiresAt beyond the safe integer range");
+    }
+  }
   return {
     id,
     size: 0,
     digest: null,
-    createdAt: Date.now(),
-    expiresAt: null,
+    createdAt,
+    expiresAt,
     reads: null,
     readsLeft: null,
     meta,
