@@ -1,8 +1,8 @@
 # Static gates + suite + sandboxed suite + wiki e2e on every push/PR.
 #
 # Zero dependencies, dev included: there is no npm install anywhere in
-# this pipeline. Every third-party action is SHA-pinned with a trailing
-# version comment.
+# this pipeline -- the lockfile step below is a read-only dry run. Every
+# third-party action is SHA-pinned with a trailing version comment.
 #
 # Output posture: every step's full output is shown -- no >/dev/null,
 # no --quiet. Operators reading a failed run see what actually fired.
@@ -28,6 +28,7 @@ jobs:
   ci:
     name: gates + suite (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -60,6 +61,26 @@ jobs:
 
       - name: Pack gate
         run: node scripts/check-pack-against-gitignore.js
+
+      - name: Lockfile sync (package-lock.json matches package.json)
+        # The committed lockfile describes exactly the root package -- zero
+        # dependencies in any scope. `npm ci --dry-run` re-validates the
+        # dependency graph against package.json without downloading or
+        # writing anything; the root name/version are compared explicitly
+        # because `npm ci` does not assert them. A drifted lockfile fails
+        # at PR time, before a release tag exists to build from it.
+        run: |
+          set -euo pipefail
+          node -e "
+            const { readFileSync } = require('node:fs');
+            const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+            const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+            const root = (lock.packages || {})[''] || {};
+            const fail = (msg) => { console.error('::error::' + msg); process.exit(1); };
+            if (lock.name !== pkg.name || root.name !== pkg.name) fail('package-lock.json name does not match package.json -- regenerate with: npm install --package-lock-only');
+            if (lock.version !== pkg.version || root.version !== pkg.version) fail('package-lock.json version (' + lock.version + ') does not match package.json (' + pkg.version + ') -- regenerate with: npm install --package-lock-only');
+          "
+          npm ci --dry-run --ignore-scripts --no-audit --no-fund
 
       - name: Suite
         run: node --test
