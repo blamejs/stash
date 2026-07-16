@@ -1,0 +1,66 @@
+# Static gates + suite + sandboxed suite + wiki e2e on every push/PR.
+#
+# Zero dependencies, dev included: there is no npm install anywhere in
+# this pipeline. Every third-party action is SHA-pinned with a trailing
+# version comment.
+#
+# Output posture: every step's full output is shown -- no >/dev/null,
+# no --quiet. Operators reading a failed run see what actually fired.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: gates + suite (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["24.18.0"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Codebase patterns
+        run: node test/codebase-patterns.test.js
+
+      - name: Source comment blocks
+        run: node scripts/validate-source-comment-blocks.js
+
+      - name: API snapshot
+        run: node scripts/check-api-snapshot.js
+
+      - name: Suite
+        run: node --test
+
+      - name: Suite under --permission (SPEC.md 13.1 invariant 2)
+        run: node scripts/run-sandboxed.js
+
+      - name: Forbidden-token invariant (SPEC.md 13.1 invariant 1)
+        run: |
+          set -e
+          ! grep -rnE "createCipheriv|createDecipheriv|node:sqlite" src/
+          ! grep -rniE "password" src/
+
+      - name: Wiki e2e
+        run: node examples/wiki/test/e2e.js

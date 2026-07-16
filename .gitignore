@@ -1,0 +1,61 @@
+# Deny all dotfiles by default; allow-list specific ones below.
+# Catches .env*, .aws/, .ssh/, .npmrc-with-tokens, .vscode/, .idea/,
+# .bash_history, .DS_Store, tooling scratch, and anything else that
+# conventionally lives in a dotfile we don't intend to ship.
+.*
+
+# Dotfiles we DO want tracked
+!.gitignore
+!.gitattributes
+!.github/
+!.editorconfig
+!.nvmrc
+!.node-version
+!.npmrc
+
+# Build / dependencies
+node_modules/
+dist/
+build/
+out/
+coverage/
+
+# Runtime / logs
+*.log
+*.pid
+*.pid.lock
+tmp/
+
+# OS junk (non-dotfile)
+Thumbs.db
+desktop.ini
+
+# Editor scratch (non-dotfile)
+*.swp
+*.swo
+*~
+
+# Credential / key material — belt-and-braces over .*
+*.pem
+*.key
+*.crt
+*.cert
+*.p12
+*.pfx
+secrets.json
+credentials.json
+id_rsa*
+id_ed25519*
+
+# Backup / patch artifacts
+*.bak
+*.orig
+*.rej
+
+# Test scratch roots — every suite creates its stash under here.
+.test-stash/
+
+# Example-app per-instance runtime state.
+examples/*/data/
+examples/*/data-e2e/
+examples/*/public/dist/

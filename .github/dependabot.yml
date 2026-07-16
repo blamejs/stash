@@ -1,0 +1,8 @@
+# Zero npm dependencies (runtime and dev), so the only currency to track
+# is the SHA-pinned GitHub Actions set.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

@@ -1,0 +1,13 @@
+{
+  "name": "StashJS - @blamejs/stash",
+  "short_name": "StashJS",
+  "description": "A zero-dependency, ephemeral, crypto-agnostic content store for Node.js: bytes in, ref out; bytes out once, and they're gone.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    { "src": "/stashjs-logo.png", "type": "image/png", "sizes": "1254x1254", "purpose": "any" }
+  ]
+}

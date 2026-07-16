@@ -1,0 +1,120 @@
+{
+  "generator": "scripts/refresh-api-snapshot.js",
+  "packageVersion": "0.1.0",
+  "surface": {
+    "index": {
+      "kind": "object",
+      "members": {
+        "IntegrityError": {
+          "kind": "class",
+          "arity": 0,
+          "methods": {}
+        },
+        "InvalidRef": {
+          "kind": "class",
+          "arity": 0,
+          "methods": {}
+        },
+        "RefClaimed": {
+          "kind": "class",
+          "arity": 0,
+          "methods": {}
+        },
+        "RefNotFound": {
+          "kind": "class",
+          "arity": 0,
+          "methods": {}
+        },
+        "SizeExceeded": {
+          "kind": "class",
+          "arity": 0,
+          "methods": {}
+        },
+        "Stash": {
+          "kind": "class",
+          "arity": 1,
+          "methods": {
+            "apply": {
+              "kind": "function",
+              "arity": 1
+            },
+            "clear": {
+              "kind": "function",
+              "arity": 0
+            },
+            "drop": {
+              "kind": "function",
+              "arity": 1
+            },
+            "list": {
+              "kind": "function",
+              "arity": 0
+            },
+            "push": {
+              "kind": "function",
+              "arity": 1
+            },
+            "show": {
+              "kind": "function",
+              "arity": 1
+            }
+          }
+        },
+        "StashError": {
+          "kind": "class",
+          "arity": 1,
+          "methods": {}
+        },
+        "StashFull": {
+          "kind": "class",
+          "arity": 0,
+          "methods": {}
+        },
+        "version": {
+          "kind": "string"
+        }
+      }
+    },
+    "backends/memory": {
+      "kind": "object",
+      "members": {
+        "MemoryBackend": {
+          "kind": "class",
+          "arity": 0,
+          "methods": {
+            "list": {
+              "kind": "function",
+              "arity": 0
+            },
+            "read": {
+              "kind": "function",
+              "arity": 1
+            },
+            "remove": {
+              "kind": "function",
+              "arity": 1
+            },
+            "stat": {
+              "kind": "function",
+              "arity": 1
+            },
+            "write": {
+              "kind": "function",
+              "arity": 3
+            }
+          }
+        }
+      }
+    }
+  },
+  "sinceByPrimitive": {
+    "stash.backends.MemoryBackend": "0.1.0",
+    "stash.Stash": "0.1.0",
+    "stash.push": "0.1.0",
+    "stash.apply": "0.1.0",
+    "stash.show": "0.1.0",
+    "stash.list": "0.1.0",
+    "stash.drop": "0.1.0",
+    "stash.clear": "0.1.0"
+  }
+}
