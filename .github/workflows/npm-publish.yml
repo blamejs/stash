@@ -94,10 +94,11 @@ jobs:
           fi
 
       # Zero dependencies, dev included: there is no npm install anywhere in
-      # this pipeline. The tag-push publish path is independent of the
-      # pull_request CI, so the full ci.yml gate battery re-runs here before
-      # `npm pack` -- a tree that fails any of these must never be packed
-      # into the published tarball.
+      # this pipeline -- the lockfile step below is a read-only dry run. The
+      # tag-push publish path is independent of the pull_request CI, so the
+      # full ci.yml gate battery re-runs here before `npm pack` -- a tree
+      # that fails any of these must never be packed into the published
+      # tarball.
       - name: Codebase patterns
         run: node test/codebase-patterns.test.js
 
@@ -116,6 +117,26 @@ jobs:
       - name: Pack gate
         run: node scripts/check-pack-against-gitignore.js
 
+      - name: Lockfile sync (package-lock.json matches package.json)
+        # The committed lockfile describes exactly the root package -- zero
+        # dependencies in any scope. `npm ci --dry-run` re-validates the
+        # dependency graph against package.json without downloading or
+        # writing anything; the root name/version are compared explicitly
+        # because `npm ci` does not assert them. A drifted lockfile fails
+        # here instead of feeding a stale version into the SBOM below.
+        run: |
+          set -euo pipefail
+          node -e "
+            const { readFileSync } = require('node:fs');
+            const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+            const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+            const root = (lock.packages || {})[''] || {};
+            const fail = (msg) => { console.error('::error::' + msg); process.exit(1); };
+            if (lock.name !== pkg.name || root.name !== pkg.name) fail('package-lock.json name does not match package.json -- regenerate with: npm install --package-lock-only');
+            if (lock.version !== pkg.version || root.version !== pkg.version) fail('package-lock.json version (' + lock.version + ') does not match package.json (' + pkg.version + ') -- regenerate with: npm install --package-lock-only');
+          "
+          npm ci --dry-run --ignore-scripts --no-audit --no-fund
+
       - name: Suite
         run: node --test
 
@@ -132,16 +153,14 @@ jobs:
         run: node examples/wiki/test/e2e.js
 
       - name: Generate CycloneDX SBOM (npm-tree)
-        # `npm sbom` is built in to npm 10+ but requires a lockfile, and the
-        # zero-dependency tree does not carry one. `--package-lock-only`
-        # writes an ephemeral lockfile describing the root package alone --
-        # nothing is downloaded, nothing is installed, nothing is committed.
+        # `npm sbom` is built in to npm 10+ and reads the committed
+        # package-lock.json (validated against package.json by the lockfile
+        # sync step above) -- nothing is downloaded, nothing is installed.
         # The guard below refuses the publish if any dependency component
         # appears: the zero-dependency contract (SPEC.md section 2) says the
         # SBOM lists exactly one component, the package itself.
         run: |
           set -euo pipefail
-          npm install --package-lock-only --no-audit --no-fund
           npm sbom --sbom-format=cyclonedx --sbom-type=application --omit=dev > sbom.cdx.json
           DEP_COUNT=$(node -e "
             const s = JSON.parse(require('node:fs').readFileSync('sbom.cdx.json', 'utf8'));
@@ -155,10 +174,9 @@ jobs:
             echo "::error::@blamejs/stash ships zero dependencies, dev included (SPEC.md section 2)."
             exit 1
           fi
-          rm -f package-lock.json
 
       # A vulnerability scan of the dependency tree (OSV) is intentionally
-      # absent: there is no lockfile and no dependency in any scope, so the
+      # absent: the lockfile records zero dependencies in any scope, so the
       # scanner has an empty target set. If a dependency or vendored bundle
       # ever lands, add an OSV-Scanner step here in the same change.
 
