@@ -27,7 +27,11 @@
 #     then npm's own --provenance is the attestation surface.
 #
 # `workflow_dispatch.dry_run` exercises validate (gates + pack) without
-# release-creation or npm publish.
+# release-creation or npm publish. A publishing dispatch (dry_run=false)
+# must target the version's pushed tag ref -- the npm-publish environment
+# deploys tag refs only, so a branch-ref dispatch would be rejected at the
+# environment gate; validate refuses it up front with the working command:
+#   gh workflow run 'npm publish' --ref vX.Y.Z -f dry_run=false
 
 name: npm publish
 
@@ -74,30 +78,50 @@ jobs:
 
       - name: Compute version + is_tag flag
         id: version
+        # is_tag reports whether the run built a v* tag ref, whatever event
+        # started it -- a dispatch on the tag ref counts, so the version/tag
+        # match check and the summary cover both paths. A publishing
+        # dispatch on a branch ref is refused here, in the earliest step:
+        # the npm-publish environment deploys tag refs only, and without
+        # this check the run passes every gate and then dies at the
+        # environment gate with only a protection-rules annotation.
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           PKG_VERSION=$(node -p "JSON.parse(require('node:fs').readFileSync('./package.json', 'utf8')).version")
+          if ! printf '%s\n' "$PKG_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::package.json version ($PKG_VERSION) is not X.Y.Z -- the release grammar admits no other shape."
+            exit 1
+          fi
           echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
-          if [ "$EVENT_NAME" = "push" ] && [[ "$REF" == refs/tags/v* ]]; then
+          if [[ "$REF" == refs/tags/v* ]]; then
             TAG_VERSION="${REF#refs/tags/v}"
             echo "is_tag=true" >> "$GITHUB_OUTPUT"
             if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-              echo "::error::package.json version ($PKG_VERSION) does not match pushed tag (v$TAG_VERSION)"
+              echo "::error::package.json version ($PKG_VERSION) does not match the built tag (v$TAG_VERSION)"
               exit 1
             fi
-            echo "package.json version $PKG_VERSION matches pushed tag v$TAG_VERSION"
+            echo "package.json version $PKG_VERSION matches tag v$TAG_VERSION"
           else
             echo "is_tag=false" >> "$GITHUB_OUTPUT"
+            if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]; then
+              echo "::error::A publishing dispatch must run on the version's pushed tag ref, not a branch:"
+              echo "::error::the npm-publish environment deploys tag refs only, so this run would be"
+              echo "::error::rejected at the environment gate after every gate passes."
+              echo "::error::Re-run as: gh workflow run 'npm publish' --ref v${PKG_VERSION} -f dry_run=false"
+              exit 1
+            fi
           fi
 
       # Zero dependencies, dev included: there is no npm install anywhere in
-      # this pipeline. The tag-push publish path is independent of the
-      # pull_request CI, so the full ci.yml gate battery re-runs here before
-      # `npm pack` -- a tree that fails any of these must never be packed
-      # into the published tarball.
+      # this pipeline -- the lockfile step below is a read-only dry run. The
+      # tag-push publish path is independent of the pull_request CI, so the
+      # full ci.yml gate battery re-runs here before `npm pack` -- a tree
+      # that fails any of these must never be packed into the published
+      # tarball.
       - name: Codebase patterns
         run: node test/codebase-patterns.test.js
 
@@ -116,6 +140,26 @@ jobs:
       - name: Pack gate
         run: node scripts/check-pack-against-gitignore.js
 
+      - name: Lockfile sync (package-lock.json matches package.json)
+        # The committed lockfile describes exactly the root package -- zero
+        # dependencies in any scope. `npm ci --dry-run` re-validates the
+        # dependency graph against package.json without downloading or
+        # writing anything; the root name/version are compared explicitly
+        # because `npm ci` does not assert them. A drifted lockfile fails
+        # here instead of feeding a stale version into the SBOM below.
+        run: |
+          set -euo pipefail
+          node -e "
+            const { readFileSync } = require('node:fs');
+            const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+            const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+            const root = (lock.packages || {})[''] || {};
+            const fail = (msg) => { console.error('::error::' + msg); process.exit(1); };
+            if (lock.name !== pkg.name || root.name !== pkg.name) fail('package-lock.json name does not match package.json -- regenerate with: npm install --package-lock-only');
+            if (lock.version !== pkg.version || root.version !== pkg.version) fail('package-lock.json version (' + lock.version + ') does not match package.json (' + pkg.version + ') -- regenerate with: npm install --package-lock-only');
+          "
+          npm ci --dry-run --ignore-scripts --no-audit --no-fund
+
       - name: Suite
         run: node --test
 
@@ -132,16 +176,14 @@ jobs:
         run: node examples/wiki/test/e2e.js
 
       - name: Generate CycloneDX SBOM (npm-tree)
-        # `npm sbom` is built in to npm 10+ but requires a lockfile, and the
-        # zero-dependency tree does not carry one. `--package-lock-only`
-        # writes an ephemeral lockfile describing the root package alone --
-        # nothing is downloaded, nothing is installed, nothing is committed.
+        # `npm sbom` is built in to npm 10+ and reads the committed
+        # package-lock.json (validated against package.json by the lockfile
+        # sync step above) -- nothing is downloaded, nothing is installed.
         # The guard below refuses the publish if any dependency component
         # appears: the zero-dependency contract (SPEC.md section 2) says the
         # SBOM lists exactly one component, the package itself.
         run: |
           set -euo pipefail
-          npm install --package-lock-only --no-audit --no-fund
           npm sbom --sbom-format=cyclonedx --sbom-type=application --omit=dev > sbom.cdx.json
           DEP_COUNT=$(node -e "
             const s = JSON.parse(require('node:fs').readFileSync('sbom.cdx.json', 'utf8'));
@@ -155,10 +197,9 @@ jobs:
             echo "::error::@blamejs/stash ships zero dependencies, dev included (SPEC.md section 2)."
             exit 1
           fi
-          rm -f package-lock.json
 
       # A vulnerability scan of the dependency tree (OSV) is intentionally
-      # absent: there is no lockfile and no dependency in any scope, so the
+      # absent: the lockfile records zero dependencies in any scope, so the
       # scanner has an empty target set. If a dependency or vendored bundle
       # ever lands, add an OSV-Scanner step here in the same change.
 
@@ -310,22 +351,41 @@ jobs:
       - name: Extract release notes from CHANGELOG
         # Single source of truth: the CHANGELOG.md section whose header is
         # `## X.Y.Z` (the generator's grammar; a leading v is tolerated).
-        # awk prints lines from the matching header up to (not including)
-        # the next `## ` header.
+        # The header's version token is compared to the requested version by
+        # exact string equality -- the version is never interpolated into a
+        # regex, so no character in it can widen or shift the match. (awk -v
+        # would also reprocess backslash escapes in the value, silently
+        # undoing any escaping; ENVIRON delivers the bytes untouched.) awk
+        # prints lines from the matching header up to (not including) the
+        # next `## ` header, and writes the matched header aside so the
+        # shell can independently assert it names the literal requested
+        # version before the notes are allowed near a release.
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           set -euo pipefail
-          VER_RE=$(printf '%s' "${VERSION}" | sed 's/./\./g')
-          awk -v ver="${VER_RE}" '
-            $0 ~ "^## (v)?" ver "( |$)" { grab=1; next }
-            grab && /^## / { exit }
+          rm -f release-notes-header.txt
+          awk '
+            /^## / {
+              if (grab) exit
+              v = $2
+              sub(/^v/, "", v)
+              if (v == ENVIRON["VERSION"]) { grab = 1; print > "release-notes-header.txt"; next }
+            }
             grab { print }
           ' CHANGELOG.md > release-notes.md
+          HEADER=""
+          if [ -f release-notes-header.txt ]; then HEADER=$(head -n 1 release-notes-header.txt); fi
+          case "$HEADER" in
+            "## ${VERSION}"|"## ${VERSION} "*|"## v${VERSION}"|"## v${VERSION} "*) ;;
+            *)
+              echo "::error::CHANGELOG.md has no '## ${VERSION}' section header -- refusing to publish notes for a different version."
+              exit 1
+              ;;
+          esac
           BYTE_COUNT=$(wc -c < release-notes.md | tr -d ' ')
           if [ "$BYTE_COUNT" -lt 16 ]; then
-            echo "::error::Could not extract a CHANGELOG.md section for v${VERSION} (got ${BYTE_COUNT} bytes)."
-            echo "::error::Confirm CHANGELOG.md has a '## ${VERSION}' header."
+            echo "::error::The CHANGELOG.md section for v${VERSION} is empty (got ${BYTE_COUNT} bytes)."
             exit 1
           fi
           echo "[release-notes] extracted ${BYTE_COUNT} bytes for v${VERSION}"
@@ -397,7 +457,7 @@ jobs:
             echo "|---|---|"
             echo "| **Package**          | \`@blamejs/stash\` |"
             echo "| **Version**          | \`${VERSION}\` |"
-            echo "| **Tag push**         | ${IS_TAG} |"
+            echo "| **Tag ref**          | ${IS_TAG} |"
             echo "| **Dry run**          | ${DRY_RUN} |"
             echo "| **Validate job**     | ${VALIDATE_RESULT} |"
             echo "| **Publish + release**| ${PUBLISH_RESULT} |"

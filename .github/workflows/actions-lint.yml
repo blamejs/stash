@@ -64,8 +64,10 @@ jobs:
           # checksum line. If the upstream tarball was retroactively
           # rewritten, this fails closed -- the workflow refuses rather than
           # running an unverified binary.
+          # Exact filename equality on the checksum line -- a regex here
+          # would let its metacharacters match other artifact names.
           ACTUAL=$(sha256sum /tmp/pinact.tar.gz | awk '{print $1}')
-          EXPECTED=$(grep 'pinact_linux_amd64.tar.gz$' /tmp/pinact-checksums.txt | awk '{print $1}')
+          EXPECTED=$(awk '$2 == "pinact_linux_amd64.tar.gz" {print $1}' /tmp/pinact-checksums.txt)
           if [ -z "$EXPECTED" ]; then
             echo "::error::could not find pinact_linux_amd64.tar.gz line in upstream checksums"
             exit 1
@@ -165,8 +167,11 @@ jobs:
           V="${ACTIONLINT_VERSION#v}"
           curl -fsSLo /tmp/actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/actionlint_${V}_linux_amd64.tar.gz"
           curl -fsSLo /tmp/actionlint-checksums.txt "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/actionlint_${V}_checksums.txt"
+          # Exact filename equality on the checksum line -- interpolating
+          # the version into a regex would let its dots match any character
+          # and select another artifact's hash.
           ACTUAL=$(sha256sum /tmp/actionlint.tar.gz | awk '{print $1}')
-          EXPECTED=$(grep "actionlint_${V}_linux_amd64.tar.gz\$" /tmp/actionlint-checksums.txt | awk '{print $1}')
+          EXPECTED=$(awk -v f="actionlint_${V}_linux_amd64.tar.gz" '$2 == f {print $1}' /tmp/actionlint-checksums.txt)
           if [ -z "$EXPECTED" ]; then
             echo "::error::could not find actionlint_${V}_linux_amd64.tar.gz line in upstream checksums"
             exit 1
