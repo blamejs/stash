@@ -31,6 +31,8 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { freshScratchDir } from "./_scratch.js";
+
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 // This file names detector tokens in its own regexes and registry; the
@@ -41,11 +43,18 @@ const SELF = "test/codebase-patterns.test.js";
 // File-tree walkers
 // ---------------------------------------------------------------------------
 
-function _walk(dir, files) {
+// A product walk (src/, test/, scripts/) scans EVERY subdirectory except
+// node_modules and .git -- those are structurally never first-party source.
+// Asset/vendor/dot-directory skips exist only for the example app
+// (`skipAssetDirs`): applying them to a product tree would let a new
+// src/public/ or src/vendor/ module ship in the tarball while sitting
+// outside every detector's view.
+function _walk(dir, files, opts) {
   files = files || [];
   const base = path.basename(dir);
-  if (base === "node_modules" || base === ".test-output" ||
-      base === "public" || base === "vendor" || base.startsWith(".")) {
+  if (base === "node_modules" || base === ".git") return files;
+  if (opts && opts.skipAssetDirs &&
+      (base === "public" || base === "vendor" || base.startsWith("."))) {
     return files;
   }
   let entries;
@@ -53,7 +62,7 @@ function _walk(dir, files) {
   catch { return files; }
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) _walk(full, files);
+    if (entry.isDirectory()) _walk(full, files, opts);
     else if (/\.js$/.test(entry.name)) files.push(full);
   }
   return files;
@@ -66,7 +75,7 @@ function _relPath(absPath) {
 function _srcFiles() { return _walk(path.join(REPO_ROOT, "src")); }
 function _testFiles() { return _walk(path.join(REPO_ROOT, "test")); }
 function _scriptFiles() { return _walk(path.join(REPO_ROOT, "scripts")); }
-function _wikiFiles() { return _walk(path.join(REPO_ROOT, "examples", "wiki")); }
+function _wikiFiles() { return _walk(path.join(REPO_ROOT, "examples", "wiki"), [], { skipAssetDirs: true }); }
 function _allJsFiles() {
   const seen = new Set();
   const out = [];
@@ -83,6 +92,48 @@ function _read(absPath) {
   try { return fs.readFileSync(absPath, "utf8"); }
   catch { return ""; }
 }
+
+// ---------------------------------------------------------------------------
+// Walker self-tests -- every detector above trusts _walk's output, so the
+// walk itself is pinned: a skip rule that swallows a real source directory
+// silently blinds EVERY detector at once, and an empty walk greens every
+// scan vacuously.
+// ---------------------------------------------------------------------------
+
+test("file-walk contract -- a product walk descends into every subdirectory", (t) => {
+  // reason: a violation in a subdirectory the walk skips is invisible to
+  // every detector while still shipping in the tarball (package.json packs
+  // src/ recursively). Only node_modules and .git are structurally never
+  // first-party source; asset/vendor skips apply solely to the example app.
+  const root = freshScratchDir("walk-contract");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const dir of ["sub", "public", "vendor", ".hidden", "node_modules", ".git"]) {
+    fs.mkdirSync(path.join(root, dir), { recursive: true });
+    fs.writeFileSync(path.join(root, dir, "probe.js"), "export default 1;\n");
+  }
+  const names = (files) => files.map((f) => path.relative(root, f).replace(/\\/g, "/")).sort();
+
+  assert.deepEqual(
+    names(_walk(root)),
+    [".hidden/probe.js", "public/probe.js", "sub/probe.js", "vendor/probe.js"],
+    "product walk must scan every subdirectory except node_modules/.git"
+  );
+  assert.deepEqual(
+    names(_walk(root, [], { skipAssetDirs: true })),
+    ["sub/probe.js"],
+    "asset-mode walk (example app) skips public/, vendor/, and dot-directories"
+  );
+});
+
+test("file-walk floor -- every scanned family finds source files", () => {
+  // reason: a renamed or relocated tree makes every walk return [], and
+  // zero matches reads as zero violations -- the gate greens with nothing
+  // scanned. Each family the detectors run over must be non-empty.
+  assert.ok(_srcFiles().length > 0, "src/ walk found no files -- every src detector is vacuous");
+  assert.ok(_testFiles().length > 0, "test/ walk found no files");
+  assert.ok(_scriptFiles().length > 0, "scripts/ walk found no files");
+  assert.ok(_wikiFiles().length > 0, "examples/wiki walk found no files");
+});
 
 // Split content into lines, tolerant of CRLF vs LF.
 function _lines(content) { return content.split(/\r?\n/); }
@@ -144,6 +195,7 @@ const VALID_ALLOW_CLASSES = {
   "raw-time-scale-literal": 1,
   "inline-dynamic-import": 1,
   "dead-underscore-function": 1,
+  "path-reresolved-read": 1,
   "constant-time-compare-short-circuited": 1,
 };
 
@@ -338,7 +390,13 @@ test("catch-return-swallow -- no catch absorbs an error into a return", () => {
   // into a silent verdict: the caller proceeds on a value that encodes
   // "something broke" as "fine". Malformed input and storage failure are
   // permanent verdicts and must surface as typed throws.
-  const re = /catch\s*(?:\(\s*[\w$]*\s*\)\s*)?\{\s*(?:return\b|\})/;
+  // The parameter matcher admits a destructured binding
+  // (`catch ({ code }) { return ... }`) -- the same swallow shape -- and
+  // one level of balanced parens inside it, so a default initializer that
+  // calls a function (`catch ({ code = getStatus() }) { return ... }`)
+  // does not end the parameter group at its first inner `)` and slip the
+  // catch body past the scan.
+  const re = /catch\s*(?:\((?:[^()]|\([^()]*\))*\)\s*)?\{\s*(?:return\b|\})/;
   const files = _srcFiles();
   let bad = [];
   for (const file of files) {
@@ -629,6 +687,30 @@ test("dead-underscore-function -- every _helper is referenced", () => {
   }
   bad = _filterMarkers(bad, "dead-underscore-function");
   _report("no unused `_`-prefixed functions/consts in src/", bad);
+});
+
+// ---------------------------------------------------------------------------
+// (15) path-reresolved-read -- storage reads open an fd, never re-resolve a path
+// ---------------------------------------------------------------------------
+
+test("path-reresolved-read -- no path-based blob/sidecar read in src/", () => {
+  // reason: a stored file is read through a descriptor it opened and
+  // verified with fstat on that fd, never by handing a path to
+  // createReadStream / readFile a second time. A path passed to a read
+  // AFTER a separate stat / lstat check is re-resolved by the kernel when
+  // the read opens it, so a symlink or a different file swapped in between
+  // the check and the read is silently followed -- the time-of-check
+  // time-of-use class (CWE-367), and a symlink escape past the containment
+  // check. The FileHandle method forms (fh.createReadStream(), fh.readFile())
+  // read the already-open, already-verified descriptor and are the required
+  // shape; the free-function forms re-resolve the path. Anchored on the Node
+  // API names (a stable contract, like the timingSafeEqual / realpath
+  // guards), so it is rename-proof; the negative lookbehind keeps the method
+  // forms and identifier suffixes out.
+  const re = /(?<![.\w])(?:createReadStream|readFileSync|readFile)\s*\(/;
+  let bad = _scanLines(_srcFiles(), re, { prepare: _stripCommentsAndLiterals });
+  bad = _filterMarkers(bad, "path-reresolved-read");
+  _report("no path-based createReadStream/readFile in src/ (open an fd and read the handle -- CWE-367)", bad);
 });
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,6 @@
+# ClusterFuzzLite project config. Everything under .clusterfuzzlite/ is
+# CI-side fuzzing tooling: it is excluded from the npm tarball, and the
+# fuzzing engine (jazzer.js) is installed only inside the fuzz container
+# by build.sh -- the library itself keeps zero dependencies, dev included
+# (SPEC.md 2).
+language: javascript

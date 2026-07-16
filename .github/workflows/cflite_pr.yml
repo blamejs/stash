@@ -1,0 +1,57 @@
+# ClusterFuzzLite PR fuzzing: build the jazzer.js targets under
+# .clusterfuzzlite/ and fuzz the code a pull request changes for a short
+# burst. The targets hold the store's fail-closed contract on its
+# untrusted-input surfaces -- hostile ref strings and hostile sidecar
+# bytes -- so a crash here is a typed-verdict escape, never test noise.
+#
+# The fuzzing engine exists only inside the fuzz container; the library
+# keeps zero dependencies, dev included, and nothing under
+# .clusterfuzzlite/ ships in the npm tarball.
+
+name: ClusterFuzzLite PR fuzzing
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - ".clusterfuzzlite/**"
+      - ".github/workflows/cflite_pr.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cflite-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-fuzzing:
+    name: PR fuzzing (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read # code-change mode pulls prior builds and corpora from run artifacts
+    strategy:
+      fail-fast: false
+      matrix:
+        # jazzer.js targets carry no native code; "none" is the oss-fuzz
+        # sanitizer for javascript projects.
+        sanitizer: [none]
+    steps:
+      - name: Build fuzzers (${{ matrix.sanitizer }})
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: javascript
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: ${{ matrix.sanitizer }}
+
+      - name: Run fuzzers (${{ matrix.sanitizer }})
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 300
+          mode: "code-change"
+          sanitizer: ${{ matrix.sanitizer }}

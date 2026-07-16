@@ -8,7 +8,9 @@ import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
 import {
   appendFileSync,
+  constants,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -18,10 +20,12 @@ import {
   truncateSync,
   writeFileSync,
 } from "node:fs";
+import { open } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
 import { Stash, RefNotFound, InvalidRef, IntegrityError } from "../src/index.js";
-import { DiskBackend } from "../src/backends/disk.js";
+import { DiskBackend, descriptorMatchesName } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
 import { freshScratchDir, cleanupScratch } from "./_scratch.js";
 
@@ -50,6 +54,26 @@ function canSymlinkFiles() {
   }
 }
 const FILE_SYMLINKS = canSymlinkFiles();
+
+// A FIFO (named pipe) planted where a blob or sidecar belongs is the FIFO
+// vector: on POSIX an O_RDONLY open of a FIFO with no writer parks forever.
+// mkfifo is POSIX-only and unprivileged (Windows has neither the command
+// nor the parking semantics; the sandbox denies the spawn that creates
+// one), so probe once and skip where it is unavailable.
+function canMkfifo() {
+  if (process.platform === "win32") return false;
+  const probeDir = freshScratchDir("fifo-probe");
+  mkdirSync(probeDir, { recursive: true });
+  try {
+    execFileSync("mkfifo", [join(probeDir, "p")]);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true });
+  }
+}
+const FIFO_OK = canMkfifo();
 
 // Under --permission the runtime denies fs.symlink entirely, so the
 // vectors that PLANT links (the library only ever refuses them) run in
@@ -295,6 +319,37 @@ suite("disk: containment", () => {
     await assert.rejects(stash.push("escapes"), (err) => err instanceof InvalidRef || err instanceof IntegrityError);
   });
 
+  // The containment check of a directory must gate the write INTO it, not a
+  // moment far earlier. A blob streams for as long as its source runs; if
+  // the meta directory is resolved and verified before that stream begins
+  // but the sidecar is written only after it ends, an attacker who swaps
+  // meta for a link out of the root DURING the stream writes the sidecar
+  // outside the pinned root -- the check passed on the pre-swap directory,
+  // the write landed on the post-swap one. The source here performs that
+  // swap mid-stream, so the sidecar write must re-assert containment and
+  // refuse, never land a file in the outside directory.
+  test("the meta dir is contained at the sidecar write, not before the blob stream", { skip: SANDBOXED }, async () => {
+    const { root, stash } = freshStash();
+    await stash.push("materialize the layout");
+    const outside = freshScratchDir("outside-meta");
+    mkdirSync(outside, { recursive: true });
+
+    async function* swapsMetaMidStream() {
+      yield Buffer.from("chunk one");
+      // between the early containment check and the late sidecar write
+      rmSync(join(root, "meta"), { recursive: true, force: true });
+      symlinkSync(outside, join(root, "meta"), process.platform === "win32" ? "junction" : "dir");
+      yield Buffer.from("chunk two");
+    }
+
+    await assert.rejects(
+      stash.push(swapsMetaMidStream()),
+      (err) => err instanceof InvalidRef || err instanceof IntegrityError
+    );
+    // the sidecar never followed the swapped link into the outside directory
+    assert.deepEqual(readdirSync(outside), []);
+  });
+
   test("blob files are 0600 and directories 0700", { skip: process.platform === "win32" }, async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("modes");
@@ -302,6 +357,123 @@ suite("disk: containment", () => {
     assert.equal(statSync(join(root, "blobs")).mode & 0o777, 0o700);
     assert.equal(statSync(join(root, "blobs", ref)).mode & 0o777, 0o600);
     assert.equal(statSync(join(root, "meta", ref + ".json")).mode & 0o777, 0o600);
+  });
+});
+
+suite("disk: fd-based read discipline (CWE-367)", () => {
+  const O_NOFOLLOW_AVAILABLE = (constants.O_NOFOLLOW || 0) !== 0;
+  const POSIX_LINKS = FILE_SYMLINKS && O_NOFOLLOW_AVAILABLE;
+
+  // A direct reproduction of the time-of-check/time-of-use window the fix
+  // closes. The old shape checked a path (lstat) and then handed the SAME
+  // path to a second read: a symlink swapped in between the check and the
+  // read is re-resolved when the read opens it, and followed out of the
+  // root. The fixed shape opens a descriptor with O_NOFOLLOW and reads THAT
+  // handle -- the swap cannot redirect a read bound to an open fd.
+  test("a path re-resolved after its check follows a swapped symlink; O_NOFOLLOW refuses it", { skip: !POSIX_LINKS }, async () => {
+    const dir = freshScratchDir("toctou");
+    mkdirSync(dir, { recursive: true });
+    const guarded = join(dir, "sidecar.json");
+    writeFileSync(guarded, JSON.stringify({ trusted: true }));
+
+    const outsideDir = freshScratchDir("toctou-outside");
+    mkdirSync(outsideDir, { recursive: true });
+    const secret = join(outsideDir, "secret");
+    writeFileSync(secret, "BYTES OUTSIDE THE ROOT");
+
+    // check: the name is a regular file (what the removed lstat saw)
+    assert.equal(lstatSync(guarded).isFile(), true);
+    // an attacker with write access to the directory swaps it for a symlink
+    rmSync(guarded);
+    symlinkSync(secret, guarded, "file");
+
+    // re-resolving the path (the old readFile(path)) FOLLOWS the swap:
+    assert.equal(readFileSync(guarded, "utf8"), "BYTES OUTSIDE THE ROOT");
+
+    // opening a descriptor with O_NOFOLLOW refuses the symlink outright, so
+    // a read bound to that descriptor can never be redirected:
+    await assert.rejects(
+      open(guarded, constants.O_RDONLY | constants.O_NOFOLLOW),
+      (err) => err.code === "ELOOP"
+    );
+  });
+
+  // A blob or sidecar replaced with a FIFO (named pipe) that has no writer
+  // would park an O_RDONLY open forever -- before the fstat that rejects a
+  // non-regular shape can run -- hanging show / list / apply instead of
+  // failing. The non-blocking open returns at once so the fstat refuses the
+  // FIFO as damage. Each test carries its own timeout: a regression parks
+  // the test itself (a failure), never the shared runner.
+  test("a FIFO where a sidecar belongs is refused promptly, never blocks", { skip: !FIFO_OK || SANDBOXED, timeout: 10000 }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("legit", { meta: { k: "v" } });
+    const sidecarPath = join(root, "meta", ref + ".json");
+    rmSync(sidecarPath);
+    execFileSync("mkfifo", [sidecarPath]);
+    await assert.rejects(stash.show(ref), IntegrityError);
+    await assert.rejects(stash.list(), IntegrityError);
+  });
+
+  test("a FIFO where a blob belongs is refused promptly, never blocks", { skip: !FIFO_OK || SANDBOXED, timeout: 10000 }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("legit blob");
+    const blobPath = join(root, "blobs", ref);
+    rmSync(blobPath);
+    execFileSync("mkfifo", [blobPath]);
+    await assert.rejects(stash.apply(ref), IntegrityError);
+  });
+
+  // The no-follow guard for a platform WITHOUT O_NOFOLLOW (Windows): the
+  // open follows a swapped symlink, so a post-open lstat of the NAME is a
+  // check of its own -- an attacker who swaps the symlink for a regular
+  // in-root file between the open and the lstat passes an isSymbolicLink
+  // check while the descriptor stays bound to the outside target. The fix
+  // binds the verdict to the descriptor's identity (fstat) against the
+  // name's current identity (no-follow lstat); these vectors pin that
+  // comparison's contract directly, so they hold on every platform
+  // regardless of symlink-creation privilege.
+  test("descriptorMatchesName: an untampered regular file matches (fstat == lstat, not a link)", () => {
+    const stat = { dev: 42, ino: 1001, isSymbolicLink: () => false };
+    assert.equal(descriptorMatchesName(stat, stat), true);
+  });
+
+  test("descriptorMatchesName: a symlinked name is refused even when dev+ino coincide", () => {
+    const opened = { dev: 42, ino: 1001, isSymbolicLink: () => false };
+    const named = { dev: 42, ino: 1001, isSymbolicLink: () => true };
+    assert.equal(descriptorMatchesName(opened, named), false);
+  });
+
+  test("descriptorMatchesName: a swap after open (different ino) is refused", () => {
+    // fstat: the object the open bound (the outside symlink target);
+    // lstat: the regular in-root file swapped in afterward. Same device,
+    // different inode -> the descriptor no longer speaks for the name.
+    const opened = { dev: 42, ino: 1001, isSymbolicLink: () => false };
+    const swappedIn = { dev: 42, ino: 2002, isSymbolicLink: () => false };
+    assert.equal(descriptorMatchesName(opened, swappedIn), false);
+  });
+
+  test("descriptorMatchesName: a cross-device identity is refused (different dev)", () => {
+    const opened = { dev: 42, ino: 1001, isSymbolicLink: () => false };
+    const otherVolume = { dev: 99, ino: 1001, isSymbolicLink: () => false };
+    assert.equal(descriptorMatchesName(opened, otherVolume), false);
+  });
+
+  // Shipped path: a symlinked sidecar is refused, never followed to
+  // attacker-chosen metadata -- on POSIX at open (O_NOFOLLOW), and on a
+  // platform without the flag by the post-open lstat guard.
+  test("a symlinked sidecar is refused, never followed to foreign metadata", { skip: !FILE_SYMLINKS }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("legit", { meta: { k: "v" } });
+    const sidecarPath = join(root, "meta", ref + ".json");
+    const foreign = freshScratchDir("foreign-sidecar");
+    const original = JSON.parse(readFileSync(sidecarPath, "utf8"));
+    // a shape-valid sidecar for the same id, but with metadata the attacker
+    // chose -- exactly what following the symlink would substitute in
+    writeFileSync(foreign, JSON.stringify({ ...original, meta: { injected: true } }));
+    rmSync(sidecarPath);
+    symlinkSync(foreign, sidecarPath, "file");
+    await assert.rejects(stash.show(ref), IntegrityError);
+    await assert.rejects(stash.apply(ref), IntegrityError);
   });
 });
 

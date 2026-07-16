@@ -134,6 +134,10 @@
               "arity": 3
             }
           }
+        },
+        "descriptorMatchesName": {
+          "kind": "function",
+          "arity": 2
         }
       }
     }
