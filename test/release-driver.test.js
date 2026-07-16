@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { checksVerdict, reviewDecision } from "../scripts/release.js";
+import { checksVerdict, mergeArgs, reviewDecision } from "../scripts/release.js";
 
 // ---------------------------------------------------------------------------
 // checksVerdict -- CheckRun entries (status / conclusion)
@@ -270,3 +270,17 @@ test("cmdPrepare creates the release branch before writing package.json", () => 
   assert.ok(branchAt < writeAt,
     "create the release branch BEFORE writing package.json -- a failed checkout must leave main clean");
 });
+// ---------------------------------------------------------------------------
+// mergeArgs -- the merge is bound to the sha the verdict was computed for
+// ---------------------------------------------------------------------------
+
+test("mergeArgs: the merge is bound to the reviewed head commit", () => {
+  const args = mergeArgs("release-v0.1.4", HEAD);
+  assert.deepEqual(args, ["pr", "merge", "release-v0.1.4", "--squash", "--match-head-commit", HEAD]);
+});
+
+test("mergeArgs: a missing or truncated head sha throws instead of merging unbound", () => {
+  assert.throws(() => mergeArgs("release-v0.1.4", undefined), TypeError);
+  assert.throws(() => mergeArgs("release-v0.1.4", "a1b2c"), TypeError);
+});
+

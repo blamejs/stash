@@ -275,6 +275,18 @@ const REVIEW_BOT_LOGINS = Object.freeze([
   "chatgpt-codex-connector[bot]",
 ]);
 
+// mergeArgs(branch, headSha) -- the gh argv for a merge BOUND to the head
+// commit the verdict was computed for. `--match-head-commit` makes GitHub
+// refuse the merge if the branch head moved after this iteration read it,
+// so a push that lands between verdict and merge is re-polled instead of
+// merged unreviewed.
+export function mergeArgs(branch, headSha) {
+  if (typeof headSha !== "string" || headSha.length < 7) {
+    throw new TypeError("mergeArgs requires the reviewed head commit sha");
+  }
+  return ["pr", "merge", branch, "--squash", "--match-head-commit", headSha];
+}
+
 // reviewDecision(headSha, surfaces) -- pure, fail-closed reviewer verdict
 // for one head commit. surfaces:
 //   reviews  -- submitted PR reviews        [{ author, body }]
@@ -498,7 +510,7 @@ function cmdWatch() {
       }
     }
     if (checksDone && reviewDone) {
-      run("gh", ["pr", "merge", branch, "--squash"]);
+      run("gh", mergeArgs(branch, pr.headRefOid));
       merged = true;
       break;
     }
