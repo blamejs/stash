@@ -195,6 +195,7 @@ const VALID_ALLOW_CLASSES = {
   "raw-time-scale-literal": 1,
   "inline-dynamic-import": 1,
   "dead-underscore-function": 1,
+  "path-reresolved-read": 1,
 };
 
 // Drop matches suppressed by a file-level
@@ -632,6 +633,30 @@ test("dead-underscore-function -- every _helper is referenced", () => {
   }
   bad = _filterMarkers(bad, "dead-underscore-function");
   _report("no unused `_`-prefixed functions/consts in src/", bad);
+});
+
+// ---------------------------------------------------------------------------
+// (15) path-reresolved-read -- storage reads open an fd, never re-resolve a path
+// ---------------------------------------------------------------------------
+
+test("path-reresolved-read -- no path-based blob/sidecar read in src/", () => {
+  // reason: a stored file is read through a descriptor it opened and
+  // verified with fstat on that fd, never by handing a path to
+  // createReadStream / readFile a second time. A path passed to a read
+  // AFTER a separate stat / lstat check is re-resolved by the kernel when
+  // the read opens it, so a symlink or a different file swapped in between
+  // the check and the read is silently followed -- the time-of-check
+  // time-of-use class (CWE-367), and a symlink escape past the containment
+  // check. The FileHandle method forms (fh.createReadStream(), fh.readFile())
+  // read the already-open, already-verified descriptor and are the required
+  // shape; the free-function forms re-resolve the path. Anchored on the Node
+  // API names (a stable contract, like the timingSafeEqual / realpath
+  // guards), so it is rename-proof; the negative lookbehind keeps the method
+  // forms and identifier suffixes out.
+  const re = /(?<![.\w])(?:createReadStream|readFileSync|readFile)\s*\(/;
+  let bad = _scanLines(_srcFiles(), re, { prepare: _stripCommentsAndLiterals });
+  bad = _filterMarkers(bad, "path-reresolved-read");
+  _report("no path-based createReadStream/readFile in src/ (open an fd and read the handle -- CWE-367)", bad);
 });
 
 // ---------------------------------------------------------------------------
