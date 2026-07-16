@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { checksVerdict, collectAllPages, mergeArgs, reviewerSignalsReview, syncLockfileVersion, tagFromState, unresolvedThreads } from "../scripts/release.js";
+import { checksVerdict, collectAllPages, mergeArgs, reviewerSignalsReview, reviewTriggerForHead, syncLockfileVersion, tagFromState, unresolvedThreads } from "../scripts/release.js";
 
 // ---------------------------------------------------------------------------
 // checksVerdict -- CheckRun entries (status / conclusion)
@@ -573,4 +573,30 @@ test("collectAllPages: an unreadable page fails closed (throws)", () => {
 
 test("collectAllPages: a next page promised with no cursor fails closed (throws)", () => {
   assert.throws(() => collectAllPages(() => ({ nodes: [1], hasNextPage: true, endCursor: null })), /no cursor/);
+});
+
+// ---------------------------------------------------------------------------
+// reviewTriggerForHead -- recover a recorded trigger id ONLY for the exact head
+// it was recorded against. The head match is the safety property: a prior
+// head's trigger must never be revived to clear a head the reviewer has not
+// seen (which would reintroduce the stale-reaction bug the id-binding closed).
+// ---------------------------------------------------------------------------
+
+test("reviewTriggerForHead: recovers the id recorded for the current head", () => {
+  assert.equal(reviewTriggerForHead({ reviewTrigger: { head: RHEAD, id: TRIGGER_ID } }, RHEAD), TRIGGER_ID);
+});
+
+test("reviewTriggerForHead: does NOT recover a trigger recorded for a different head", () => {
+  // A direct push moved the head; the recorded (prior-head) trigger must not be
+  // reused, so the wait posts a fresh trigger for the new head instead.
+  const priorHead = "b2c3d4e5f60718293645546372819a0bcdef1234";
+  assert.equal(reviewTriggerForHead({ reviewTrigger: { head: priorHead, id: TRIGGER_ID } }, RHEAD), null);
+});
+
+test("reviewTriggerForHead: null on absent, malformed, or id-less records", () => {
+  assert.equal(reviewTriggerForHead(null, RHEAD), null);
+  assert.equal(reviewTriggerForHead({}, RHEAD), null);
+  assert.equal(reviewTriggerForHead({ reviewTrigger: null }, RHEAD), null);
+  assert.equal(reviewTriggerForHead({ reviewTrigger: { head: RHEAD } }, RHEAD), null);
+  assert.equal(reviewTriggerForHead("not-an-object", RHEAD), null);
 });

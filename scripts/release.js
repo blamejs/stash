@@ -227,6 +227,42 @@ function readReleaseState() {
   }
 }
 
+// patchReleaseState(patch) -- merge `patch` into the current state and write it
+// back, preserving the other bridged fields (the tag's version/mergeSha and the
+// review trigger live in the same file across separate invocations).
+function patchReleaseState(patch) {
+  const cur = readReleaseState() || {};
+  writeFileSync(releaseStatePath(), JSON.stringify(Object.assign({}, cur, patch)) + "\n");
+}
+
+// reviewTriggerForHead(state, headSha) -- pure: the id of the `@codex review`
+// comment a prior `push`/`push-fix`/nudge recorded for THIS head, or null. The
+// head match is the safety property: the id is reused only when it was recorded
+// for the exact current head, so a prior head's trigger is never revived to
+// clear a head the reviewer has not seen (a direct push changes the head, the
+// recorded head no longer matches, and the wait posts a fresh trigger). null
+// whenever the record is absent, malformed, or for a different head.
+export function reviewTriggerForHead(state, headSha) {
+  const rt = state && typeof state === "object" && state.reviewTrigger;
+  if (rt && typeof rt === "object" && rt.head === headSha && rt.id != null) {
+    return rt.id;
+  }
+  return null;
+}
+
+// recordReviewTrigger / recoverReviewTrigger -- persist and recall the trigger
+// id for a head across the push -> watch -> merge invocations, so an
+// already-present reaction clears the first poll instead of the wait posting a
+// duplicate trigger and stalling for the nudge delay (twice, since merge
+// repeats the wait).
+function recordReviewTrigger(headSha, triggerId) {
+  if (triggerId != null) patchReleaseState({ reviewTrigger: { head: headSha, id: triggerId } });
+}
+
+function recoverReviewTrigger(headSha) {
+  return reviewTriggerForHead(readReleaseState(), headSha);
+}
+
 // tagFromState(state) -- the { version, target } a signed tag must use when a
 // prior `watch` recorded them. Pins BOTH the version and the merge commit to
 // the release PR: a concurrent PR that bumps package.json or advances main
@@ -546,7 +582,11 @@ function waitForReviewOnHead(branch, prNum, headSha) {
   const budgetMs = 10 * 60 * 1000;
   let waited = 0;
   let nudged = false;
-  let triggerId = null;
+  // Recover the trigger id `push`/`push-fix` (or a prior watch) recorded for
+  // THIS head, so an already-present reaction clears the first poll instead of
+  // stalling for a duplicate nudge. Head-matched, so a prior head's trigger is
+  // never revived (reviewTriggerForHead).
+  let triggerId = recoverReviewTrigger(headSha);
   console.log("waiting for the reviewer to review PR #" + prNum + " head " +
     headSha.slice(0, 12) + " before the thread gate (up to 10m; it reviews a bit after CI)...");
   while (waited <= budgetMs) {
@@ -557,9 +597,9 @@ function waitForReviewOnHead(branch, prNum, headSha) {
     // Nudge ONCE, and remember the id of the trigger comment we post: a bot
     // thumbs-up on THAT comment (form 3) is a review of this head. Posted only
     // now -- after this head is confirmed the remote head -- so it can never be
-    // a prior head's trigger.
+    // a prior head's trigger. Recorded so the merge wait after watch reuses it.
     if (!nudged && waited >= 3 * stepMs) {
-      triggerId = requestReview(prNum);
+      triggerId = requestReviewForHead(prNum, headSha);
       nudged = true;
     }
     sleep(stepMs);
@@ -604,6 +644,15 @@ function requestReview(prNum) {
   if (rv.status !== 0) return null;
   const m = /#issuecomment-(\d+)/.exec((rv.stdout || "") + "\n" + (rv.stderr || ""));
   return m ? m[1] : null;
+}
+
+// requestReviewForHead(prNum, headSha) -- post the trigger AND record its id for
+// this head, so the next wait (and the merge wait after watch) recovers it
+// instead of posting a duplicate. Returns the id for the current wait to use.
+function requestReviewForHead(prNum, headSha) {
+  const id = requestReview(prNum);
+  recordReviewTrigger(headSha, id);
+  return id;
 }
 
 // syncLockfileVersion(lock, version) -- return the parsed package-lock.json
@@ -691,7 +740,8 @@ function cmdPush() {
     run("gh", ["pr", "create", "--title", title, "--body", body]);
   }
   const prNum = ghJson(["pr", "view", branch, "--json", "number"]).number;
-  requestReview(prNum);
+  const headSha = capture("git", ["rev-parse", "HEAD"]).stdout;
+  requestReviewForHead(prNum, headSha);
   ok("PR open, review requested -- next: release.js watch");
 }
 
@@ -712,7 +762,8 @@ function cmdPushFix() {
   verifyCommitSignature();
   run("git", ["push"]);
   const prNum = ghJson(["pr", "view", branch, "--json", "number"]).number;
-  requestReview(prNum);
+  const headSha = capture("git", ["rev-parse", "HEAD"]).stdout;
+  requestReviewForHead(prNum, headSha);
   ok("fix pushed as a new signed commit; review re-requested -- next: release.js watch");
 }
 
