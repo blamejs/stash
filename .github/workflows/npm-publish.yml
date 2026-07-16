@@ -205,7 +205,11 @@ jobs:
   publish-and-release:
     name: Create release + publish to npm
     needs: validate
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.validate.outputs.is_tag == 'true' && !inputs.dry_run }}
+    # Publishes on a v* tag push, or on an explicit dispatch with
+    # dry_run=false. The dispatch path verifies below that the commit the
+    # whole run built from is exactly what the version's pushed tag points
+    # at, so a dispatch can never publish bytes no tag vouches for.
+    if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.validate.outputs.is_tag == 'true') || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false) }}
     runs-on: ubuntu-latest
     environment: npm-publish
     permissions:
@@ -213,6 +217,32 @@ jobs:
       id-token: write    # OIDC token for npm --provenance
     timeout-minutes: 15
     steps:
+      - name: Verify the built commit is the version's tagged commit
+        # No checkout in this job -- the artifact hashes bind the bundle to
+        # github.sha, and this binds github.sha to the pushed tag. Tag
+        # pushes satisfy it trivially; the dispatch path is what it is for.
+        # ls-remote works repo-less; the ^{} row is the peeled commit of an
+        # annotated tag, with a fallback for a lightweight one.
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          REPO_URL: https://github.com/${{ github.repository }}
+          BUILT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAG_SHA=$(git ls-remote "$REPO_URL" "refs/tags/v${VERSION}^{}" | cut -f1)
+          if [ -z "$TAG_SHA" ]; then
+            TAG_SHA=$(git ls-remote "$REPO_URL" "refs/tags/v${VERSION}" | cut -f1)
+          fi
+          if [ -z "$TAG_SHA" ]; then
+            echo "::error::No pushed tag v${VERSION} -- push the signed tag before dispatching a publish."
+            exit 1
+          fi
+          if [ "$TAG_SHA" != "$BUILT_SHA" ]; then
+            echo "::error::This run built $BUILT_SHA but tag v${VERSION} points at $TAG_SHA."
+            exit 1
+          fi
+          echo "[tag-verify] built commit == v${VERSION} ($TAG_SHA)"
+
       - name: Set up Node 24.18.0 LTS + npm registry auth
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
