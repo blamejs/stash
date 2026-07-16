@@ -17,6 +17,7 @@
 !.semgrep/
 !.hadolint.yaml
 !.dockerignore
+!.clusterfuzzlite/
 
 # Build / dependencies
 node_modules/
