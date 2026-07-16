@@ -16,7 +16,10 @@
 //
 // Exit codes:
 //   0  changelog written / matches disk
-//   1  --check drift, or malformed release notes
+//   1  --check drift, malformed release notes, or an unrecognized entry
+//      in release-notes/ (only v<X>.<Y>.<Z>.json files may live there --
+//      a misnamed note would otherwise vanish from the CHANGELOG with
+//      the check still green)
 
 import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -37,13 +40,17 @@ const PREAMBLE =
 // in first-seen order.
 const SECTION_ORDER = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security", "Migration"];
 
+// Malformed input throws; the CLI entry point turns the throw into a
+// prefixed stderr line + exit 1, and importing consumers (tests) assert
+// on the throw directly.
 function fail(msg) {
-  process.stderr.write("[regen-changelog] " + msg + "\n");
-  process.exit(1);
+  throw new Error(msg);
 }
 
-function readNote(name) {
-  const filePath = join(NOTES_DIR, name);
+const NOTE_NAME_RE = /^v\d+\.\d+\.\d+\.json$/;
+
+function readNote(dir, name) {
+  const filePath = join(dir, name);
   let payload;
   try {
     payload = JSON.parse(readFileSync(filePath, "utf8"));
@@ -83,16 +90,23 @@ function compareVersionsDesc(a, b) {
   return 0;
 }
 
-function loadNotes() {
+// loadNotes(dir) -> parsed notes, newest version first. Every directory
+// entry MUST be a v<X>.<Y>.<Z>.json note: an entry the version filter
+// does not recognize is an error, never a skip -- a skipped note's
+// changes silently vanish from the CHANGELOG while --check stays green.
+export function loadNotes(dir = NOTES_DIR) {
   let entries;
   try {
-    entries = readdirSync(NOTES_DIR);
+    entries = readdirSync(dir);
   } catch (e) {
     fail("cannot read release-notes/: " + (e && e.message ? e.message : e));
   }
-  const notes = entries
-    .filter((name) => /^v\d+\.\d+\.\d+\.json$/.test(name))
-    .map(readNote);
+  const strays = entries.filter((name) => !NOTE_NAME_RE.test(name));
+  if (strays.length > 0) {
+    fail("release-notes/ contains unrecognized entries (only v<X>.<Y>.<Z>.json " +
+      "release notes may live here): " + strays.join(", "));
+  }
+  const notes = entries.map((name) => readNote(dir, name));
   if (notes.length === 0) fail("no release-notes/v<X>.<Y>.<Z>.json files found");
   notes.sort((a, b) => compareVersionsDesc(a.version, b.version));
   return notes;
@@ -143,7 +157,8 @@ function renderEntry(note) {
   return lines.join("\n") + "\n";
 }
 
-function render(notes) {
+// render(notes) -> the exact CHANGELOG.md bytes for the given notes.
+export function render(notes) {
   return PREAMBLE + "\n" + notes.map(renderEntry).join("\n");
 }
 
@@ -182,4 +197,11 @@ function main() {
     "release-notes/ (" + generated.length + " bytes)\n");
 }
 
-main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (e) {
+    process.stderr.write("[regen-changelog] " + (e && e.message ? e.message : e) + "\n");
+    process.exit(1);
+  }
+}

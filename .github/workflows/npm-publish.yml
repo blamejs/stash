@@ -438,6 +438,7 @@ jobs:
     needs: [validate, publish-and-release]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
