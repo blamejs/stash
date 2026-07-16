@@ -2,6 +2,47 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 0.1.4 — 2026-07-16
+
+The disk backend closes a family of filesystem-race and denial-of-service
+vectors: reads bind to a verified descriptor, the containment check moves to
+the moment of the write, and a planted named pipe can no longer hang a read.
+The memory backend copies caller-owned bytes, and the documentation site now
+ships as a hardened container alongside a continuous fuzzing harness over the
+store's untrusted-input surfaces.
+
+### Added
+
+- The documentation site ships as a stateless, hardened container (nonroot,
+  all capabilities dropped) with a single-container local deploy and a
+  production overlay that fronts it with automatic TLS; a runbook covers
+  both.
+- Continuous fuzzing of the store's untrusted-input surfaces -- the
+  capability-ref validator and the sidecar-metadata parser -- runs on every
+  pull request and on a schedule.
+
+### Fixed
+
+- DiskBackend reads a blob or sidecar through a descriptor whose identity is
+  verified against the name it was opened through, so a symlink or file
+  swapped in after the check can no longer redirect the read outside the
+  storage root (CWE-367). On platforms without O_NOFOLLOW the descriptor's
+  device and inode are checked against a no-follow lookup of the name,
+  closing the swap window there too.
+- A blob or sidecar replaced with a named pipe can no longer hang a read:
+  stored files open non-blocking, so a pipe with no writer is refused as
+  corruption instead of parking show, list, or apply forever (CWE-410).
+- DiskBackend re-checks storage-root containment at the moment it writes the
+  sidecar rather than before streaming the blob, so a directory swapped in
+  during a long write can no longer land metadata outside the root.
+- The sidecar's stored identity is compared to the addressed identity in
+  constant time, matching the timing-safe comparison the rest of the store
+  already uses (CWE-208).
+- MemoryBackend copies each caller-owned chunk it retains, so a caller that
+  reuses its buffer after yielding no longer corrupts the stored bytes.
+- A push whose sidecar write fails now cleans up the blob on every path,
+  including the final rename, leaving no orphaned bytes behind.
+
 ## 0.1.3 — 2026-07-16
 
 Every documented primitive now names the external standards it implements and
