@@ -24,6 +24,8 @@ import assert from "node:assert/strict";
 
 import { diffSnapshot, isClean } from "../scripts/check-api-snapshot.js";
 import { loadNotes, render } from "../scripts/regen-changelog.js";
+import * as engine from "../examples/wiki/lib/source-comment-block-validator.js";
+import * as parser from "../examples/wiki/lib/source-doc-parser.js";
 import { freshScratchDir } from "./_scratch.js";
 
 // ---------------------------------------------------------------------------
@@ -167,4 +169,17 @@ test("changelog: notes sort newest first", (t) => {
   });
   const notes = loadNotes(notesFixture(t, { "v0.1.1.json": second }));
   assert.deepEqual(notes.map((n) => n.version), ["0.1.1", "0.1.0"]);
+});
+
+// ---------------------------------------------------------------------------
+// source-comment-block validate() -- empty-parse floor
+// ---------------------------------------------------------------------------
+
+test("comment-blocks: an empty parse is a finding, not a pass", (t) => {
+  const dir = freshScratchDir("empty-lib");
+  mkdirSync(dir, { recursive: true });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const findings = engine.validate({ libDir: dir, parser, requireSpec: true });
+  assert.ok(findings.length >= 1, "zero findings on a tree with zero documented files is fail-open");
+  assert.match(findings[0].msg, /no documented source files/);
 });
