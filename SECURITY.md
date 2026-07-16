@@ -46,6 +46,18 @@ are especially valuable.
 Pre-1.0, only the latest published `0.x.y` receives fixes. See
 `LTS-CALENDAR.md` for the support policy that applies from 1.0.
 
+## Continuous fuzzing
+
+The store's untrusted-input surfaces -- hostile ref strings and the disk
+backend's sidecar bytes -- are fuzzed continuously with ClusterFuzzLite
+(jazzer.js): pull requests that touch `src/` get a short fuzzing burst
+against the changed code, and a scheduled batch run fuzzes the grown corpus
+daily. The targets treat a typed `StashError` as the correct fail-closed
+verdict on hostile input; anything else that escapes -- an untyped
+exception, a hang -- is reported as a crash. The harness lives in
+`.clusterfuzzlite/` (with a plain-node seed-corpus check at
+`node .clusterfuzzlite/local-smoke.js`) and never ships in the npm tarball.
+
 ## Hardening a deployment
 
 - **Run under the Node permission model.** The store is designed to run with
