@@ -49,7 +49,13 @@ jobs:
     # a tag-triggered workflow that restores an actions cache could replay a
     # cache entry a pull request poisoned, so the release build carries no
     # restorable cache surface at all.
-    container: node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
+    #
+    # Pinned to the linux/amd64 SINGLE-platform image manifest, not the
+    # multi-arch manifest list: a `container:` job cannot initialize from an
+    # image-index digest (the runner has no single platform to select), so a
+    # list digest fails the whole job at startup before any step runs. GitHub
+    # hosted runners are amd64, so the amd64 child manifest is the one to pin.
+    container: node:24-alpine@sha256:4ba75f835bb8802193e4c114572113d4b26f95f6f094f4b5229d2a77773e0afc
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
