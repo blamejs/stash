@@ -85,6 +85,30 @@ export function descriptorMatchesName(opened, named) {
     named.dev === opened.dev && named.ino === opened.ino;
 }
 
+// verifyDescriptorAgainstName(openedStat, path, damaged) -- the fallback swap
+// guard for platforms without O_NOFOLLOW (Windows), where the open cannot
+// refuse a symlink itself. A no-follow lstat of the name is cross-checked
+// against the open descriptor's fstat via descriptorMatchesName: a symlink
+// traversed at open, or a name swapped after it, is refused as corruption. A
+// name that vanished after the open no longer vouches for the descriptor, so
+// its absence becomes IntegrityError; any other lstat fault propagates. Lifted
+// out of the read path -- as descriptorMatchesName was -- so its branches are
+// pinned directly on every platform, not only where O_NOFOLLOW is absent.
+export async function verifyDescriptorAgainstName(openedStat, path, damaged) {
+  let named;
+  try {
+    named = await lstat(path);
+  } catch (err) {
+    // The name vanished or became unreadable after the open -- it no longer
+    // vouches for the descriptor, so refuse rather than serve an unverifiable
+    // handle.
+    throw _absent(err) ? new IntegrityError(damaged) : err;
+  }
+  if (!descriptorMatchesName(openedStat, named)) {
+    throw new IntegrityError(damaged);
+  }
+}
+
 /**
  * @primitive  stash.backends.DiskBackend
  * @signature  new DiskBackend(opts) -> DiskBackend
@@ -215,18 +239,7 @@ export class DiskBackend {
       const opened = await fh.stat();
       if (!opened.isFile()) throw new IntegrityError(damaged);
       if (SYMLINK_GUARD_NEEDED) {
-        let named;
-        try {
-          named = await lstat(path);
-        } catch (err) {
-          // The name vanished or became unreadable after the open -- it no
-          // longer vouches for the descriptor, so refuse rather than serve
-          // an unverifiable handle.
-          throw _absent(err) ? new IntegrityError(damaged) : err;
-        }
-        if (!descriptorMatchesName(opened, named)) {
-          throw new IntegrityError(damaged);
-        }
+        await verifyDescriptorAgainstName(opened, path, damaged);
       }
     } catch (err) {
       await fh.close();

@@ -146,6 +146,10 @@
         "descriptorMatchesName": {
           "kind": "function",
           "arity": 2
+        },
+        "verifyDescriptorAgainstName": {
+          "kind": "function",
+          "arity": 3
         }
       }
     }

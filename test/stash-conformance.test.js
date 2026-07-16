@@ -367,6 +367,53 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual(await stash.list({ includeExpired: true }), []); // dropped in passing, source disposed
     });
 
+    test("apply's expiry re-check tolerates an already-closed read source: still drops, no leak", async () => {
+      // The dispose helper guards a source that is null, not a stream, or
+      // already destroyed -- a backend can legitimately hand one back. Drive
+      // that branch: a lapsing entry whose read() returns an already-destroyed
+      // stream still drops and rejects, without re-destroying or hanging.
+      const inner = create();
+      const backend = {
+        write: (...a) => inner.write(...a),
+        stat: (...a) => inner.stat(...a),
+        remove: (...a) => inner.remove(...a),
+        list: (...a) => inner.list(...a),
+        read: async (id) => {
+          const e = await inner.stat(id);
+          while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2));
+          const s = await inner.read(id);
+          s.destroy(); // hand back an already-closed source
+          return s;
+        },
+      };
+      const stash = new Stash({ backend });
+      const ref = await stash.push("x", { ttl: 100 });
+      await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+      assert.deepEqual(await stash.list({ includeExpired: true }), []);
+    });
+
+    test("apply's expiry re-check disposes a source that errors on teardown, without hanging", async () => {
+      // The dispose helper resolves on the source's 'close' OR 'error' -- a
+      // teardown that errors must not leave apply hung. Drive the error arm: a
+      // lapsing entry whose read() returns a stream that errors when destroyed.
+      const inner = create();
+      const backend = {
+        write: (...a) => inner.write(...a),
+        stat: (...a) => inner.stat(...a),
+        remove: (...a) => inner.remove(...a),
+        list: (...a) => inner.list(...a),
+        read: async (id) => {
+          const e = await inner.stat(id);
+          while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2));
+          return new Readable({ read() {}, destroy(_err, cb) { cb(new Error("teardown boom")); } });
+        },
+      };
+      const stash = new Stash({ backend });
+      const ref = await stash.push("x", { ttl: 100 });
+      await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+      assert.deepEqual(await stash.list({ includeExpired: true }), []);
+    });
+
     test("a ttl whose expiresAt sum is not a safe integer is refused at push, storing nothing", async () => {
       const stash = new Stash({ backend: create() });
       await assert.rejects(stash.push("x", { ttl: Number.MAX_SAFE_INTEGER }), TypeError);
