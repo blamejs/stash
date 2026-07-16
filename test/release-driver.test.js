@@ -12,7 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { checksVerdict } from "../scripts/release.js";
+import { checksVerdict, reviewDecision } from "../scripts/release.js";
 
 // ---------------------------------------------------------------------------
 // checksVerdict -- CheckRun entries (status / conclusion)
@@ -145,4 +145,87 @@ test("checksVerdict: mixed shapes all green with one pending stays not-green", (
   assert.equal(v.green, false);
   assert.deepEqual(v.blocking, []);
   assert.equal(v.pending, 1);
+});
+
+// ---------------------------------------------------------------------------
+// reviewDecision -- reviewer verdict over reviews, inline review comments,
+// and issue comments for the PR head commit
+// ---------------------------------------------------------------------------
+
+const HEAD = "a1b2c3d4e5f60718293645546372819a0bcdef12";
+const OLD = "9999999888888877777776666666555555444444";
+const BOT = "codex-reviewer";
+
+test("reviewDecision: inline P1 anchored to the head commit blocks", () => {
+  const v = reviewDecision(HEAD, {
+    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "`" }],
+    inline: [{ author: BOT, body: "P1 Badge: import the symbol before use", commit: HEAD }],
+  });
+  assert.equal(v.state, "findings");
+});
+
+test("reviewDecision: inline P2 citing the head sha in its body blocks", () => {
+  const v = reviewDecision(HEAD, {
+    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "`" }],
+    inline: [{ author: BOT, body: "P2 finding on " + HEAD.slice(0, 7) }],
+  });
+  assert.equal(v.state, "findings");
+});
+
+test("reviewDecision: a later clean post never erases inline findings on the head", () => {
+  const v = reviewDecision(HEAD, {
+    comments: [{ author: BOT, body: "looks fine now, re: " + HEAD.slice(0, 7) }],
+    inline: [{ author: BOT, body: "P1 Badge: fail-open verdict", commit: HEAD }],
+  });
+  assert.equal(v.state, "findings");
+});
+
+test("reviewDecision: review citing the head with no findings is clean", () => {
+  const v = reviewDecision(HEAD, {
+    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "`" }],
+  });
+  assert.equal(v.state, "clean");
+});
+
+test("reviewDecision: stale inline finding on a previous commit does not block the new head", () => {
+  const v = reviewDecision(HEAD, {
+    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "`" }],
+    inline: [{ author: BOT, body: "P1 Badge: fixed since", commit: OLD }],
+  });
+  assert.equal(v.state, "clean");
+});
+
+test("reviewDecision: issue comment from the reviewer citing the head with a P1 blocks", () => {
+  const v = reviewDecision(HEAD, {
+    comments: [{ author: BOT, body: "P1 on " + HEAD.slice(0, 7) + ": verify path" }],
+  });
+  assert.equal(v.state, "findings");
+});
+
+test("reviewDecision: no surface citing the head stays pending", () => {
+  assert.equal(reviewDecision(HEAD, {}).state, "pending");
+  assert.equal(reviewDecision(HEAD, {
+    reviews: [{ author: BOT, body: "Reviewed commit: `" + OLD.slice(0, 10) + "`" }],
+  }).state, "pending");
+});
+
+test("reviewDecision: a non-reviewer post citing the head is not a verdict", () => {
+  const v = reviewDecision(HEAD, {
+    reviews: [{ author: "release-operator", body: "self-review of " + HEAD }],
+    comments: [{ author: "release-operator", body: "ship " + HEAD.slice(0, 7) }],
+  });
+  assert.equal(v.state, "pending");
+});
+
+test("reviewDecision: P3-only review citing the head is clean (advisory, not a gate)", () => {
+  const v = reviewDecision(HEAD, {
+    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "` P3 style nit" }],
+  });
+  assert.equal(v.state, "clean");
+});
+
+test("reviewDecision: a missing or truncated head sha throws instead of matching everything", () => {
+  assert.throws(() => reviewDecision("", { reviews: [{ author: BOT, body: "anything" }] }), TypeError);
+  assert.throws(() => reviewDecision(undefined, {}), TypeError);
+  assert.throws(() => reviewDecision("abc12", {}), TypeError);
 });

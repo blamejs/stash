@@ -6,7 +6,7 @@
 // and exits with a code that is safe to script against. There are no
 // confirmation prompts: the gates are the confirmation.
 //
-// Implemented today (local repository, no remote):
+// Local subcommands (no remote required):
 //   node scripts/release.js status    # version, git cleanliness, gate freshness
 //   node scripts/release.js regen     # regen CHANGELOG.md + api-snapshot.json
 //   node scripts/release.js smoke     # the full smoke pipeline
@@ -14,10 +14,10 @@
 //   node scripts/release.js tag       # annotated signed tag v<version>
 //   node scripts/release.js help      # this banner
 //
-// Remote-dependent phases (prepare, push, watch, merge, publish) exist as
-// fail-loud placeholders: they refuse with a one-line message until a
-// GitHub remote is configured, the same pattern the library applies to
-// spec options whose milestone has not shipped.
+// Remote-dependent phases (prepare, push, push-fix, watch, merge,
+// publish) refuse with a one-line message until a GitHub origin remote is
+// configured; with one, they drive the PR flow end to end, gated on the
+// required checks and the reviewer verdict for the PR's head commit.
 //
 // Pre-conditions:
 //   - `commit` requires release-notes/v<package.json version>.json; the
@@ -69,12 +69,26 @@ function readVersion() {
   return JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
 }
 
+// A failing git invocation must never read as a clean tree -- an empty
+// stdout from a git that could not run is not "nothing to report".
 function gitClean() {
-  return capture("git", ["status", "--porcelain"]).stdout === "";
+  const rv = capture("git", ["status", "--porcelain"]);
+  if (rv.status !== 0) {
+    throw new Error("git status --porcelain failed (status " + rv.status + ")" +
+      (rv.stderr ? ": " + rv.stderr : ""));
+  }
+  return rv.stdout === "";
 }
 
-function gitBranch() {
-  return capture("git", ["rev-parse", "--abbrev-ref", "HEAD"]).stdout;
+// The ONE definition of "the checked-out branch": empty on a detached
+// HEAD, throwing when git itself fails rather than reading as detached.
+function currentBranch() {
+  const rv = capture("git", ["branch", "--show-current"]);
+  if (rv.status !== 0) {
+    throw new Error("git branch --show-current failed (status " + rv.status + ")" +
+      (rv.stderr ? ": " + rv.stderr : ""));
+  }
+  return rv.stdout;
 }
 
 function releaseNotesPath(version) {
@@ -132,7 +146,7 @@ function verifyCommitSignature() {
 function cmdStatus() {
   section("status");
   console.log("package version:  " + readVersion());
-  console.log("branch:           " + gitBranch());
+  console.log("branch:           " + (currentBranch() || "(detached HEAD)"));
   console.log("clean:            " + gitClean());
   console.log("release-notes:    " +
     (readNotesPresent(readVersion()) ? "present" : "missing (release-notes/v" + readVersion() + ".json)"));
@@ -235,10 +249,6 @@ function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function currentBranch() {
-  return capture("git", ["branch", "--show-current"]).stdout;
-}
-
 function ghJson(args) {
   const rv = capture("gh", args);
   if (!rv.stdout) throw new Error("gh " + args.join(" ") + " returned nothing");
@@ -247,24 +257,75 @@ function ghJson(args) {
 
 // ---- The review blocker -----------------------------------------------------
 // Merging is gated on BOTH the required checks and a reviewer verdict for
-// the PR's CURRENT head commit. The reviewer posts issue comments citing
-// the head SHA; a verdict that names findings blocks the merge until a
-// root fix lands via push-fix and a fresh verdict clears it. Overriding
-// requires the explicit flag -- loudly.
+// the PR's CURRENT head commit. The reviewer's verdict spans three
+// surfaces: submitted PR reviews (the body cites the reviewed head
+// commit), per-file inline review comments (each finding carries its
+// P1/P2 severity and anchors to the commit it was raised on), and plain
+// issue comments. All three gate: a P1/P2 finding on the head blocks the
+// merge until a root fix lands via push-fix and a fresh verdict clears
+// it. Overriding requires the explicit flag -- loudly.
 const REVIEW_BOT_PATTERN = /codex/i;
 
-function reviewVerdict(branch, headSha) {
-  const comments = ghJson(["pr", "view", branch, "--json", "comments",
-    "--jq", "[.comments[] | {author: .author.login, body: .body}]"]);
+// reviewDecision(headSha, surfaces) -- pure, fail-closed reviewer verdict
+// for one head commit. surfaces:
+//   reviews  -- submitted PR reviews        [{ author, body }]
+//   inline   -- per-file review comments    [{ author, body, commit }]
+//   comments -- issue comments              [{ author, body }]
+// findings: any reviewer P1/P2 on the head (an inline comment anchored to
+// it or citing it, or a review/comment body citing it). A finding on the
+// head is permanent for that head -- no later post erases it; only a new
+// head (push-fix) starts a fresh verdict. clean: a reviewer post cites the
+// head and no such finding exists; P3-and-lower findings are advisory and
+// do not gate. Anything else is pending -- absence of a verdict is never
+// a pass.
+export function reviewDecision(headSha, surfaces) {
+  if (typeof headSha !== "string" || headSha.length < 7) {
+    throw new TypeError("reviewDecision requires the head commit sha");
+  }
+  const s = surfaces || {};
   const short = headSha.slice(0, 7);
-  const fromBot = comments.filter(function (c) {
-    return REVIEW_BOT_PATTERN.test(c.author || "") &&
-      (c.body.indexOf(headSha) !== -1 || c.body.indexOf(short) !== -1);
+  const fromBot = function (author) { return REVIEW_BOT_PATTERN.test(author || ""); };
+  const cites = function (text) {
+    return typeof text === "string" &&
+      (text.indexOf(headSha) !== -1 || text.indexOf(short) !== -1);
+  };
+  const hasFinding = function (text) { return /\bP[12]\b/.test(text || ""); };
+  const inlineOnHead = (s.inline || []).filter(function (c) {
+    return fromBot(c.author) && (c.commit === headSha || cites(c.body));
   });
-  if (fromBot.length === 0) return { state: "pending" };
-  const latest = fromBot[fromBot.length - 1];
-  if (/\bP[12]\b/.test(latest.body)) return { state: "findings", body: latest.body };
+  const postsOnHead = (s.reviews || []).concat(s.comments || []).filter(function (p) {
+    return fromBot(p.author) && cites(p.body);
+  });
+  if (inlineOnHead.some(function (c) { return hasFinding(c.body); }) ||
+      postsOnHead.some(function (p) { return hasFinding(p.body); })) {
+    return { state: "findings" };
+  }
+  if (postsOnHead.length === 0) return { state: "pending" };
   return { state: "clean" };
+}
+
+function reviewVerdict(branch, headSha) {
+  const pr = ghJson(["pr", "view", branch, "--json", "number,reviews,comments"]);
+  // Inline review comments live on the pulls API, not in `pr view`;
+  // --paginate + --slurp yields an array of pages.
+  const pages = ghJson(["api", "--paginate", "--slurp",
+    "repos/{owner}/{repo}/pulls/" + pr.number + "/comments"]);
+  const inline = [];
+  for (const page of pages) {
+    for (const c of page) {
+      inline.push({ author: c.user && c.user.login, body: c.body, commit: c.commit_id });
+    }
+  }
+  const posts = function (list) {
+    return (list || []).map(function (p) {
+      return { author: p.author && p.author.login, body: p.body };
+    });
+  };
+  return reviewDecision(headSha, {
+    reviews: posts(pr.reviews),
+    comments: posts(pr.comments),
+    inline,
+  });
 }
 
 function requestReview(branch) {
@@ -394,9 +455,13 @@ function cmdWatch() {
   const skipReview = process.argv.indexOf("--no-review") !== -1;
   if (skipReview) console.log("!! review gate SKIPPED by explicit --no-review");
   let reviewNudged = false;
+  // The post-merge cleanup below is reachable ONLY through merged=true: a
+  // watch that exhausts its polls throws, so it can never sync main and
+  // delete a branch whose PR never merged.
+  let merged = false;
   for (let i = 0; i < 90; i++) {
     const pr = ghJson(["pr", "view", branch, "--json", "state,headRefOid,statusCheckRollup"]);
-    if (pr.state === "MERGED") break;
+    if (pr.state === "MERGED") { merged = true; break; }
     if (pr.state !== "OPEN") throw new Error("PR is " + pr.state);
     const checks = checksVerdict(pr.statusCheckRollup);
     if (checks.blocking.length > 0) {
@@ -421,12 +486,15 @@ function cmdWatch() {
     }
     if (checksDone && reviewDone) {
       run("gh", ["pr", "merge", branch, "--squash"]);
+      merged = true;
       break;
     }
     console.log("  checks " + (checksDone ? "green" : "running") + ", review " +
       (skipReview ? "skipped" : (reviewDone ? "clean" : "pending")) + " (" + (i + 1) + ")...");
     sleep(20000);
-    if (i === 89) throw new Error("watch timed out -- if no reviewer is installed on this repo, rerun with --no-review (explicit, logged)");
+  }
+  if (!merged) {
+    throw new Error("watch timed out -- if no reviewer is installed on this repo, rerun with --no-review (explicit, logged)");
   }
   run("git", ["checkout", "main"]);
   run("git", ["pull", "--ff-only"]);
@@ -454,6 +522,10 @@ function cmdPublish() {
   if (!onRemote) run("git", ["push", "origin", tag]);
   const tagSha = capture("git", ["rev-parse", tag + "^{commit}"]).stdout;
   let runId = null;
+  // The registry verification below is reachable ONLY through a run that
+  // concluded success: an exhausted poll loop throws instead of falling
+  // through.
+  let concluded = false;
   for (let i = 0; i < 60; i++) {
     if (runId === null) {
       const runs = ghJson(["run", "list", "--workflow", "npm-publish.yml", "--limit", "5",
@@ -467,13 +539,14 @@ function cmdPublish() {
         if (st.conclusion !== "success") {
           throw new Error("publish run " + runId + " concluded " + st.conclusion + " -- read its log, fix at the root, cut the next patch");
         }
+        concluded = true;
         break;
       }
     }
     console.log("  publish run " + (runId === null ? "not visible yet" : runId + " in progress") + " (" + (i + 1) + ")...");
     sleep(20000);
-    if (i === 59) throw new Error("publish watch timed out");
   }
+  if (!concluded) throw new Error("publish watch timed out");
   const served = capture("npm", ["view", "@blamejs/stash@" + version, "version"]).stdout;
   if (served !== version) {
     throw new Error("registry serves '" + served + "' for " + version + " -- verify manually before trusting the release");
