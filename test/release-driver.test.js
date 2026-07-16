@@ -232,6 +232,58 @@ test("reviewDecision: a missing or truncated head sha throws instead of matching
   assert.throws(() => reviewDecision("abc12", {}), TypeError);
 });
 
+test("reviewDecision: inline P0 anchored to the head commit blocks (highest severity)", () => {
+  const v = reviewDecision(HEAD, {
+    reviews: [{ author: BOT, body: "Reviewed commit: `" + HEAD.slice(0, 10) + "`" }],
+    inline: [{ author: BOT, body: "P0 Badge: this must never merge", commit: HEAD }],
+  });
+  assert.equal(v.state, "findings");
+});
+
+test("reviewDecision: an issue comment citing the head with a P0 blocks", () => {
+  const v = reviewDecision(HEAD, {
+    comments: [{ author: BOT, body: "P0 on `" + HEAD.slice(0, 10) + "`: release blocker" }],
+  });
+  assert.equal(v.state, "findings");
+});
+
+// The merge is requested inside the poll loop, but success is claimed only
+// by an observed state === "MERGED" at the top of the loop: `gh pr merge`
+// on a merge-queue base branch enqueues and returns without merging, so
+// treating the call as immediate success would sync a stale main and tag a
+// pre-merge commit. This pins that control-flow contract at the source.
+test("cmdWatch claims merged only from an observed MERGED state, never from the merge call", () => {
+  const rawSrc = readFileSync(new URL("../scripts/release.js", import.meta.url), "utf8");
+  // Strip line and block comments so prose mentioning the mechanism cannot
+  // satisfy or trip the structural assertions -- only real code counts.
+  const src = rawSrc
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  const start = src.indexOf("function cmdWatch");
+  assert.ok(start !== -1, "cmdWatch must exist");
+  const end = src.indexOf("\nfunction ", start + 1);
+  const body = src.slice(start, end === -1 ? undefined : end);
+
+  // Exactly one `merged = true`, and it sits in the state === "MERGED" arm.
+  const assigns = body.match(/merged\s*=\s*true/g) || [];
+  assert.equal(assigns.length, 1, "cmdWatch must set merged=true in exactly one place");
+  const mergedCheck = body.indexOf('state === "MERGED"');
+  const assignAt = body.indexOf("merged = true");
+  assert.ok(mergedCheck !== -1 && assignAt !== -1);
+  assert.ok(assignAt - mergedCheck > 0 && assignAt - mergedCheck < 80,
+    "merged=true must be set by the observed MERGED state check, not elsewhere");
+
+  // The merge call must NOT be immediately followed by success/cleanup: no
+  // `merged = true` or `break` in the block that fires the merge.
+  const mergeCall = body.indexOf("mergeArgs(branch");
+  assert.ok(mergeCall !== -1, "cmdWatch must call gh with mergeArgs");
+  const afterMerge = body.slice(mergeCall, mergeCall + 220);
+  assert.ok(!/merged\s*=\s*true/.test(afterMerge),
+    "the merge call must not claim success -- a queued merge lands asynchronously");
+  assert.ok(!/\bbreak\b/.test(afterMerge),
+    "the merge call must not break out of the poll loop before observing MERGED");
+});
+
 test("reviewDecision: an author merely containing the reviewer name is not the reviewer", () => {
   for (const spoof of ["codexfan", "my-codex-mirror[bot]", "Codex"]) {
     const v = reviewDecision(HEAD, {

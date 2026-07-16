@@ -312,7 +312,10 @@ export function reviewDecision(headSha, surfaces) {
     return typeof text === "string" &&
       (text.indexOf(headSha) !== -1 || text.indexOf(short) !== -1);
   };
-  const hasFinding = function (text) { return /\bP[12]\b/.test(text || ""); };
+  // P0 is the highest-severity finding format; P1/P2 gate as well. P3 and
+  // lower are advisory. Match the whole blocking band, not a subset -- a
+  // missed severity is a fail-open verdict that merges an unfixed finding.
+  const hasFinding = function (text) { return /\bP[0-2]\b/.test(text || ""); };
   const inlineOnHead = (s.inline || []).filter(function (c) {
     return fromBot(c.author) && (c.commit === headSha || cites(c.body));
   });
@@ -512,9 +515,16 @@ function cmdWatch() {
       }
     }
     if (checksDone && reviewDone) {
+      // `gh pr merge` does NOT guarantee an immediate merge: on a base
+      // branch with a merge queue it ADDS the PR to the queue and returns
+      // success, leaving state OPEN until the queue lands it. Treating that
+      // as merged would sync a stale main and tag a pre-merge commit. Fire
+      // the merge, then let the loop keep polling -- only an observed
+      // state === "MERGED" (the top of this loop) sets merged=true.
       run("gh", mergeArgs(branch, pr.headRefOid));
-      merged = true;
-      break;
+      console.log("  merge requested; waiting for state MERGED (queued merges land asynchronously)...");
+      sleep(20000);
+      continue;
     }
     console.log("  checks " + (checksDone ? "green" : "running") + ", review " +
       (skipReview ? "skipped" : (reviewDone ? "clean" : "pending")) + " (" + (i + 1) + ")...");
