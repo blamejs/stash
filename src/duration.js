@@ -41,7 +41,14 @@ export function parse(value, label = "duration") {
     if (match === null) {
       throw new TypeError(label + ": expected a duration like '30m', '24h', or '7d'");
     }
-    return Number(match[1]) * UNIT_MS[match[2]];
+    const ms = Number(match[1]) * UNIT_MS[match[2]];
+    // The number path demands a finite value; the computed path holds the
+    // stronger exact-integer bound -- a count that overflows to Infinity or
+    // sheds precision would silently change the configured terms.
+    if (!Number.isSafeInteger(ms)) {
+      throw new TypeError(label + ": duration overflows the exact millisecond range");
+    }
+    return ms;
   }
   throw new TypeError(label + ": expected a duration string, a number of milliseconds, or null");
 }

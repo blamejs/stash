@@ -7,6 +7,7 @@
 import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  appendFileSync,
   constants,
   existsSync,
   lstatSync,
@@ -16,6 +17,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { open } from "node:fs/promises";
@@ -138,6 +140,30 @@ suite("disk: layout and atomicity", () => {
     await assert.rejects(stash.apply(orphan), RefNotFound);
   });
 
+  // Rot on the stored blob file itself -- every shape must die as a typed
+  // stream verdict, never as silently wrong bytes.
+  const BLOB_CORRUPTIONS = [
+    ["bit-flipped", (p) => {
+      const bytes = readFileSync(p);
+      bytes[0] ^= 0x01;
+      writeFileSync(p, bytes);
+    }],
+    ["truncated", (p) => truncateSync(p, 3)],
+    ["extended", (p) => appendFileSync(p, "xx")],
+  ];
+
+  for (const [name, corrupt] of BLOB_CORRUPTIONS) {
+    test("a " + name + " blob file errors the apply stream with IntegrityError", async () => {
+      const { root, stash } = freshStash();
+      const ref = await stash.push("victim bytes for corruption");
+      corrupt(join(root, "blobs", ref));
+      await assert.rejects(
+        drain(await stash.apply(ref)),
+        (err) => err instanceof IntegrityError && err.code === "EINTEGRITY"
+      );
+    });
+  }
+
   test("a sidecar without its blob is corruption, not silence", async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("half entry");
@@ -175,6 +201,39 @@ suite("disk: layout and atomicity", () => {
       TypeError
     );
     assert.deepEqual(readdirSync(join(root, "blobs")), []);
+  });
+
+  test("a push whose blob rename cannot land cleans up its tmp and rejects", async () => {
+    // The source blocks the final rename by squatting a directory at the
+    // blob's destination (any EPERM/EISDIR at rename lands here -- an AV
+    // hold or a planted obstacle behaves the same). The push must reject
+    // AND remove the .tmp partial: a failed push leaves nothing behind.
+    const { root, stash } = freshStash();
+    async function* saboteur() {
+      yield Buffer.from("first");
+      const tmp = readdirSync(join(root, "blobs")).find((n) => n.endsWith(".tmp"));
+      mkdirSync(join(root, "blobs", tmp.slice(0, -".tmp".length)));
+      yield Buffer.from("second");
+    }
+    await assert.rejects(stash.push(saboteur()));
+    assert.equal(readdirSync(join(root, "blobs")).some((n) => n.endsWith(".tmp")), false);
+    assert.deepEqual(readdirSync(join(root, "meta")), []);
+    assert.deepEqual(await stash.list(), []);
+  });
+
+  test("a push whose sidecar rename cannot land cleans up blob and sidecar tmp and rejects", async () => {
+    const { root, stash } = freshStash();
+    async function* saboteur() {
+      yield Buffer.from("first");
+      const tmp = readdirSync(join(root, "blobs")).find((n) => n.endsWith(".tmp"));
+      mkdirSync(join(root, "meta", tmp.slice(0, -".tmp".length) + ".json"));
+      yield Buffer.from("second");
+    }
+    await assert.rejects(stash.push(saboteur()));
+    assert.equal(readdirSync(join(root, "meta")).some((n) => n.endsWith(".tmp")), false);
+    assert.deepEqual(readdirSync(join(root, "blobs")), []);
+    // the planted obstacle itself still reads as damage -- loud, not lossy
+    await assert.rejects(stash.list(), IntegrityError);
   });
 
   test("a sidecar write that cannot land removes the blob and rethrows", async () => {

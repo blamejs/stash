@@ -15,7 +15,7 @@ import { join, resolve } from "node:path";
 import { C } from "../constants.js";
 import { assertShape } from "../entry.js";
 import { IntegrityError, InvalidRef, RefNotFound } from "../errors.js";
-import { assertValid, isValid } from "../ref.js";
+import { assertValid, constantTimeEqual, isValid } from "../ref.js";
 import { options } from "../validate.js";
 
 const SUBDIRS = ["blobs", "meta", "claims", "tombstones"];
@@ -235,31 +235,35 @@ export class DiskBackend {
     return fh;
   }
 
+  // Write bytes to <name>.tmp, fsync, rename into place. ANY failure after
+  // the handle opens -- a write/sync fault or a rename that cannot land
+  // (an obstacle at the destination, a directory swapped away) -- removes
+  // the tmp before rethrowing: a rejected write leaves no partial behind.
   async #writeAtomic(dir, name, bytes) {
     const tmpPath = join(dir, name + ".tmp");
     const finalPath = join(dir, name);
     const fh = await open(tmpPath, "wx", FILE_MODE);
     try {
-      await fh.write(bytes);
-      await fh.sync();
+      try {
+        await fh.write(bytes);
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+      await rename(tmpPath, finalPath);
     } catch (err) {
-      // coverage residual: this arm needs a write/sync fault on an already
-      // open descriptor (disk full, EIO) -- reachable only under fault
-      // injection; the cleanup contract it shares with the blob path is
-      // pinned by the failed-push vectors.
-      await fh.close();
       await rm(tmpPath, { force: true });
       throw err;
     }
-    await fh.close();
-    await rename(tmpPath, finalPath);
     return finalPath;
   }
 
   // write(id, source, entry) -> Entry. Streams chunks to blobs/<id>.tmp
   // computing size and digest as they pass, fsyncs, renames into place,
   // THEN writes the sidecar -- so a crash at any point leaves either
-  // nothing or an invisible blob orphan, never a served half-entry.
+  // nothing or an invisible blob orphan, never a served half-entry. Any
+  // REJECTION (a source error, a sync fault, a rename that cannot land)
+  // removes the tmp partial: a failed push leaves nothing behind.
   //
   // A directory's containment is re-asserted immediately before the write
   // that lands in it, never once at the top: the blob stream runs for as
@@ -280,20 +284,22 @@ export class DiskBackend {
     let size = 0;
     const fh = await open(tmpPath, "wx", FILE_MODE);
     try {
-      for await (const chunk of source) {
-        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        hash.update(buf);
-        size += buf.length;
-        await fh.write(buf);
+      try {
+        for await (const chunk of source) {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          hash.update(buf);
+          size += buf.length;
+          await fh.write(buf);
+        }
+        await fh.sync();
+      } finally {
+        await fh.close();
       }
-      await fh.sync();
+      await rename(tmpPath, blobPath);
     } catch (err) {
-      await fh.close();
       await rm(tmpPath, { force: true });
       throw err;
     }
-    await fh.close();
-    await rename(tmpPath, blobPath);
 
     const stored = structuredClone(entry);
     stored.size = size;
@@ -375,7 +381,9 @@ export class DiskBackend {
         throw new IntegrityError("sidecar is not valid JSON");
       }
       assertShape(parsed, IntegrityError);
-      if (parsed.id !== id) throw new IntegrityError("sidecar identity mismatch");
+      // The sidecar's stored id must equal the addressed id, compared in
+      // constant time -- the same timing-safe path refs and digests take.
+      if (!constantTimeEqual(parsed.id, id)) throw new IntegrityError("sidecar identity mismatch");
       return parsed;
     } finally {
       await fh.close();

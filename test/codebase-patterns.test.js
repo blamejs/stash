@@ -196,6 +196,7 @@ const VALID_ALLOW_CLASSES = {
   "inline-dynamic-import": 1,
   "dead-underscore-function": 1,
   "path-reresolved-read": 1,
+  "constant-time-compare-short-circuited": 1,
   "wiki-port-cross-artifact-drift": 1,
 };
 
@@ -453,6 +454,59 @@ test("fail-open-verify -- no catch returns a positive verdict", () => {
   }
   bad = _filterMarkers(bad, "fail-open-verify");
   _report("no fail-open verify shape in src/ (a catch that reports success)", bad);
+});
+
+// ---------------------------------------------------------------------------
+// (7a) constant-time-compare-short-circuited -- timing side-channel via &&/||
+// ---------------------------------------------------------------------------
+
+test("constant-time-compare-short-circuited -- no CT compare is short-circuited by &&/||", () => {
+  // reason: refs (capabilities) and digests both route their equality
+  // through the single timing-safe compare (ref.constantTimeEqual, which
+  // wraps node:crypto timingSafeEqual). Two such compares joined by && / ||
+  // short-circuit the second: when the first is false the second never
+  // runs, reopening the exact timing side-channel the compare exists to
+  // close. Evaluate each into a variable, THEN combine.
+  //
+  // Two passes, file-scoped. PASS 1 derives the constant-time token set --
+  // the frozen timingSafeEqual, the guard's exported constantTimeEqual, and
+  // the name of any local function whose body wraps either (so a renamed
+  // `_ctEq`-style delegate is recovered WITHOUT hardcoding its name). PASS 2
+  // fires on two CT-token CALLS joined by &&/|| within one expression,
+  // bounded away from ; { } so a wrapper DEFINITION and two separate
+  // statements combining already-evaluated vars do not match.
+  const bad = [];
+  for (const file of _srcFiles()) {
+    const rel = _relPath(file);
+    const raw = _read(file);
+    const stripped = _stripCommentsAndLiterals(raw);
+    if (!/\btimingSafeEqual\b/.test(stripped) && !/\bconstantTimeEqual\b/.test(stripped)) continue;
+
+    const toks = { timingSafeEqual: true, constantTimeEqual: true };
+    const wrapRe = /(?:function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)|(?:var|const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\s*)?\([^)]*\)\s*=>?)\s*\{[^{}]*(?:timingSafeEqual|constantTimeEqual)/g;
+    let wm;
+    while ((wm = wrapRe.exec(stripped))) { toks[wm[1] || wm[2]] = true; }
+    const alt = Object.keys(toks)
+      .sort((a, b) => b.length - a.length)
+      .map((t) => t.replace(/[$]/g, "\\$&"))
+      .join("|");
+    const pairRe = new RegExp(
+      "\\b(?:" + alt + ")\\s*\\([^;{}]*?\\)\\s*(?:&&|\\|\\|)\\s*[^;{}]*?\\b(?:" + alt + ")\\s*\\("
+    );
+
+    const lines = _lines(stripped);
+    for (let i = 0; i < lines.length; i++) {
+      if (pairRe.test(lines[i])) {
+        bad.push({
+          file: rel,
+          line: i + 1,
+          content: "two constant-time compares joined by &&/|| short-circuit the second (timing side-channel) -- evaluate each into a var, then combine: " + lines[i].trim().slice(0, 80),
+        });
+      }
+    }
+  }
+  const filtered = _filterMarkers(bad, "constant-time-compare-short-circuited");
+  _report("no constant-time compare is short-circuited by &&/|| in src/", filtered);
 });
 
 // ---------------------------------------------------------------------------

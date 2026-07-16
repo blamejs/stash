@@ -27,3 +27,14 @@ test("rejects malformed durations at config time", () => {
 test("the label names the offending option", () => {
   assert.throws(() => parse("nope", "sweepInterval"), /sweepInterval/);
 });
+
+test("a duration whose milliseconds overflow exact range is refused", () => {
+  // The number path demands a finite value; the string path computes
+  // count * unit and must hold the same bound. An overflowing count that
+  // lands on Infinity or sheds precision would silently change the
+  // operator's terms instead of failing at boot.
+  assert.throws(() => parse("9".repeat(400) + "s"), TypeError);
+  assert.throws(() => parse("9007199254740993s"), TypeError);
+  // the largest exact product still parses
+  assert.equal(parse("104249991d"), 104249991 * 24 * 60 * 60 * 1000);
+});
