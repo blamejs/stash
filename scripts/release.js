@@ -17,7 +17,8 @@
 // Remote-dependent phases (prepare, push, push-fix, watch, merge,
 // publish) refuse with a one-line message until a GitHub origin remote is
 // configured; with one, they drive the PR flow end to end, gated on the
-// required checks and the reviewer verdict for the PR's head commit.
+// required checks and GitHub's authoritative review-thread resolution
+// state for the PR's head commit.
 //
 // Pre-conditions:
 //   - `commit` requires release-notes/v<package.json version>.json; the
@@ -226,6 +227,42 @@ function readReleaseState() {
   }
 }
 
+// patchReleaseState(patch) -- merge `patch` into the current state and write it
+// back, preserving the other bridged fields (the tag's version/mergeSha and the
+// review trigger live in the same file across separate invocations).
+function patchReleaseState(patch) {
+  const cur = readReleaseState() || {};
+  writeFileSync(releaseStatePath(), JSON.stringify(Object.assign({}, cur, patch)) + "\n");
+}
+
+// reviewTriggerForHead(state, headSha) -- pure: the id of the `@codex review`
+// comment a prior `push`/`push-fix`/nudge recorded for THIS head, or null. The
+// head match is the safety property: the id is reused only when it was recorded
+// for the exact current head, so a prior head's trigger is never revived to
+// clear a head the reviewer has not seen (a direct push changes the head, the
+// recorded head no longer matches, and the wait posts a fresh trigger). null
+// whenever the record is absent, malformed, or for a different head.
+export function reviewTriggerForHead(state, headSha) {
+  const rt = state && typeof state === "object" && state.reviewTrigger;
+  if (rt && typeof rt === "object" && rt.head === headSha && rt.id != null) {
+    return rt.id;
+  }
+  return null;
+}
+
+// recordReviewTrigger / recoverReviewTrigger -- persist and recall the trigger
+// id for a head across the push -> watch -> merge invocations, so an
+// already-present reaction clears the first poll instead of the wait posting a
+// duplicate trigger and stalling for the nudge delay (twice, since merge
+// repeats the wait).
+function recordReviewTrigger(headSha, triggerId) {
+  if (triggerId != null) patchReleaseState({ reviewTrigger: { head: headSha, id: triggerId } });
+}
+
+function recoverReviewTrigger(headSha) {
+  return reviewTriggerForHead(readReleaseState(), headSha);
+}
+
 // tagFromState(state) -- the { version, target } a signed tag must use when a
 // prior `watch` recorded them. Pins BOTH the version and the merge commit to
 // the release PR: a concurrent PR that bumps package.json or advances main
@@ -298,33 +335,72 @@ function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+// Parse a gh JSON payload, failing closed: a non-zero exit or empty stdout
+// throws rather than degrading to a gate-passing empty value. An unreadable
+// review/thread/run state is not an empty one -- a transient gh failure must
+// never merge or publish past a live finding.
 function ghJson(args) {
   const rv = capture("gh", args);
+  if (rv.status !== 0) {
+    throw new Error("gh " + args.join(" ") + " failed (exit " + rv.status + ")" +
+      (rv.stderr ? ": " + rv.stderr : "") + " -- an unreadable result is not an empty one");
+  }
   if (!rv.stdout) throw new Error("gh " + args.join(" ") + " returned nothing");
   return JSON.parse(rv.stdout);
 }
 
-// ---- The review blocker -----------------------------------------------------
-// Merging is gated on BOTH the required checks and a reviewer verdict for
-// the PR's CURRENT head commit. The reviewer's verdict spans three
-// surfaces: submitted PR reviews (the body cites the reviewed head
-// commit), per-file inline review comments (each finding carries its
-// P1/P2 severity and anchors to the commit it was raised on), and plain
-// issue comments. All three gate: a P1/P2 finding on the head blocks the
-// merge until a root fix lands via push-fix and a fresh verdict clears
-// it. Overriding requires the explicit flag -- loudly.
+// ---- The review gate --------------------------------------------------------
+// Merging is gated on BOTH the required checks and GitHub's authoritative
+// review-thread resolution state for the PR's head -- the exact signal the
+// main-protection ruleset's required_review_thread_resolution enforces.
+//
+// Why the thread state, not an inline P1/P2 severity badge: GitHub
+// RE-ANCHORS an inline review comment's commit_id to the branch's CURRENT
+// head every time the head moves, so a finding that has ALREADY been fixed
+// and pushed still reports commit_id === head. A gate keyed on that mutable
+// id reads a fixed finding as "still on the head" and blocks the merge
+// forever. A review thread's isResolved flag, by contrast, flips only when
+// the thread is resolved through the API: an open thread blocks, a resolved
+// one clears, regardless of how the head has moved since the finding was
+// raised. The thread state is therefore the stable truth the gate reads.
 //
 // The gate trusts EXACTLY these reviewer logins -- the GitHub App's two
 // author forms (reviews post as the app, inline comments as its [bot]
-// user). A pattern or substring match is spoofable on a public repo: any
-// account whose login merely contains the reviewer's name could cite the
-// head and mint a "clean" verdict before the real reviewer responds.
+// user). A substring match is spoofable on a public repo: any account whose
+// login merely contains the reviewer's name could post a review on the head
+// and race the real reviewer. The identity check gates only the "has the
+// reviewer looked at this head yet" wait; the thread-resolution state (which
+// GitHub itself attributes and enforces) is the authoritative merge gate.
 const REVIEW_BOT_LOGINS = Object.freeze([
   // allow:ai-attribution -- the reviewer service's exact account logins;
-  // an identity whitelist for the merge gate, not authorship attribution.
+  // an identity whitelist for the review-wait, not authorship attribution.
   "chatgpt-codex-connector",
   "chatgpt-codex-connector[bot]", // allow:ai-attribution -- reviewer account login
 ]);
+
+// isReviewBot(login) -- exact-match membership in the frozen whitelist,
+// tolerating the bare and the [bot]-suffixed author forms GitHub renders
+// across GraphQL and REST. Exact, never substring: "codexfan" is not the
+// reviewer.
+function isReviewBot(login) {
+  return REVIEW_BOT_LOGINS.indexOf(String(login || "")) !== -1;
+}
+
+// repoSlug() -- { owner, name } parsed from package.json repository.url. The
+// GraphQL calls need literal owner/name in the query body; gh substitutes
+// the {owner}/{repo} placeholders only on the REST endpoint, not inside a
+// graphql query string.
+function repoSlug() {
+  let owner = "blamejs";
+  let name = "stash";
+  try {
+    const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
+    const url = (pkg.repository && pkg.repository.url) || "";
+    const m = url.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
+    if (m) { owner = m[1]; name = m[2]; }
+  } catch { /* fall back to defaults */ }
+  return { owner, name };
+}
 
 // mergeArgs(branch, headSha) -- the gh argv for a merge BOUND to the head
 // commit the verdict was computed for. `--match-head-commit` makes GitHub
@@ -338,87 +414,276 @@ export function mergeArgs(branch, headSha) {
   return ["pr", "merge", branch, "--squash", "--match-head-commit", headSha];
 }
 
-// reviewDecision(headSha, surfaces) -- pure, fail-closed reviewer verdict
-// for one head commit. surfaces:
-//   reviews  -- submitted PR reviews        [{ author, body, commit }]
-//   inline   -- per-file review comments    [{ author, body, commit }]
-//   comments -- issue comments              [{ author, body }]
-// A post is "on the head" only via a FULL commit anchor -- never a short
-// prefix. An abbreviated commit id is not globally unique, so a stale post
-// whose 7-char prefix collides with a newer head must never satisfy the
-// gate. Reviews and inline comments carry the reviewed commit_id (the exact
-// 40-char oid from the API); issue comments have no commit field, so they
-// count only when the body names the full SHA. findings: any reviewer P0-P2
-// on the head. A finding on the head is permanent for that head -- no later
-// post erases it; only a new head (push-fix) starts a fresh verdict. clean:
-// a reviewer post is on the head and no such finding exists; P3-and-lower
-// are advisory. Anything else is pending -- absence of a verdict is never a
-// pass.
-export function reviewDecision(headSha, surfaces) {
-  if (typeof headSha !== "string" || headSha.length < 7) {
-    throw new TypeError("reviewDecision requires the head commit sha");
+// unresolvedThreads(nodes) -- pure, fail-closed. `nodes` is the raw
+// reviewThreads.nodes array from the PR's GraphQL payload. Returns the
+// UNRESOLVED threads (isResolved === false), each mapped to a descriptor
+// naming its file:line, reviewer, first finding line, and thread id (for the
+// resolve mutation). Non-empty BLOCKS the merge, empty CLEARS it.
+//
+// Fail-closed on a non-array input: [] is this gate's PASS value, so a failed
+// or absent query (which yields null/undefined, never a real empty thread
+// list) MUST throw rather than read as "no threads block". A PR that
+// genuinely has zero threads returns a real [] and clears -- only a broken
+// query is the non-array that throws.
+export function unresolvedThreads(nodes) {
+  if (!Array.isArray(nodes)) {
+    throw new TypeError("unresolvedThreads requires the reviewThreads node array -- " +
+      "an unreadable result is not an empty one");
   }
-  const s = surfaces || {};
-  const fromBot = function (author) { return REVIEW_BOT_LOGINS.indexOf(author) !== -1; };
-  const onHead = function (commit) { return commit === headSha; };
-  const namesFullHead = function (text) {
-    return typeof text === "string" && text.indexOf(headSha) !== -1;
-  };
-  // P0 is the highest-severity finding format; P1/P2 gate as well. P3 and
-  // lower are advisory. Match the whole blocking band, not a subset -- a
-  // missed severity is a fail-open verdict that merges an unfixed finding.
-  const hasFinding = function (text) { return /\bP[0-2]\b/.test(text || ""); };
-  const inlineOnHead = (s.inline || []).filter(function (c) {
-    return fromBot(c.author) && onHead(c.commit);
-  });
-  const reviewsOnHead = (s.reviews || []).filter(function (r) {
-    return fromBot(r.author) && (onHead(r.commit) || namesFullHead(r.body));
-  });
-  const commentsOnHead = (s.comments || []).filter(function (p) {
-    return fromBot(p.author) && namesFullHead(p.body);
-  });
-  const postsOnHead = reviewsOnHead.concat(commentsOnHead);
-  if (inlineOnHead.some(function (c) { return hasFinding(c.body); }) ||
-      postsOnHead.some(function (p) { return hasFinding(p.body); })) {
-    return { state: "findings" };
-  }
-  if (postsOnHead.length === 0) return { state: "pending" };
-  return { state: "clean" };
+  return nodes
+    .filter((t) => t && t.isResolved === false)
+    .map((t) => {
+      const c = t.comments && t.comments.nodes && t.comments.nodes[0];
+      return {
+        id: t.id,
+        path: t.path || "(pr-level)",
+        line: t.line,
+        author: (c && c.author && c.author.login) || "(unknown)",
+        body: (c && c.body) || "",
+      };
+    });
 }
 
-function reviewVerdict(branch, headSha) {
-  const pr = ghJson(["pr", "view", branch, "--json", "number,reviews,comments"]);
-  // Inline review comments live on the pulls API, not in `pr view`;
-  // --paginate + --slurp yields an array of pages.
-  const pages = ghJson(["api", "--paginate", "--slurp",
-    "repos/{owner}/{repo}/pulls/" + pr.number + "/comments"]);
-  const inline = [];
-  for (const page of pages) {
-    for (const c of page) {
-      inline.push({ author: c.user && c.user.login, body: c.body, commit: c.commit_id });
+// collectAllPages(fetchPage) -- pure: accumulate the nodes of a paginated
+// GraphQL connection across EVERY page. fetchPage(cursor) returns
+// { nodes, hasNextPage, endCursor } for the page after `cursor` (null for the
+// first). A single page read is NOT the whole connection: a gate that trusts
+// the first page treats a later page's open finding as absent. Fail closed --
+// a page with unreadable nodes, or another page promised with no cursor,
+// THROWS rather than returning a partial set. The guard bound is a runaway
+// backstop far above any real thread count, never the precision mechanism.
+export function collectAllPages(fetchPage) {
+  const all = [];
+  let cursor = null;
+  for (let guard = 0; guard < 10000; guard++) {
+    const page = fetchPage(cursor);
+    if (!page || !Array.isArray(page.nodes)) {
+      throw new Error("a paginated page returned no readable nodes -- refusing to " +
+        "treat a partial result as the complete set");
     }
+    for (const n of page.nodes) all.push(n);
+    if (!page.hasNextPage) return all;
+    if (!page.endCursor) {
+      throw new Error("a paginated page reported a next page with no cursor -- " +
+        "cannot continue safely, so refusing to clear on a partial set");
+    }
+    cursor = page.endCursor;
   }
-  // Reviews carry the reviewed commit oid (gh exposes it as `commit.oid`);
-  // issue comments do not, so they are matched by a full-SHA body mention.
-  const reviews = (pr.reviews || []).map(function (p) {
+  throw new Error("pagination exceeded the page guard -- aborting rather than looping");
+}
+
+// fetchUnresolvedThreads(prNum) -- the GraphQL wrapper around
+// unresolvedThreads: page through ALL of the PR's review threads, then apply
+// the pure verdict. A PR can carry more than one page of threads; reading only
+// the first would let an open finding on a later page clear the merge gate.
+// ghJson fails closed on a gh error, collectAllPages fails closed on a partial
+// page, and unresolvedThreads fails closed on a null payload -- together, an
+// unreadable or partial thread state never clears the gate.
+function fetchUnresolvedThreads(prNum) {
+  const slug = repoSlug();
+  const nodes = collectAllPages((cursor) => {
+    const after = cursor ? ", after:\"" + cursor + "\"" : "";
+    const conn = ghJson(["api", "graphql", "-f",
+      "query=query { repository(owner:\"" + slug.owner + "\",name:\"" + slug.name +
+      "\") { pullRequest(number:" + prNum + ") { reviewThreads(first:100" + after + ") { " +
+      "pageInfo { hasNextPage endCursor } nodes { " +
+      "id isResolved path line comments(first:1) { nodes { author{login} body } } } } } } }",
+      "--jq", ".data.repository.pullRequest.reviewThreads"]);
     return {
-      author: p.author && p.author.login,
-      body: p.body,
-      commit: p.commit && p.commit.oid,
+      nodes: conn && conn.nodes,
+      hasNextPage: !!(conn && conn.pageInfo && conn.pageInfo.hasNextPage),
+      endCursor: conn && conn.pageInfo && conn.pageInfo.endCursor,
     };
   });
-  const comments = (pr.comments || []).map(function (p) {
-    return { author: p.author && p.author.login, body: p.body };
-  });
-  return reviewDecision(headSha, { reviews, comments, inline });
+  return unresolvedThreads(nodes);
 }
 
-function requestReview(branch) {
-  run("gh", ["pr", "comment", branch, "--body", "@codex review"]);
+// reviewerSignalsReview(surfaces, headSha, triggerId) -- pure: has the reviewer
+// bot signalled a review of the head? The bot has THREE signal forms and all
+// must count, or the wait times out on the common (clean) case:
+//   (1) a formal review node whose reviewed commit is the head -- the form it
+//       posts WITH findings;
+//   (2) a clean-verdict issue comment citing the head's commit sha, posted
+//       with no review node when it finds nothing; and
+//   (3) a bare THUMBS_UP reaction by the bot on the `@codex review` trigger
+//       comment, with NO review node and NO clean-verdict comment at all --
+//       the bot's documented "no suggestions" signal.
+// Forms (1) and (2) carry the head sha, so they self-bind to the head. A
+// reaction carries NO sha, and GitHub exposes no push time to bind it by
+// (pushedDate is null; a commit's committer date is mutable metadata a
+// rebased/cherry-picked head can carry from before the reaction). So form (3)
+// binds to the head by the IDENTITY of the trigger comment: the driver posts
+// `@codex review` for THIS head only after it is the remote head (post-push),
+// and passes that comment's id as triggerId. A bot thumbs-up on THAT comment is
+// therefore a review of this head; a thumbs-up on any earlier trigger (a prior
+// head's) is a different comment id and does not match. Absent a triggerId the
+// reaction is unbindable and does NOT count (fail closed) -- the wait holds for
+// a head-bound signal instead. surfaces: { reviews:[{author,commit}], comments:
+// [{author,body,databaseId,reactions:[{content,login}]}] }.
+export function reviewerSignalsReview(surfaces, headSha, triggerId) {
+  if (typeof headSha !== "string" || headSha.length < 7) {
+    throw new TypeError("reviewerSignalsReview requires the head commit sha");
+  }
+  const s = surfaces || {};
+  const reviews = s.reviews || [];
+  const comments = s.comments || [];
+  const headPrefix = headSha.slice(0, 10);
+  if (reviews.some((r) => r && isReviewBot(r.author) && r.commit === headSha)) return true;
+  if (comments.some((c) => isReviewBot(c && c.author) &&
+    typeof (c && c.body) === "string" && c.body.indexOf(headPrefix) !== -1)) return true;
+  // (3) A bot thumbs-up on THE trigger comment the driver created for this head.
+  if (triggerId == null) return false;
+  return comments.some((c) =>
+    c && c.databaseId != null && String(c.databaseId) === String(triggerId) &&
+    Array.isArray(c.reactions) && c.reactions.some((rx) =>
+      rx && rx.content === "THUMBS_UP" && isReviewBot(rx.login)));
+}
+
+// reviewerReviewedHead(prNum, headSha, triggerId) -- gather the review surfaces
+// (reviews, and issue comments WITH their databaseId and reactions) and apply
+// reviewerSignalsReview. triggerId is the id of the `@codex review` comment the
+// driver posted for THIS head; it head-binds the thumbs-up form (form 3). The
+// reviews and comments reads are recent-biased (last:) -- the head review and
+// the driver's just-posted trigger are the newest items, so a busy PR cannot
+// push them past the window -- while the thread gate itself pages in full
+// (fetchUnresolvedThreads). ghJson fails closed to null on a gh error.
+function reviewerReviewedHead(prNum, headSha, triggerId) {
+  const slug = repoSlug();
+  const reviews = (ghJson(["api", "graphql", "-f",
+    "query=query { repository(owner:\"" + slug.owner + "\",name:\"" + slug.name +
+    "\") { pullRequest(number:" + prNum + ") { reviews(last:100) { nodes { " +
+    "author{login} commit{oid} } } } } }",
+    "--jq", ".data.repository.pullRequest.reviews.nodes"]) || [])
+    .map((r) => ({ author: r && r.author && r.author.login, commit: r && r.commit && r.commit.oid }));
+  const comments = (ghJson(["api", "graphql", "-f",
+    "query=query { repository(owner:\"" + slug.owner + "\",name:\"" + slug.name +
+    "\") { pullRequest(number:" + prNum + ") { comments(last:60) { nodes { " +
+    "databaseId body author{login} reactions(first:30){ nodes { content user{login} } } } } } } }",
+    "--jq", ".data.repository.pullRequest.comments.nodes"]) || [])
+    .map((c) => ({
+      databaseId: c && c.databaseId,
+      author: c && c.author && c.author.login,
+      body: c && c.body,
+      reactions: ((c && c.reactions && c.reactions.nodes) || [])
+        .map((rx) => ({ content: rx && rx.content, login: rx && rx.user && rx.user.login })),
+    }));
+  return reviewerSignalsReview({ reviews, comments }, headSha, triggerId);
+}
+
+// waitForReviewOnHead(branch, prNum, headSha) -- block until the reviewer has
+// reviewed the current head, fail-closed on timeout. The bot reviews a PR
+// once on open and does NOT auto-review a pushed fix, so the head review can
+// arrive a minute or two AFTER CI goes green; reading the thread gate before
+// it posts would outrun an async finding. The bot is nudged once (it reviews
+// only when asked to re-review), then the wait keeps polling. A timeout is a
+// LOUD failure, never a silent pass.
+function waitForReviewOnHead(branch, prNum, headSha) {
+  const stepMs = 20000;
+  const budgetMs = 10 * 60 * 1000;
+  let waited = 0;
+  let nudged = false;
+  // Recover the trigger id `push`/`push-fix` (or a prior watch) recorded for
+  // THIS head, so an already-present reaction clears the first poll instead of
+  // stalling for a duplicate nudge. Head-matched, so a prior head's trigger is
+  // never revived (reviewTriggerForHead).
+  let triggerId = recoverReviewTrigger(headSha);
+  console.log("waiting for the reviewer to review PR #" + prNum + " head " +
+    headSha.slice(0, 12) + " before the thread gate (up to 10m; it reviews a bit after CI)...");
+  while (waited <= budgetMs) {
+    if (reviewerReviewedHead(prNum, headSha, triggerId)) {
+      ok("reviewer has reviewed the current head -- the thread gate now sees its findings");
+      return;
+    }
+    // Nudge ONCE, and remember the id of the trigger comment we post: a bot
+    // thumbs-up on THAT comment (form 3) is a review of this head. Posted only
+    // now -- after this head is confirmed the remote head -- so it can never be
+    // a prior head's trigger. Recorded so the merge wait after watch reuses it.
+    if (!nudged && waited >= 3 * stepMs) {
+      triggerId = requestReviewForHead(prNum, headSha);
+      nudged = true;
+    }
+    sleep(stepMs);
+    waited += stepMs;
+  }
+  throw new Error("the reviewer has not reviewed PR #" + prNum + " head after 10m -- it reviews " +
+    "asynchronously; a late finding must not be outrun by the merge. Re-run release.js watch once " +
+    "it posts, or rerun with --no-review ONLY if the reviewer is confirmed disabled.");
+}
+
+// printUnresolvedThreads(unresolved) -- surface each blocking thread with the
+// file:line, reviewer, first finding line, and the exact resolve mutation, so
+// a blocked merge names its cause instead of an opaque state.
+function printUnresolvedThreads(unresolved) {
+  console.log("\n" + unresolved.length + " unresolved review thread(s) block the merge " +
+    "(main-protection requires every thread resolved):\n");
+  unresolved.forEach((t, i) => {
+    const lines = (t.body || "").split("\n");
+    let firstLine = "(no text)";
+    for (const l of lines) { if (l.trim().length > 0) { firstLine = l; break; } }
+    firstLine = firstLine.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/[*_`#>]/g, "").trim();
+    console.log("  " + (i + 1) + ". [" + t.author + "] " + t.path +
+      (t.line != null ? ":" + t.line : ""));
+    console.log("     " + firstLine.slice(0, 160));
+    console.log("     resolve: gh api graphql -f query='mutation { resolveReviewThread(" +
+      "input:{threadId:\"" + t.id + "\"}){ thread { isResolved } } }'");
+  });
+  console.log("\nFix each finding at the root in a NEW commit via release.js push-fix (never dismiss),");
+  console.log("then run the resolve command above for its thread. Re-run: release.js watch");
+}
+
+// requestReview(prNum) -- post the `@codex review` trigger for the current head
+// and return the created comment's id, so a bot thumbs-up on THIS comment
+// head-binds the review (reviewerSignalsReview form 3). `gh pr comment --body`
+// takes the literal `@codex review` (no gh @file ambiguity) and prints the new
+// comment's URL, whose trailing `#issuecomment-<id>` IS the databaseId the
+// reactions query reports. A failed post or an unparseable URL returns null:
+// the thumbs-up form then stays disabled (fail closed) until the review-node or
+// clean-comment forms fire, or the wait times out loudly -- never a silent pass.
+function requestReview(prNum) {
+  const rv = capture("gh", ["pr", "comment", String(prNum), "--body", "@codex review"]);
+  if (rv.status !== 0) return null;
+  const m = /#issuecomment-(\d+)/.exec((rv.stdout || "") + "\n" + (rv.stderr || ""));
+  return m ? m[1] : null;
+}
+
+// requestReviewForHead(prNum, headSha) -- post the trigger AND record its id for
+// this head, so the next wait (and the merge wait after watch) recovers it
+// instead of posting a duplicate. Returns the id for the current wait to use.
+function requestReviewForHead(prNum, headSha) {
+  const id = requestReview(prNum);
+  recordReviewTrigger(headSha, id);
+  return id;
+}
+
+// syncLockfileVersion(lock, version) -- return the parsed package-lock.json
+// object with BOTH its top-level `version` and its root package
+// (packages[""]) `version` set to `version`. The CI lockfile-sync gate
+// compares BOTH fields to package.json; prepare bumps package.json, so the
+// committed lockfile must move in lockstep or every cut fails that gate
+// (0.1.4 shipped a package.json at 0.1.4 with a 0.1.3 lockfile and the gate
+// blocked it). Zero dependencies means these two version fields are the
+// ENTIRE delta -- there is no dependency graph to resolve -- so the rewrite
+// is exact and needs no npm spawn. The object spreads preserve npm's key
+// order (`version` already exists in each object, so it stays in place).
+export function syncLockfileVersion(lock, version) {
+  if (!lock || typeof lock !== "object") {
+    throw new TypeError("syncLockfileVersion requires the parsed lockfile object");
+  }
+  if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new TypeError("syncLockfileVersion requires an x.y.z version, got '" + version + "'");
+  }
+  const packages = lock.packages && typeof lock.packages === "object" ? lock.packages : {};
+  const root = packages[""] && typeof packages[""] === "object" ? packages[""] : {};
+  return {
+    ...lock,
+    version,
+    packages: { ...packages, "": { ...root, version } },
+  };
 }
 
 // prepare [version] -- start a bump-only cut on a clean, synced main:
-// bump package.json (default: next patch) on a fresh release branch.
+// bump package.json + package-lock.json (default: next patch) on a fresh
+// release branch.
 function cmdPrepare() {
   section("prepare");
   requireRemote();
@@ -441,14 +706,22 @@ function cmdPrepare() {
   const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
   pkg.version = next;
   writeFileSync(join(ROOT, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
-  ok("version " + current + " -> " + next + " on branch release-v" + next);
+  // Bump the committed lockfile in the SAME step, so the lockfile-sync CI
+  // gate (package-lock.json version + root version === package.json version)
+  // passes on the very first push instead of failing every cut.
+  const lockPath = join(ROOT, "package-lock.json");
+  const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+  writeFileSync(lockPath, JSON.stringify(syncLockfileVersion(lock, next), null, 2) + "\n");
+  ok("version " + current + " -> " + next + " on branch release-v" + next +
+    " (package.json + package-lock.json)");
   if (!readNotesPresent(next)) {
-    console.log("next: write " + releaseNotesPath(next) + ", then regen -> commit -> push -> watch -> tag -> publish");
+    console.log("next: write " + releaseNotesPath(next) + ", then regen -> commit -> push -> watch -> merge -> tag -> publish");
   }
 }
 
 // push -- publish the current branch, open its PR, and request review.
-// No auto-merge: the merge belongs to watch, AFTER the review verdict.
+// No auto-merge: the merge belongs to `merge`, AFTER `watch` clears the
+// checks + review-thread gate.
 function cmdPush() {
   section("push");
   requireRemote();
@@ -466,7 +739,9 @@ function cmdPush() {
     const body = notes ? notes.summary : "See the commit message.";
     run("gh", ["pr", "create", "--title", title, "--body", body]);
   }
-  requestReview(branch);
+  const prNum = ghJson(["pr", "view", branch, "--json", "number"]).number;
+  const headSha = capture("git", ["rev-parse", "HEAD"]).stdout;
+  requestReviewForHead(prNum, headSha);
   ok("PR open, review requested -- next: release.js watch");
 }
 
@@ -486,7 +761,9 @@ function cmdPushFix() {
   run("git", ["commit", "-m", message]);
   verifyCommitSignature();
   run("git", ["push"]);
-  requestReview(branch);
+  const prNum = ghJson(["pr", "view", branch, "--json", "number"]).number;
+  const headSha = capture("git", ["rev-parse", "HEAD"]).stdout;
+  requestReviewForHead(prNum, headSha);
   ok("fix pushed as a new signed commit; review re-requested -- next: release.js watch");
 }
 
@@ -532,94 +809,141 @@ export function checksVerdict(rollup) {
   return { blocking, pending, green: blocking.length === 0 && pending === 0 && list.length > 0 };
 }
 
-// watch -- follow the current branch's PR until required checks pass AND
-// the review verdict is clean for the head commit, then squash-merge,
-// sync main, and drop the branch. --no-review skips the verdict gate,
-// loudly, for repos without the reviewer installed.
+// watch -- gate the current branch's PR without merging: poll the required
+// checks until every one is a whitelist pass, wait for the reviewer to review
+// THIS head, then read GitHub's authoritative review-thread state. Any
+// unresolved thread prints its finding + resolve command and exits non-zero;
+// a clean gate proceeds to `merge`. --no-review skips the review gate,
+// loudly, for repos without the reviewer installed. watch never mutates the
+// repo -- the merge + sync + tag-target record live in `merge`.
 function cmdWatch() {
   section("watch");
   requireRemote();
   const branch = currentBranch();
   if (!branch || branch === "main") throw new Error("watch runs from the branch whose PR is in flight");
-  // The version this release branch carries, read BEFORE any sync of main: a
-  // concurrent PR that bumps package.json on main after our merge must not
-  // change the version this PR's tag records.
-  const releaseVersion = readVersion();
   const skipReview = process.argv.indexOf("--no-review") !== -1;
   if (skipReview) console.log("!! review gate SKIPPED by explicit --no-review");
-  let reviewNudged = false;
-  // The post-merge cleanup below is reachable ONLY through merged=true: a
-  // watch that exhausts its polls throws, so it can never sync main and
-  // delete a branch whose PR never merged.
-  let merged = false;
-  let mergeSha = "";
+  // Poll the required checks until every one passes the whitelist. Fail
+  // closed: a terminal check failure throws, an empty/unreadable rollup never
+  // reads as green, and an exhausted poll throws rather than proceeding.
+  let prNum = 0;
+  let headSha = "";
+  let checksGreen = false;
   for (let i = 0; i < 90; i++) {
-    const pr = ghJson(["pr", "view", branch, "--json", "state,headRefOid,statusCheckRollup,mergeCommit"]);
+    const pr = ghJson(["pr", "view", branch, "--json", "number,state,headRefOid,statusCheckRollup"]);
+    prNum = pr.number;
     if (pr.state === "MERGED") {
-      merged = true;
-      // The exact commit our reviewed PR merged into main. Tag pins THIS,
-      // not whatever HEAD advances to if another PR lands concurrently.
-      mergeSha = (pr.mergeCommit && pr.mergeCommit.oid) || "";
-      break;
+      ok("PR already merged -- next: release.js merge (records the tag target)");
+      return;
     }
     if (pr.state !== "OPEN") throw new Error("PR is " + pr.state);
+    headSha = pr.headRefOid;
     const checks = checksVerdict(pr.statusCheckRollup);
     if (checks.blocking.length > 0) {
       throw new Error("checks failed: " + checks.blocking.join(", ") +
         " -- fix at the root, then release.js push-fix");
     }
-    const checksDone = checks.green;
-    let reviewDone = skipReview;
-    if (!skipReview) {
-      const verdict = reviewVerdict(branch, pr.headRefOid);
-      if (verdict.state === "findings") {
-        throw new Error("review findings block the merge -- fix each at the root (new commit, never amend) via release.js push-fix, which re-requests review");
-      }
-      reviewDone = verdict.state === "clean";
-      if (!reviewDone && checksDone && i >= 15 && !reviewNudged) {
-        // checks long green, no verdict: nudge once, then keep waiting --
-        // an absent reviewer is a loud failure at the timeout, never a
-        // silent pass.
-        requestReview(branch);
-        reviewNudged = true;
-      }
-    }
-    if (checksDone && reviewDone) {
-      // `gh pr merge` does NOT guarantee an immediate merge: on a base
-      // branch with a merge queue it ADDS the PR to the queue and returns
-      // success, leaving state OPEN until the queue lands it. Treating that
-      // as merged would sync a stale main and tag a pre-merge commit. Fire
-      // the merge, then let the loop keep polling -- only an observed
-      // state === "MERGED" (the top of this loop) sets merged=true.
-      run("gh", mergeArgs(branch, pr.headRefOid));
-      console.log("  merge requested; waiting for state MERGED (queued merges land asynchronously)...");
-      sleep(20000);
-      continue;
-    }
-    console.log("  checks " + (checksDone ? "green" : "running") + ", review " +
-      (skipReview ? "skipped" : (reviewDone ? "clean" : "pending")) + " (" + (i + 1) + ")...");
+    if (checks.green) { checksGreen = true; break; }
+    console.log("  checks running (" + (i + 1) + ")...");
     sleep(20000);
   }
+  if (!checksGreen) {
+    throw new Error("watch timed out waiting for the required checks to pass");
+  }
+  ok("required checks green");
+  if (skipReview) {
+    ok("review gate skipped (--no-review) -- next: release.js merge");
+    return;
+  }
+  // Wait for the reviewer to review THIS head, so an asynchronously-posted
+  // finding lands in the thread set before the gate reads it, then read the
+  // authoritative thread-resolution state.
+  waitForReviewOnHead(branch, prNum, headSha);
+  const unresolved = fetchUnresolvedThreads(prNum);
+  if (unresolved.length > 0) {
+    printUnresolvedThreads(unresolved);
+    process.exit(3);
+  }
+  ok("reviewer has reviewed the head and zero unresolved threads remain -- next: release.js merge (re-checks)");
+}
+
+// merge -- the mutating half of the gated flow watch does not touch: re-check
+// that the reviewer reviewed the head and zero threads are unresolved, that
+// the PR is CLEAN + MERGEABLE, then squash-merge BOUND to the reviewed head
+// (--match-head-commit refuses a merge if the head moved), sync main, drop the
+// branch, and record the merge commit + pre-sync version so `tag` pins the
+// signed tag to exactly that commit. --no-review skips the review gate loudly.
+function cmdMerge() {
+  section("merge");
+  requireRemote();
+  const branch = currentBranch();
+  if (!branch || branch === "main") throw new Error("merge runs from the branch whose PR is in flight");
+  const skipReview = process.argv.indexOf("--no-review") !== -1;
+  if (skipReview) console.log("!! review gate SKIPPED by explicit --no-review");
+  // The version this release branch carries, read BEFORE any sync of main: a
+  // concurrent PR that bumps package.json on main after our merge must not
+  // change the version this PR's tag records.
+  const releaseVersion = readVersion();
+  const pr = ghJson(["pr", "view", branch,
+    "--json", "number,state,headRefOid,mergeStateStatus,mergeable,mergeCommit"]);
+  const prNum = pr.number;
+  let merged = pr.state === "MERGED";
+  let mergeSha = merged ? ((pr.mergeCommit && pr.mergeCommit.oid) || "") : "";
   if (!merged) {
-    throw new Error("watch timed out -- if no reviewer is installed on this repo, rerun with --no-review (explicit, logged)");
+    if (pr.state !== "OPEN") throw new Error("PR is " + pr.state);
+    const headSha = pr.headRefOid;
+    if (!skipReview) {
+      // Authoritative gate: do not read the merge state until the reviewer has
+      // reviewed the current head, so its async findings are in the thread set.
+      waitForReviewOnHead(branch, prNum, headSha);
+      const unresolved = fetchUnresolvedThreads(prNum);
+      if (unresolved.length > 0) {
+        printUnresolvedThreads(unresolved);
+        throw new Error("refusing to merge PR #" + prNum + " -- " +
+          unresolved.length + " unresolved review thread(s)");
+      }
+    }
+    // Re-read the merge state; CLEAN + MERGEABLE is the whitelist. A thread
+    // can open in the window between the read above and here, so this is
+    // belt-and-suspenders on top of the thread read (mergeStateStatus CLEAN
+    // itself requires required_review_thread_resolution satisfied).
+    const state = ghJson(["pr", "view", branch, "--json", "mergeStateStatus,mergeable"]);
+    if (state.mergeStateStatus !== "CLEAN" || state.mergeable !== "MERGEABLE") {
+      throw new Error("PR #" + prNum + " not mergeable (state=" + state.mergeStateStatus +
+        " mergeable=" + state.mergeable + ") -- resolve the blocker, then re-run release.js merge");
+    }
+    // `gh pr merge` does NOT guarantee an immediate merge: on a base branch
+    // with a merge queue it ADDS the PR to the queue and returns success,
+    // leaving state OPEN until the queue lands it. Treating that as merged
+    // would sync a stale main and tag a pre-merge commit. Fire the merge bound
+    // to the reviewed head, then poll -- only an observed state === "MERGED"
+    // sets merged=true and reads the merge commit.
+    run("gh", mergeArgs(branch, headSha));
+    console.log("  merge requested; waiting for state MERGED (a queued merge lands asynchronously)...");
+    for (let i = 0; i < 90; i++) {
+      const p = ghJson(["pr", "view", branch, "--json", "state,mergeCommit"]);
+      if (p.state === "MERGED") {
+        merged = true;
+        mergeSha = (p.mergeCommit && p.mergeCommit.oid) || "";
+        break;
+      }
+      if (p.state !== "OPEN") throw new Error("PR is " + p.state);
+      sleep(20000);
+    }
+    if (!merged) throw new Error("merge timed out waiting for state MERGED");
   }
   run("git", ["checkout", "main"]);
   run("git", ["pull", "--ff-only"]);
-  run("git", ["branch", "-D", branch]);
-  // Record the merge commit so `tag` pins the signed tag to it even if a
-  // concurrent PR has since advanced main past it.
+  run("git", ["branch", "-D", branch], { allowFail: true });
+  // Record the merge commit + pre-sync version so `tag` pins the signed tag to
+  // THIS commit even if a concurrent PR has since advanced main past it.
   if (mergeSha) {
     writeFileSync(releaseStatePath(), JSON.stringify({ version: releaseVersion, mergeSha }) + "\n");
     console.log("recorded merge commit " + mergeSha.slice(0, 12) + " and version " + releaseVersion + " for tag");
   } else {
     console.log("!! could not read the PR merge commit -- tag will fall back to HEAD; verify it before publish");
   }
-  ok("merged; main synced; branch " + branch + " removed");
-}
-
-// merge -- alias for watch (the merge lives inside the gated loop).
-function cmdMerge() {
-  cmdWatch();
+  ok("merged; main synced; branch " + branch + " removed -- next: release.js tag");
 }
 
 // publish -- push the version's signed tag (idempotent) and follow the
@@ -662,9 +986,26 @@ function cmdPublish() {
     sleep(20000);
   }
   if (!concluded) throw new Error("publish watch timed out");
-  const served = capture("npm", ["view", "@blamejs/stash@" + version, "version"]).stdout;
+  // The npm-publish workflow run concluded SUCCESS, so the package IS
+  // published; the registry may still be propagating. Poll `npm view` over a
+  // generous window and take the FIRST matching version as confirmation. A
+  // single early empty read (propagation lag, or a transient registry hiccup)
+  // is NOT a failure -- 0.1.4 published cleanly yet was declared a false FAIL
+  // because a one-shot `npm view` ran before the registry served it. Only a
+  // window that fully elapses with no matching version is a genuine failure,
+  // and the workflow-run conclusion above remains the primary success signal.
+  let served = "";
+  for (let i = 0; i < 30; i++) {
+    served = capture("npm", ["view", "@blamejs/stash@" + version, "version"]).stdout;
+    if (served === version) break;
+    console.log("  registry not yet serving " + version + " (got " +
+      (served || "no answer") + "); re-checking (" + (i + 1) + ")...");
+    sleep(10000);
+  }
   if (served !== version) {
-    throw new Error("registry serves '" + served + "' for " + version + " -- verify manually before trusting the release");
+    throw new Error("npm-publish run " + runId + " concluded success but the registry has not " +
+      "served " + version + " after the propagation window (last answer: " + (served || "none") +
+      ") -- re-run release.js publish to re-verify once propagation settles");
   }
   ok("published: @blamejs/stash@" + version + " live on the registry, GitHub release created");
 }
@@ -680,11 +1021,11 @@ function cmdHelp() {
   console.log("  node scripts/release.js tag       # annotated signed tag v<version> (clean tree, untagged version)");
   console.log("  node scripts/release.js help      # this banner");
   console.log("");
-  console.log("  prepare [ver]  # clean main -> bump (default next patch) -> release branch");
+  console.log("  prepare [ver]  # clean main -> bump package.json + lockfile -> release branch");
   console.log("  push           # push branch, open PR from the notes, request review");
   console.log("  push-fix -m .. # root fix for review findings: new signed commit, push, re-request");
-  console.log("  watch          # gate on checks AND the review verdict, then squash-merge + sync");
-  console.log("  merge          # alias for watch");
+  console.log("  watch          # gate on checks AND the reviewer's review threads for the head (no merge)");
+  console.log("  merge          # re-check mergeable + zero unresolved threads, then squash-merge + sync");
   console.log("  publish        # push the signed tag, follow the publish run, verify the registry");
   console.log("");
   console.log("`commit` requires release-notes/v<version>.json (headline + summary +");
