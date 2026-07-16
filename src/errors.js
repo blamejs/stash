@@ -15,9 +15,10 @@
  *   from an unrelated bug.
  *
  *   One rule binds every message: it never contains a ref, a `meta` value,
- *   or a filesystem path. A ref is a capability, and an error that echoes a
- *   capability into a log file has leaked it. Messages describe the failure
- *   class; the caller already holds the identifiers it passed in.
+ *   or a filesystem path (the CWE-209 / CWE-532 exposure classes). A ref is
+ *   a capability, and an error that echoes a capability into a log file has
+ *   leaked it. Messages describe the failure class; the caller already
+ *   holds the identifiers it passed in.
  *
  * @card
  *   Typed error classes with stable codes -- the fail-closed verdict surface

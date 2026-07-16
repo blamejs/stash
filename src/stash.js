@@ -104,6 +104,7 @@ function _verifiedStream(entry, source) {
  * @since      0.1.0
  * @status     experimental
  * @spec       SPEC.md 4
+ * @defends    CWE-1188
  * @related    stash.backends.MemoryBackend
  *
  * Construct a store over a backend. `opts.backend` is required and must
@@ -140,7 +141,8 @@ export class Stash {
    * @signature  stash.push(source, opts) -> Promise<string>
    * @since      0.1.0
    * @status     experimental
-   * @spec       SPEC.md 4
+   * @spec       SPEC.md 4, SPEC.md 5, FIPS 180-4, RFC 4648, RFC 8259
+   * @defends    CWE-330, CWE-400
    * @related    stash.apply, stash.show, stash.drop
    *
    * Store bytes; resolve to the entry's ref. The source may be a Buffer, a
@@ -171,7 +173,8 @@ export class Stash {
    * @signature  stash.apply(ref) -> Promise<Readable>
    * @since      0.1.0
    * @status     experimental
-   * @spec       SPEC.md 4
+   * @spec       SPEC.md 4, FIPS 180-4
+   * @defends    CWE-354, CWE-208
    * @related    stash.push, stash.show
    *
    * Stream an entry's bytes without destroying it. The stream is

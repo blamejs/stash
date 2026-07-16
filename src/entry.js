@@ -39,7 +39,8 @@ function _isCount(value) {
 }
 
 // assertShape(value, ErrorClass) -> value | throws new ErrorClass(...).
-// The read direction of the canonical shape: a STORED entry (a disk
+// Strict input validation of stored bytes (CWE-20; the sidecar is RFC 8259
+// JSON). The read direction of the canonical shape: a STORED entry (a disk
 // sidecar, a replicated insert) must carry exactly the FIELDS set with
 // every field well-typed -- extra keys, missing keys, or a type drift are
 // the caller's verdict class, never a partially-trusted object. Messages

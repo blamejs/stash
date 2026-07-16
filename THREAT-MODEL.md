@@ -10,8 +10,8 @@ the trust boundaries are, the threat classes it is designed against, and
 what is explicitly out of scope.
 
 **Implementation status matters here.** The library is mid-build: milestone
-M1 (the memory backend and the `push` / `apply` / `show` / `list` / `drop` /
-`clear` verbs) is implemented; milestones M2-M8 are specified in
+milestones M1 (the memory backend and the six verbs) and M2 (the disk
+backend with containment) are implemented; milestones M3-M8 are specified in
 [SPEC.md](SPEC.md) section 12 and not yet built. Each defense below is
 marked accordingly. A defense marked *specified* is a design commitment the
 implementation must meet, not shipped code.
@@ -54,7 +54,7 @@ implementation must meet, not shipped code.
    invariant (the source greps clean of `createCipheriv` /
    `createDecipheriv`; SPEC.md section 13.1).*
 
-2. **Ref guessing and enumeration.** An attacker probes for entries they
+2. **Ref guessing and enumeration** (CWE-330, CWE-340; timing side of it CWE-208)**.** An attacker probes for entries they
    suspect exist. -> Refs are 256-bit random values, not content hashes --
    a content hash is guessable by anyone holding the content, which would
    make the store an enumeration oracle for "did someone stash this
@@ -62,24 +62,26 @@ implementation must meet, not shipped code.
    key. Ref comparison uses `timingSafeEqual` so a comparison cannot leak
    prefix matches. *Implemented (M1).*
 
-3. **Path traversal via refs.** Refs become filenames, so a hostile ref is
+3. **Path traversal via refs** (CWE-22/CWE-23, the Zip-Slip class)**.** Refs become filenames, so a hostile ref is
    a hostile path. -> Every ref entering a public method must match the
    whitelist regex character-for-character before it touches the
    filesystem; `../../etc/shadow` dies at the regex, not at the syscall.
    No normalization, no `path.resolve` rescue, no clean-it-up-and-continue.
-   *Validation implemented (M1); the disk paths it defends arrive with the
-   DiskBackend (M2).*
+   *Implemented: whitelist since M1, revalidated at the disk backend's own
+   public boundary since M2.*
 
-4. **Symlink escape from the stash root.** Something plants a symlink
+4. **Symlink escape from the stash root** (CWE-59/CWE-61)**.** Something plants a symlink
    inside the root pointing outside it. -> Node's permission model follows
    symlinks out of granted paths, so containment is the library's job, not
    the sandbox's: the DiskBackend realpaths its root at construction,
    asserts every resolved blob/meta/claim path is still under that root
    (refusing with `InvalidRef` otherwise), and uses `lstat` rather than
    `stat` so a symlink where a blob should be reads as corruption, not a
-   blob. *Specified for the DiskBackend (M2); not yet built.*
+   blob. *Implemented (M2), with the planted-symlink and swapped-directory
+   vectors in the disk suite; the sidecar is also size-bounded before parse
+   (CWE-770) and strictly shape-validated (CWE-20).*
 
-5. **Push flood / disk fill.** An attacker (or a curl loop) pushes until
+5. **Push flood / disk fill** (CWE-400/CWE-770)**.** An attacker (or a curl loop) pushes until
    the disk is full. -> `maxSize` is enforced mid-stream (the write is
    destroyed and the partial cleaned up the moment the limit is crossed --
    never write-then-check), and `maxEntries` / `maxTotal` reject with
@@ -101,7 +103,7 @@ implementation must meet, not shipped code.
    `pop` does not ship yet -- M1's verb set has no destructive read except
    `drop` / `clear`, which read nothing.*
 
-7. **Capability leakage through errors, logs, and telemetry.** A ref in a
+7. **Capability leakage through errors, logs, and telemetry** (CWE-209, CWE-532)**.** A ref in a
    log file is a leaked capability. -> No error message ever contains a
    ref, a `meta` value, or a path (errors carry stable `.code` values
    instead); the library itself logs nothing and phones nothing home; the
@@ -126,7 +128,7 @@ implementation must meet, not shipped code.
    cold-standby topology if they need the stronger guarantee. *Specified
    (M7); not yet built.*
 
-9. **Silent corruption.** Bit rot or a tampered blob served as good bytes.
+9. **Silent corruption** (the CWE-354 class, validated rather than skipped)**.** Bit rot or a tampered blob served as good bytes.
    -> A digest is computed during the write stream, verified incrementally
    on read, and a mismatch is a loud `IntegrityError`, never silent bad
    bytes; `verify()` audits the whole store for corrupt blobs, orphaned
