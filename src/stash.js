@@ -123,22 +123,37 @@ function _dispose(source) {
 // what is already stored); either is null for "no bound". SizeExceeded is
 // reported before StashFull when one chunk crosses both: a per-entry overflow is
 // a permanent verdict a retry can't fix, while a full stash may later clear.
+// True for a raw ArrayBuffer or SharedArrayBuffer from ANY realm. Buffer.from()
+// stores these by their byteLength, so _boundedSource must measure them that way
+// -- a bare `instanceof ArrayBuffer` misses SharedArrayBuffer and a buffer from
+// another realm (Worker, vm), which would then fall through to `.length`
+// (undefined -> the size check is skipped while Buffer.from still writes every
+// byte). The brand check is realm-proof and never trips a get/index trap, so a
+// hostile array-like Proxy is still measured by its own `.length`, not copied.
+function _isArrayBuffer(value) {
+  if (value === null || typeof value !== "object") return false;
+  const tag = Object.prototype.toString.call(value);
+  return tag === "[object ArrayBuffer]" || tag === "[object SharedArrayBuffer]";
+}
+
 async function* _boundedSource(source, maxSize, residual) {
   let total = 0;
   for await (const chunk of source) {
     // Measure the chunk's byte length WITHOUT copying it, so a single hostile
     // oversized chunk is rejected before it is duplicated in memory -- the
     // advertised limit has to bound this allocation too, not just what is
-    // written. A string measures its UTF-8 byte length; an ArrayBuffer, a typed
-    // array, or a DataView measures byteLength -- a raw ArrayBuffer has no
-    // `.length` (reading it as chunk.length is undefined -> NaN -> every bound
-    // comparison false), and a multi-byte typed array's `.length` counts
-    // elements, not bytes; either would slip an oversized chunk past the check.
-    // Any other array-like falls back to `.length`.
+    // written. A string measures its UTF-8 byte length; an ArrayBuffer (or
+    // SharedArrayBuffer), a typed array, or a DataView measures byteLength --
+    // a raw buffer has no `.length` (reading it as chunk.length is undefined ->
+    // NaN -> every bound comparison false), and a multi-byte typed array's
+    // `.length` counts elements, not bytes; either would slip an oversized chunk
+    // past the check. Any other array-like falls back to `.length`. Measurement
+    // and the copy below classify each chunk identically, so the bytes counted
+    // are exactly the bytes Buffer.from writes.
     let len;
     if (typeof chunk === "string") len = Buffer.byteLength(chunk);
     else if (ArrayBuffer.isView(chunk)) len = chunk.byteLength;
-    else if (chunk instanceof ArrayBuffer) len = chunk.byteLength;
+    else if (_isArrayBuffer(chunk)) len = chunk.byteLength;
     else len = chunk.length;
     total += len;
     if (maxSize !== null && total > maxSize) throw new SizeExceeded();

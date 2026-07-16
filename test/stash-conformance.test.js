@@ -521,6 +521,16 @@ for (const { name, create } of BACKENDS) {
       await assert.rejects(stash.push(one()), (e) => e instanceof SizeExceeded && e.code === "E2BIG");
     });
 
+    test("maxSize bounds a SharedArrayBuffer chunk the same as an ArrayBuffer", async () => {
+      // A SharedArrayBuffer is not `instanceof ArrayBuffer`, so a bare instanceof
+      // check misses it and its bytes go unmeasured (chunk.length is undefined),
+      // yet Buffer.from stores every byte -- the bytes counted must be the bytes
+      // written. A realm-proof brand check measures it by byteLength.
+      const stash = new Stash({ backend: create(), maxSize: 16 });
+      async function* one() { yield new SharedArrayBuffer(64); } // 4x maxSize
+      await assert.rejects(stash.push(one()), (e) => e instanceof SizeExceeded && e.code === "E2BIG");
+    });
+
     test("maxSize measures a typed array by its bytes, not its element count", async () => {
       // A Uint16Array's `.length` is its element count; its byte size is twice
       // that. Measuring by `.length` lets a 128-byte view slip past a 100-byte
