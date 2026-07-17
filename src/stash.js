@@ -980,10 +980,12 @@ export class Stash extends EventEmitter {
     } catch (err) {
       if (!(err instanceof RefNotFound)) throw err;
     }
-    if (existing !== null) {
-      if (constantTimeEqual(existing.digest, entry.digest)) return false; // step 4: identical -> idempotent
-      throw new IntegrityError(); // step 5: same id, different digest -> corruption, not a merge
-    }
+    // Steps 4/5 reconcile on BYTE IDENTITY (SPEC.md 4.4: step 4 no-ops "same bytes",
+    // step 5 conflicts on "different bytes"), NOT on the algo-tagged digest STRING. When
+    // both entries share an algorithm the strings are directly comparable; when they
+    // differ -- a mixed-algorithm store, first-class per SPEC.md 5 -- identical bytes
+    // carry different digest strings, so the strings can't decide it.
+    if (existing !== null) return this.#reconcileExisting(existing, entry, chunks);
 
     // Capacity gate: a genuinely new entry (existing === null) is charged against the
     // stash bounds exactly as a push is -- otherwise a replica larger than maxSize, or
@@ -1026,6 +1028,44 @@ export class Stash extends EventEmitter {
       return false;
     }
     return true;
+  }
+
+  // #reconcileExisting(existing, entry, chunks) -- store()'s SPEC.md 4.4 step-4/step-5
+  // verdict against an entry already holding this id, keyed on BYTE IDENTITY: step 4
+  // no-ops "same bytes" (idempotent false), step 5 conflicts on "different bytes"
+  // (IntegrityError -- corruption, not a merge). BOTH outcomes write NOTHING and leave
+  // the existing entry -- and its algorithm -- untouched, so the reconcile never
+  // resurrects and never accepts mismatched bytes.
+  async #reconcileExisting(existing, entry, chunks) {
+    const existingAlgo = algoOf(existing.digest);
+    if (existingAlgo === algoOf(entry.digest)) {
+      // Same algorithm: the hex is directly comparable, so a constant-time string compare
+      // settles identity without touching the bytes -- the common path (an id carries one
+      // algorithm through ordinary replication). Same string -> step 4; different -> step 5.
+      if (constantTimeEqual(existing.digest, entry.digest)) return false;
+      throw new IntegrityError();
+    }
+    // Different algorithm (a mixed-algorithm store, SPEC.md 5): the digest STRINGS are
+    // incomparable, so re-hash the incoming source under BOTH algorithms to decide on the
+    // bytes. _verifiedInbound verifies the stream against the incoming entry's OWN digest
+    // and size -- an untrusted replica that lies about its manifest is IntegrityError here,
+    // exactly as on the write path -- and the tee'd existing-algorithm hash then proves
+    // byte identity against the stored content. maxSize still bounds the drain (a hostile
+    // source is no more unbounded here than on the write path); no maxTotal residual is
+    // charged, because a reconcile writes nothing. existingAlgo always resolves: stat()
+    // returns a shape-validated entry (its digest is self-describing), the same invariant
+    // _verifiedStream/_verifiedInbound rely on.
+    const hash = digestHash(existingAlgo);
+    for await (const buf of _verifiedInbound(_boundedSource(chunks, this.#maxSize, null), entry)) {
+      hash.update(buf);
+    }
+    // Self-consistent incoming bytes (verified above) that reproduce the stored entry's
+    // digest under its OWN algorithm, at the same size, ARE the stored content -> step 4
+    // idempotent no-op. Anything else is genuinely different bytes under the same id -> step 5.
+    if (entry.size === existing.size && constantTimeEqual(finalize(hash, existingAlgo), existing.digest)) {
+      return false;
+    }
+    throw new IntegrityError();
   }
 
   /**

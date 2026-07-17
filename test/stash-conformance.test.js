@@ -23,6 +23,17 @@ import {
 
 after(() => cleanupScratch());
 
+// storedEntryUnder(id, bytes, algo, overrides) -- a complete replicated Entry whose
+// self-describing digest is computed under `algo` (makeStoredEntry pins sha256). The
+// cross-algorithm reconciliation cases need the SAME id + SAME bytes to carry digests
+// under DIFFERENT algorithms (a store may hold entries under mixed algorithms, SPEC.md 5).
+function storedEntryUnder(id, bytes, algo, overrides = {}) {
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  return {
+    ...makeStoredEntry(id, buf, overrides),
+    digest: finalize(digestHash(algo).update(buf), algo),
+  };
+}
 for (const { name, create } of BACKENDS) {
   suite("conformance: " + name, () => {
     test("round-trips a Buffer", async () => {
@@ -1201,6 +1212,56 @@ for (const { name, create } of BACKENDS) {
       const conflicting = makeStoredEntry(id, "different"); // same id, different bytes+digest
       await assert.rejects(stash.store(conflicting, "different"), (e) => e instanceof IntegrityError && e.code === "EINTEGRITY");
       assert.deepEqual(await drain(await stash.apply(id)), Buffer.from("original"), "the existing entry still applies to the original bytes");
+    });
+
+    test("store() reconciles identical bytes under a DIFFERENT algorithm as an idempotent no-op (step 4 by byte identity)", async () => {
+      // SPEC.md 4.4 step 4 no-ops "same id, same digest" and step 5 conflicts on "same
+      // id, different BYTES"; SPEC.md 5 makes mixed-algorithm stores first-class. Two
+      // entries with IDENTICAL bytes but different algorithms carry different digest
+      // STRINGS -- so reconciliation keys on byte identity, not the algo-tagged string,
+      // or an identical-bytes replica wedges permanently on a spurious digest conflict.
+      const stash = new Stash({ backend: create() });
+      const bytes = "content that outlives its algorithm";
+      const id = generate();
+      assert.equal(await stash.store(storedEntryUnder(id, bytes, "sha256"), bytes), true, "first store lands under sha256");
+      const sha3 = storedEntryUnder(id, bytes, "sha3-512");
+      assert.equal(await stash.store(sha3, bytes), false, "identical bytes, different algorithm -> idempotent no-op");
+      assert.equal(await stash.store(sha3, bytes), false, "and the retry is still free -- reconciliation never wedges");
+      assert.equal((await stash.list()).length, 1, "exactly one entry -- no duplicate");
+      assert.equal((await stash.show(id)).digest, storedEntryUnder(id, bytes, "sha256").digest, "the stored entry keeps its ORIGINAL algorithm -- nothing was rewritten");
+      assert.deepEqual(await drain(await stash.apply(id)), Buffer.from(bytes), "and the bytes still round-trip");
+      // Symmetric: existing under sha3-512, incoming under sha256 -- the existing entry's
+      // OWN algorithm decides byte identity, so it reconciles in either direction.
+      const id2 = generate();
+      assert.equal(await stash.store(storedEntryUnder(id2, bytes, "sha3-512"), bytes), true);
+      assert.equal(await stash.store(storedEntryUnder(id2, bytes, "sha256"), bytes), false, "existing sha3-512, incoming sha256 -> idempotent");
+    });
+
+    test("store() still flags a CROSS-algorithm digest conflict as IntegrityError (step 5): different bytes never masquerade as idempotent", async () => {
+      // The fail-open trap: a naive fix ("different algorithm -> false") would silently
+      // accept genuinely different bytes as a no-op, masking the very conflict step 5
+      // exists to surface. Different bytes is a conflict regardless of algorithm.
+      const stash = new Stash({ backend: create() });
+      const id = generate();
+      await stash.store(storedEntryUnder(id, "the original content", "sha256"), "the original content");
+      const conflicting = storedEntryUnder(id, "a genuinely different payload", "sha3-512"); // different bytes AND algorithm
+      await assert.rejects(stash.store(conflicting, "a genuinely different payload"),
+        (e) => e instanceof IntegrityError && e.code === "EINTEGRITY");
+      assert.deepEqual(await drain(await stash.apply(id)), Buffer.from("the original content"), "the existing entry is untouched");
+      assert.equal((await stash.show(id)).digest, storedEntryUnder(id, "the original content", "sha256").digest, "and keeps its original algorithm/digest");
+    });
+
+    test("store() catches a lying CROSS-algorithm entry (digest disagrees with its own bytes) -> IntegrityError, nothing changes", async () => {
+      // Reconciling cross-algorithm still verifies the incoming bytes against the
+      // incoming entry's OWN manifest -- an untrusted replica that lies about its own
+      // digest is caught exactly as the write path catches it, never trusted into a no-op.
+      const stash = new Stash({ backend: create() });
+      const id = generate();
+      await stash.store(storedEntryUnder(id, "stored content", "sha256"), "stored content");
+      const lie = storedEntryUnder(id, "stored content", "sha3-512"); // digest over "stored content"...
+      await assert.rejects(stash.store(lie, "STORED CONTENT"), // ...but streams different (same-length) bytes
+        (e) => e instanceof IntegrityError && e.code === "EINTEGRITY");
+      assert.deepEqual(await drain(await stash.apply(id)), Buffer.from("stored content"), "the existing entry is untouched");
     });
 
     test("store() order is normative: step 2 (tombstoned) beats step 5 (digest conflict) -> false, not IntegrityError", async () => {
