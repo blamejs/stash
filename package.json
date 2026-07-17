@@ -1,6 +1,6 @@
 {
   "name": "@blamejs/stash",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Zero-dependency, ephemeral, crypto-agnostic content store for Node.js. Bytes in, ref out; bytes out once, and they're gone.",
   "keywords": [
     "stash",
@@ -24,6 +24,9 @@
   "author": "blamejs contributors",
   "type": "module",
   "main": "src/index.js",
+  "bin": {
+    "stashjs": "src/cli.js"
+  },
   "exports": {
     ".": "./src/index.js",
     "./backends/memory": "./src/backends/memory.js",

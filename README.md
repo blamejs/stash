@@ -215,6 +215,29 @@ node examples/permission-flags.js  # run under --permission; prove the grant is 
 
 They assert every step and run in CI, so a broken example fails the build.
 
+## Command-line tool
+
+Inspect and maintain a disk-backed stash from the shell without writing a Node
+program. The `stashjs` command ships with the package:
+
+```
+npx @blamejs/stash verify --root ./.stash         # audit for damage; --repair to clean
+npx @blamejs/stash stats --root ./.stash           # entries, bytes, claimed
+npx @blamejs/stash list --root ./.stash --json     # entries as JSON, for scripting
+npx @blamejs/stash prune                            # reap expired entries and old graves
+npx @blamejs/stash tombstones                       # the graves left by destroyed entries
+npx @blamejs/stash has <ref>                        # true / false
+```
+
+The root comes from `--root`, else `$STASH_ROOT`, else `./.stash`, and must already
+exist. Add `--json` to any command for a machine-readable document. The CLI exposes
+only the query and maintenance verbs -- it never moves bytes and never destroys by
+ref, so it hands out no capability and streams no blob -- fails closed with stable
+exit codes, and runs under `--permission` exactly as the library does. Point it at a
+stash whose owning process is stopped, or a cold-standby replica: like every access
+to a disk root it is single-writer, and each command except `verify` runs the
+crash-recovery scan first.
+
 ## Run it sandboxed
 
 StashJS is designed to run under the Node permission model, with the WRITE grant

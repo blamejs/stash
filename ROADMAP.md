@@ -123,6 +123,20 @@ to agree; the terms are ANDed, so the check is strictly more selective and an
 untampered read still matches. It is the single choke point behind both the
 read-path swap guard and the crash-recovery interrupted-claim check.
 
+## Operational CLI -- SHIPPED (0.1.14)
+
+The store gains its first executable entry point: the `stashjs` command
+(`npx @blamejs/stash <command>`) inspects and maintains a disk-backed stash from
+the shell -- `verify` (`--repair`), `stats`, `prune`, `list` (`--include-expired`),
+`tombstones`, and `has <ref>` -- with a human table by default and `--json` for
+scripting. It composes only the already-shipped query and maintenance verbs: it
+never moves bytes and never destroys by ref, so it hands out no capability and
+streams no blob. The root is taken from `--root`, `$STASH_ROOT`, or `./.stash` and
+must already exist. It fails closed with stable exit codes, keeps every error
+capability-free, and runs under `--permission` exactly as the library. Being a
+second process on a disk root, it is single-writer: point it at a quiesced store or
+a cold-standby replica.
+
 ## Standing constraints
 
 Every milestone honors the one rule (no decrypt capability), zero
