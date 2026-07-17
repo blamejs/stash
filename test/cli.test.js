@@ -10,7 +10,7 @@
 import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, mkdirSync, chmodSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -178,6 +178,56 @@ suite("cli", { skip: SANDBOXED }, () => {
     // And it did not create the store.
     const again = runCli(["stats", "--root", bogus]);
     assert.equal(again.status, 2, "the CLI did not conjure an empty store on the first run");
+  });
+
+  test("a PARTIAL layout (meta/ but no blobs/) is refused, not completed into an empty store", () => {
+    // A directory carrying only some of the layout is not a stash. Checking one
+    // subdir would let the backend fill in the rest and report "0 entries", masking
+    // the mistake -- the CLI must require the full layout.
+    const root = freshScratchDir("cli-partial");
+    mkdirSync(join(root, "meta"), { recursive: true }); // meta/ present, blobs/ absent
+    const { status } = runCli(["stats", "--root", root]);
+    assert.equal(status, 2, "a partial layout is a usage error");
+    assert.ok(!readdirSync(root).includes("blobs"), "the CLI did not create the missing blobs/ dir");
+  });
+
+  test("a malformed ref is refused (EBADREF) BEFORE the root is opened -- even a missing root", () => {
+    // Ref validation precedes storage access: `has ../../etc/passwd` against a
+    // non-existent root must fail as EBADREF (the ref), not as a missing-root usage
+    // error -- the ref is rejected with zero filesystem I/O regardless of the root.
+    const bogus = join(freshScratchDir("cli-reffirst"), "no-such-store");
+    const { stderr, status } = runCli(["has", "../../etc/passwd", "--root", bogus]);
+    assert.equal(status, 3, "the malformed ref is EBADREF, not a root usage error");
+    assert.ok(stderr.includes("EBADREF"));
+  });
+
+  test("an access fault on the root surfaces as a fault, not a 'not found' usage error", () => {
+    // EACCES on the root must be preserved as a fault (exit != usage), never masked
+    // as "not found" -- else the operator hunts for a missing dir when the real
+    // problem is a permission grant. Best-effort: skip where the FS declines to deny
+    // (Windows, or a root user that bypasses 0000), mirroring the disk chmod vectors.
+    const root = freshScratchDir("cli-eacces");
+    mkdirSync(join(root, "blobs"), { recursive: true });
+    mkdirSync(join(root, "meta"), { recursive: true });
+    try {
+      chmodSync(root, 0o000);
+    } catch {
+      return; // cannot restrict -- nothing to prove here
+    }
+    let denied = false;
+    try {
+      statSync(join(root, "blobs"));
+    } catch (err) {
+      denied = err.code === "EACCES" || err.code === "EPERM";
+    }
+    if (!denied) {
+      chmodSync(root, 0o700);
+      return; // the platform did not actually deny access (root/Windows) -- skip
+    }
+    const { status } = runCli(["stats", "--root", root]);
+    chmodSync(root, 0o700); // restore so cleanup can remove it
+    assert.notEqual(status, 2, "an access fault is not a usage error");
+    assert.equal(status, 5, "an access fault surfaces as the fault exit code");
   });
 
   test("an unknown command and an unknown flag are usage errors (exit 2), no input echoed", async () => {

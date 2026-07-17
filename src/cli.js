@@ -45,6 +45,7 @@ import { parseArgs } from "node:util";
 import { DiskBackend } from "./backends/disk.js";
 import { StashError } from "./errors.js";
 import { Stash, version } from "./index.js";
+import { isValid } from "./ref.js";
 
 // Stable, documented exit codes (fail-closed): distinct for each verdict class so a
 // cron/fsck caller can branch. Frozen alongside the error catalog (SPEC.md 10).
@@ -105,14 +106,25 @@ function resolveRoot(flags, env) {
 // No path is echoed (capability-in-error-message) -- the operator sees their own
 // --root argument.
 function assertStashLayout(root) {
-  let ok = false;
-  try {
-    ok = statSync(join(root, "meta")).isDirectory();
-  } catch {
-    ok = false;
-  }
-  if (!ok) {
-    throw new UsageError("stash root not found (expected an existing disk backend layout)");
+  // A real disk root carries the full layout; require the two load-bearing
+  // directories (blobs/ + meta/) so a partial or wrong directory is refused, not
+  // silently completed into an empty store. A missing directory (ENOENT/ENOTDIR) is
+  // "no stash here" -- a usage error the operator fixes by correcting --root -- but
+  // an access or I/O fault (EACCES, ...) is a REAL fault surfaced distinctly, never
+  // masked as "not found". No path is echoed (the operator sees their own --root).
+  for (const sub of ["blobs", "meta"]) {
+    let st;
+    try {
+      st = statSync(join(root, sub));
+    } catch (err) {
+      if (err.code === "ENOENT" || err.code === "ENOTDIR") {
+        throw new UsageError("stash root not found (expected an existing disk backend layout)");
+      }
+      throw err; // EACCES / EIO / ... -- a real access fault, not a usage error
+    }
+    if (!st.isDirectory()) {
+      throw new UsageError("stash root is not a disk backend layout");
+    }
   }
 }
 
@@ -124,7 +136,7 @@ const COMMANDS = {
   prune: { options: { ...COMMON }, positionals: 0, run: cmdPrune },
   list: { options: { ...COMMON, "include-expired": { type: "boolean", default: false } }, positionals: 0, run: cmdList },
   tombstones: { options: { ...COMMON }, positionals: 0, run: cmdTombstones },
-  has: { options: { ...COMMON }, positionals: 1, run: cmdHas },
+  has: { options: { ...COMMON }, positionals: 1, refPositional: true, run: cmdHas },
 };
 
 // The subcommand names, exported so a test pins that --help documents every one --
@@ -250,6 +262,13 @@ export async function main(argv, io) {
   if (parsed.positionals.length !== spec.positionals) {
     io.err.write("stashjs: wrong number of arguments (run stashjs --help)\n");
     return EXIT.USAGE;
+  }
+  // A ref argument is validated at the whitelist BEFORE the root is opened -- ref
+  // validation precedes any storage access (hard rule 4), so a malformed ref is
+  // refused with zero filesystem I/O, regardless of the root's state.
+  if (spec.refPositional && !isValid(parsed.positionals[0])) {
+    io.err.write("stashjs: EBADREF\n");
+    return EXIT.BAD_REF;
   }
   let stash;
   try {
