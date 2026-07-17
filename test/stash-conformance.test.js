@@ -15,6 +15,7 @@ import { MemoryBackend } from "../src/backends/memory.js";
 import { DiskBackend } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
 import { C } from "../src/constants.js";
+import { DIGESTS, digestHash, finalize } from "../src/digest.js";
 import { freshScratchDir, cleanupScratch } from "./_scratch.js";
 
 // The sandbox denies spawn; the process-exits vector needs a child process, so
@@ -92,6 +93,24 @@ function wrapBackend(inner, overrides = {}) {
   const backend = {};
   for (const m of BACKEND_METHODS) backend[m] = (...a) => inner[m](...a);
   return Object.assign(backend, overrides);
+}
+
+// corruptingReadBackend(inner, tampered) -- a backend whose read() opens the REAL
+// stored blob (so a missing entry still throws RefNotFound and the disk read path is
+// exercised end to end) then serves `tampered` bytes in its place -- the storage-rot
+// case the verifying read stream exists to catch. It DESTROYS the opened stream
+// rather than abandoning it, closing the FileHandle it will not use: an undrained
+// handle lingers until GC, and a FileHandle closed by GC is a hard error on newer
+// Node -- a fixture closes what it opens (the same discipline as the claim
+// substitutions' c.source.destroy()).
+function corruptingReadBackend(inner, tampered = "tampered bytes") {
+  return wrapBackend(inner, {
+    read: async (id) => {
+      const real = await inner.read(id);
+      real.destroy();
+      return Readable.from([Buffer.from(tampered)]);
+    },
+  });
 }
 
 // retryClaimed(fn) -- run a claimed read, retrying while it loses the claim race
@@ -1872,6 +1891,77 @@ for (const { name, create } of BACKENDS) {
   });
 }
 
+// M9 digest agility: the integrity hash is a construct-time choice, the stored
+// digest is self-describing ("algo:hex"), and reads verify with the entry's OWN
+// algorithm. Runs against every backend.
+const DIGEST_ALGOS = Object.keys(DIGESTS); // sha256, sha512, sha3-256, sha3-512, shake256
+const digestOf = (bytes, algo) => finalize(digestHash(algo).update(Buffer.from(bytes)), algo);
+
+for (const { name, create } of BACKENDS) {
+  suite("M9 digest agility: " + name, () => {
+    for (const algo of DIGEST_ALGOS) {
+      test(`push+apply round-trips under digest '${algo}'; the stored digest is the algo's hash, self-describing, verified on read`, async () => {
+        const stash = new Stash({ backend: create(), digest: algo });
+        const payload = Buffer.from("bytes hashed with " + algo);
+        const ref = await stash.push(payload);
+        const stored = await stash.show(ref);
+        assert.equal(stored.digest, digestOf(payload, algo), "the stored digest is the algorithm's hash of the bytes");
+        assert.ok(stored.digest.startsWith(algo + ":"), "the stored digest names its algorithm");
+        assert.deepEqual(await drain(await stash.apply(ref)), payload, "the read verifies with the stored algorithm");
+      });
+    }
+
+    test("a store holds MIXED algorithms: a sha256 and a sha3-512 entry each apply and verify() clean (self-describing per entry)", async () => {
+      const backend = create();
+      const s256 = new Stash({ backend, digest: "sha256" });
+      const a = await s256.push("first, sha256");
+      const s3 = new Stash({ backend, digest: "sha3-512" });
+      const b = await s3.push("second, sha3-512");
+      // Either Stash reads either entry: the read keys on the entry's OWN stored algo,
+      // never the reader's option.
+      assert.ok((await s256.show(a)).digest.startsWith("sha256:"));
+      assert.ok((await s256.show(b)).digest.startsWith("sha3-512:"));
+      assert.deepEqual(await drain(await s256.apply(b)), Buffer.from("second, sha3-512"), "a sha256-configured Stash still verifies a sha3-512 entry");
+      assert.deepEqual(await drain(await s3.apply(a)), Buffer.from("first, sha256"));
+      assert.deepEqual((await s256.verify()).findings, [], "the mixed-algorithm store verifies clean");
+    });
+
+    test("store() replicates an entry with its OWN algorithm intact (self-describing)", async () => {
+      const stash = new Stash({ backend: create() }); // default sha256 for its own pushes
+      const id = generate();
+      const bytes = "replicated under sha3-512";
+      const entry = makeStoredEntry(id, bytes, { digest: digestOf(bytes, "sha3-512") });
+      assert.equal(await stash.store(entry, bytes), true, "the sha3-512 entry lands");
+      assert.equal((await stash.show(id)).digest, digestOf(bytes, "sha3-512"), "its algorithm is preserved, not rewritten to sha256");
+      assert.deepEqual(await drain(await stash.apply(id)), Buffer.from(bytes));
+    });
+
+    test("a corrupted read under a non-sha256 digest errors with IntegrityError (verified with the STORED algo, not sha256)", async () => {
+      const inner = create();
+      const corrupting = corruptingReadBackend(inner);
+      const stash = new Stash({ backend: corrupting, digest: "sha3-512" });
+      const ref = await stash.push("original bytes");
+      await assert.rejects(drain(await stash.apply(ref)), (e) => e instanceof IntegrityError && e.code === "EINTEGRITY");
+    });
+
+    test("store() rejects a digest with an UNKNOWN algorithm and a known algo with the WRONG hex length -> IntegrityError, nothing lands", async () => {
+      const stash = new Stash({ backend: create() });
+      const bytes = "x";
+      const unknownAlgo = makeStoredEntry(generate(), bytes, { digest: "md5:" + "0".repeat(32) });
+      await assert.rejects(stash.store(unknownAlgo, bytes), IntegrityError);
+      const wrongLen = makeStoredEntry(generate(), bytes, { digest: "sha512:" + "0".repeat(64) }); // sha512 needs 128 hex
+      await assert.rejects(stash.store(wrongLen, bytes), IntegrityError);
+      assert.deepEqual(await stash.list(), [], "not one malformed-digest entry landed");
+    });
+
+    test("the digest option is a closed enum: an unknown or non-string algorithm is a config-time TypeError; every registry algorithm constructs", () => {
+      assert.throws(() => new Stash({ backend: create(), digest: "md5" }), TypeError);
+      assert.throws(() => new Stash({ backend: create(), digest: 42 }), TypeError);
+      for (const algo of DIGEST_ALGOS) assert.doesNotThrow(() => new Stash({ backend: create(), digest: algo }));
+    });
+  });
+}
+
 suite("ref validation precedes storage access", () => {
   function probe() {
     const calls = [];
@@ -1909,12 +1999,7 @@ suite("integrity", () => {
     // digest it recorded -- the storage-rot case the verifying stream exists
     // to catch.
     const inner = new MemoryBackend();
-    const corrupting = wrapBackend(inner, {
-      read: async (id) => {
-        await inner.read(id);
-        return Readable.from([Buffer.from("tampered bytes")]);
-      },
-    });
+    const corrupting = corruptingReadBackend(inner);
     const stash = new Stash({ backend: corrupting });
     const ref = await stash.push("original bytes");
     const readable = await stash.apply(ref);

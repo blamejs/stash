@@ -27,9 +27,9 @@
  *   and sidecar-file disk with atomic writes and realpath containment.
  */
 
-import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 
+import { DEFAULT_DIGEST, algoOf, digestHash, finalize } from "../digest.js";
 import { spend } from "../entry.js";
 import { IntegrityError, RefClaimed, RefNotFound } from "../errors.js";
 import { assertValid, constantTimeEqual } from "../ref.js";
@@ -69,14 +69,15 @@ export class MemoryBackend {
   // holds bytes and moves them between states the policy layer directs.
   #claims = new Map();
 
-  // write(id, source, entry) -> Entry. Consumes the async-iterable source
-  // chunk by chunk, computing size and sha256 digest as bytes pass. Every
-  // retained chunk is an OWNED COPY: the store outlives the push, so a
-  // caller that reuses its chunk buffer after a yield (a scratch buffer, a
-  // pooled slab) must not be able to rewrite stored bytes out from under
+  // write(id, source, entry, algo) -> Entry. Consumes the async-iterable source
+  // chunk by chunk, computing size and the `algo` digest as bytes pass (the policy
+  // layer chooses `algo`: the constructor option for push, the entry's own
+  // algorithm for store). Every retained chunk is an OWNED COPY: the store outlives
+  // the push, so a caller that reuses its chunk buffer after a yield (a scratch
+  // buffer, a pooled slab) must not be able to rewrite stored bytes out from under
   // the recorded digest.
-  async write(id, source, entry) {
-    const hash = createHash("sha256");
+  async write(id, source, entry, algo = DEFAULT_DIGEST) {
+    const hash = digestHash(algo);
     const chunks = [];
     let size = 0;
     for await (const chunk of source) {
@@ -87,7 +88,7 @@ export class MemoryBackend {
     }
     const stored = structuredClone(entry);
     stored.size = size;
-    stored.digest = "sha256:" + hash.digest("hex");
+    stored.digest = finalize(hash, algo);
     this.#entries.set(id, { entry: stored, chunks });
     return structuredClone(stored);
   }
@@ -237,9 +238,10 @@ export class MemoryBackend {
     let scanned = 0;
     for (const [id, held] of this.#entries) {
       scanned += 1;
-      const hash = createHash("sha256");
+      const algo = algoOf(held.entry.digest);
+      const hash = digestHash(algo);
       for (const buf of held.chunks) hash.update(buf);
-      if (!constantTimeEqual("sha256:" + hash.digest("hex"), held.entry.digest)) {
+      if (!constantTimeEqual(finalize(hash, algo), held.entry.digest)) {
         findings.push({ kind: "digest-mismatch", id });
         if (opts.repair) {
           this.#entries.delete(id);
@@ -250,14 +252,15 @@ export class MemoryBackend {
     const now = Date.now();
     for (const [id, held] of this.#claims) {
       scanned += 1; // a claimed blob still occupies the store; disk counts its meta/ sidecar, so match
-      const hash = createHash("sha256");
+      const algo = algoOf(held.entry.digest);
+      const hash = digestHash(algo);
       for (const buf of held.chunks) hash.update(buf);
       // Digest-checked like any other (disk hashes the claimed blob), but a mismatch
       // is reported and NEVER repaired (mid-pop). In memory the claimed chunks are
       // the same object the digest was taken over at push, so this mismatch is
       // unreachable via the public API -- the check keeps the backends parallel and
       // would catch a future bug that mutated claimed chunks.
-      if (!constantTimeEqual("sha256:" + hash.digest("hex"), held.entry.digest)) findings.push({ kind: "digest-mismatch", id });
+      if (!constantTimeEqual(finalize(hash, algo), held.entry.digest)) findings.push({ kind: "digest-mismatch", id });
       if (now - held.claimedAt >= opts.claimTimeoutMs) findings.push({ kind: "stale-claim", id });
     }
     return { scanned, findings, repaired };
