@@ -467,7 +467,10 @@ export class DiskBackend {
         else throw err;
       }
       const blobDir = await this.#containedDir("blobs");
-      await rm(join(blobDir, id), { force: true });
+      // force AND recursive: the blob is normally a regular file (recursive is inert
+      // on one), but verify repair must also reap a tampered directory-shaped blob.
+      // rm removes a final-component symlink itself, never following it (CWE-59/367).
+      await rm(join(blobDir, id), { force: true, recursive: true });
       return had;
     } catch (err) {
       this.#reaped.delete(id); // a real fault anywhere above: roll the claim back for a retry

@@ -1344,6 +1344,18 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     await assert.rejects(stash.verify(), (e) => e instanceof IntegrityError);
   });
 
+  test("verify repair reaps a directory-shaped blob (tampering), contents and all -- not just a regular file", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("entry");
+    rmSync(bp(root, ref));
+    mkdirSync(bp(root, ref)); // a directory where the blob belongs
+    writeFileSync(join(bp(root, ref), "junk"), "x"); // non-empty: a non-recursive rm would EISDIR
+    const rep = await stash.verify({ repair: true });
+    assert.ok(rep.repaired.some((f) => f.id === ref), "the damaged entry is condemned");
+    assert.equal(existsSync(bp(root, ref)), false, "the directory-shaped blob is removed, contents and all");
+    assert.equal(existsSync(mp(root, ref)), false, "the sidecar goes with it");
+  });
+
   test("a size-mismatched blob is size-mismatch, removed under repair", async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("exact");
