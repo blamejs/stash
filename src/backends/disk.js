@@ -635,6 +635,33 @@ export class DiskBackend {
     }
   }
 
+  // #auditOrphanTmp(subdir, dir, name, now, opts, findings, repaired) -> boolean.
+  // The ONE `.tmp` verdict for every layout dir. A `.tmp` is an atomic write in
+  // progress (write() / #writeAtomic stream to <name>.tmp, fsync, rename): a FRESH
+  // one is that in-flight write and is spared (deleting it would corrupt a live
+  // push -- CWE-367); one AGED past the grace is a crashed write's orphan --
+  // reported as orphan-tmp and, under repair, discarded (parent re-resolved). Every
+  // walk (meta/, blobs/, claims/) routes its `.tmp` handling here so none can strand
+  // a stale temp the others reap (the meta/ and claims/ walks once skipped `.tmp`
+  // unconditionally). Returns true when `name` was a `.tmp` -- the caller skips it.
+  async #auditOrphanTmp(subdir, dir, name, now, opts, findings, repaired) {
+    if (!name.endsWith(".tmp")) return false;
+    let tmpStat = null;
+    try {
+      tmpStat = await lstat(join(dir, name));
+    } catch (err) {
+      _absent(err); // vanished mid-walk (the rename landed): a fault re-raises, ENOENT leaves tmpStat null
+    }
+    // A null tmpStat means the .tmp raced out from under us -- still a .tmp the
+    // caller skips, just nothing left to age. A present one aged past the grace is
+    // a crashed write's orphan; a fresh one is an in-flight write, spared (CWE-367).
+    if (tmpStat !== null && now - tmpStat.mtimeMs >= C.AUDIT.TMP_GRACE_MS) {
+      findings.push({ kind: "orphan-tmp", id: null });
+      if (opts.repair) await this.#discard(subdir, name, "orphan-tmp", repaired);
+    }
+    return true; // it WAS a .tmp -- the caller skips it either way (never an entry)
+  }
+
   // verify(opts) -> { scanned, findings, repaired }. Audit the physical layout,
   // composing the read choke points: #containedDir per subdir (re-resolved before
   // every readdir and unlink), this.stat for per-sidecar validation, #hashBlob for
@@ -665,7 +692,7 @@ export class DiskBackend {
 
     // meta/: each sidecar is an entry -- validate it, then check its blob.
     for (const name of await readdir(metaDir)) {
-      if (name.endsWith(".tmp")) continue; // an in-flight sidecar write
+      if (await this.#auditOrphanTmp("meta", metaDir, name, now, opts, findings, repaired)) continue; // an in-flight or orphaned sidecar write
       const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
       if (id === null || !isValid(id)) {
         findings.push({ kind: "foreign-file", id: null });
@@ -736,14 +763,7 @@ export class DiskBackend {
     // blobs/: orphan blobs (no sidecar), stale .tmp orphans, foreign files.
     const blobScan = await this.#containedDir("blobs");
     for (const name of await readdir(blobScan)) {
-      if (name.endsWith(".tmp")) {
-        let tmpStat;
-        try { tmpStat = await lstat(join(blobScan, name)); } catch (err) { _absent(err); continue; }
-        if (now - tmpStat.mtimeMs < C.AUDIT.TMP_GRACE_MS) continue; // an in-flight push, not an orphan
-        findings.push({ kind: "orphan-tmp", id: null });
-        if (opts.repair) await this.#discard("blobs", name, "orphan-tmp", repaired);
-        continue;
-      }
+      if (await this.#auditOrphanTmp("blobs", blobScan, name, now, opts, findings, repaired)) continue; // an in-flight push or orphaned .tmp
       if (!isValid(name)) {
         findings.push({ kind: "foreign-file", id: null });
         if (opts.repair) await this.#discard("blobs", name, "foreign-file", repaired);
@@ -770,7 +790,7 @@ export class DiskBackend {
     // claim would be data loss; SPEC.md 6 recovery owns resolution).
     const claimsDir = await this.#containedDir("claims");
     for (const name of await readdir(claimsDir)) {
-      if (name.endsWith(".tmp")) continue;
+      if (await this.#auditOrphanTmp("claims", claimsDir, name, now, opts, findings, repaired)) continue; // an orphaned .tmp (claims/ writes none in normal flow)
       if (!isValid(name)) {
         findings.push({ kind: "foreign-file", id: null });
         if (opts.repair) await this.#discard("claims", name, "foreign-file", repaired);

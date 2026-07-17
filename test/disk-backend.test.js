@@ -1346,6 +1346,49 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     assert.equal(existsSync(join(root, "claims", ref)), true, "the claimed bytes stay -- deleting a restorable claim would be data loss");
   });
 
+  test("verify() on a fresh store's FIRST op does NOT run crash recovery: a stale claim is reported, never restored (a dry run stays read-only, SPEC.md 6)", async () => {
+    const root = freshRoot();
+    const setup = new Stash({ backend: new DiskBackend({ root }) });
+    const ref = await setup.push("claimed");
+    plantClaim(root, ref); // a prior run's abandoned pop: stale claim, sidecar intact
+    // A NEW store whose first op is a dry-run verify must audit the store as-is.
+    // Running #recover here would restore/burn the claim (a mutation) and hide the
+    // very stale-claim finding verify exists to surface -- an auditor process after
+    // a crash must see the residue, not silently clean it.
+    const auditor = new Stash({ backend: new DiskBackend({ root }) });
+    const dry = await auditor.verify();
+    assert.ok(dry.findings.some((f) => f.kind === "stale-claim" && f.id === ref), "the stale claim is REPORTED, not resolved");
+    assert.equal(existsSync(join(root, "claims", ref)), true, "the claim is untouched -- verify resolved nothing");
+    assert.equal(existsSync(bp(root, ref)), false, "the blob stayed in claims/, never restored to blobs/");
+  });
+
+  test("an AGED .tmp in meta/ (a crashed sidecar write) is orphan-tmp, reaped under repair; a fresh one is spared", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("keep");
+    // #writeAtomic streams a sidecar to meta/<id>.json.tmp before the rename; a
+    // crash strands it. The meta/ walk must age it like the blobs/ walk does, not
+    // skip every .tmp forever and leave the store's temp litter unaudited.
+    const stale = join(root, "meta", "crashed.json.tmp"); writeFileSync(stale, "half a sidecar");
+    const old = new Date(Date.now() - TWO_HOURS); utimesSync(stale, old, old);
+    const fresh = join(root, "meta", generate() + ".json.tmp"); writeFileSync(fresh, "in-flight write"); // mtime = now
+    const dry = await stash.verify();
+    assert.deepEqual(dry.findings, [{ kind: "orphan-tmp", id: null }], "only the aged meta .tmp is an orphan; the fresh one is an in-flight write");
+    await stash.verify({ repair: true });
+    assert.equal(existsSync(stale), false, "repair reaps the stranded meta sidecar .tmp");
+    assert.equal(existsSync(fresh), true, "the in-flight sidecar write is spared (CWE-367)");
+  });
+
+  test("an AGED .tmp in claims/ is orphan-tmp too -- the temp sweep covers every layout dir", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("keep");
+    const stale = join(root, "claims", "crashed.tmp"); writeFileSync(stale, "junk");
+    const old = new Date(Date.now() - TWO_HOURS); utimesSync(stale, old, old);
+    const dry = await stash.verify();
+    assert.ok(dry.findings.some((f) => f.kind === "orphan-tmp"), "a stale claims/ .tmp is an orphan too, not skipped");
+    await stash.verify({ repair: true });
+    assert.equal(existsSync(stale), false, "repair reaps it");
+  });
+
   test("verify FAULTS on an I/O error, never resolves a clean report", { skip: CANNOT_FAULT }, async () => {
     const { root, stash } = freshStash();
     await stash.push("x");

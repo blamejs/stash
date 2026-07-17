@@ -866,9 +866,14 @@ export class Stash extends EventEmitter {
     if (opts.repair !== undefined && typeof opts.repair !== "boolean") {
       throw new TypeError("verify: repair must be a boolean");
     }
-    await this.#recover();
-    // claimTimeout is policy (M5), passed down so the backend can age a stale
-    // claim without owning the lifecycle threshold; the tmp grace is C.AUDIT.
+    // verify does NOT run #recover: it AUDITS the store as-is and REPORTS stale
+    // claims (SPEC.md 6 -- resolving one is recovery's job, run by every mutating
+    // verb and at construction, never by an audit). Recovering here would make a
+    // dry run MUTATE (a restore/burn) and would hide the very stale-claim finding
+    // verify exists to surface -- a fresh auditor process whose first call is
+    // verify() must see the crash residue, not silently clean it. claimTimeout is
+    // policy (M5), passed down so the backend can age a stale claim without owning
+    // the threshold; the tmp grace is C.AUDIT.
     return this.#backend.verify({ repair: opts.repair === true, claimTimeoutMs: this.#claimTimeoutMs });
   }
 
