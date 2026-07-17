@@ -715,7 +715,14 @@ export class DiskBackend {
           // walk that fell over as N spurious corrupt-sidecar findings (CWE-392).
           await this.#containedDir("meta");
           findings.push({ kind: "corrupt-sidecar", id });
-          if (opts.repair) await this.#condemn(id, "corrupt-sidecar", repaired);
+          // A corrupt sidecar may belong to a CLAIMED entry (a crash mid consumeRead
+          // rewrite leaves the sidecar unparsable while the blob is live in claims/):
+          // report the damage, but NEVER condemn a claimed entry -- it is mid-pop and
+          // recovery / the pop owns resolving it, the same protection the size /
+          // digest findings get (CWE-362). Re-check claims/ LIVE.
+          if (opts.repair && !(await this.#isPresent(join(await this.#containedDir("claims"), id)))) {
+            await this.#condemn(id, "corrupt-sidecar", repaired);
+          }
           continue;
         }
         throw err; // an fs FAULT -- never a finding

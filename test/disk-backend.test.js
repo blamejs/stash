@@ -1361,6 +1361,19 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     assert.equal(existsSync(mp(root, ref)), true, "the sidecar is left in place");
   });
 
+  test("verify({repair}) does NOT condemn a CLAIMED entry with a corrupt sidecar -- a mid-pop entry survives repair (CWE-362)", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("claimed");
+    plantClaim(root, ref, { ageMs: 0 }); // a LIVE claim: blob in claims/, sidecar in meta/
+    writeFileSync(mp(root, ref), "{ corrupt sidecar"); // a crash mid consumeRead rewrite: sidecar unparsable
+    const dry = await stash.verify();
+    assert.ok(dry.findings.some((f) => f.kind === "corrupt-sidecar" && f.id === ref), "the corrupt sidecar is reported");
+    const rep = await stash.verify({ repair: true });
+    assert.deepEqual(rep.repaired, [], "a claimed entry is NEVER condemned, even with a corrupt sidecar");
+    assert.equal(existsSync(join(root, "claims", ref)), true, "the claimed blob survives repair");
+    assert.equal(existsSync(mp(root, ref)), true, "the (corrupt) sidecar is left for recovery, not destroyed");
+  });
+
   test("verify() on a fresh store's FIRST op does NOT run crash recovery: a stale claim is reported, never restored (a dry run stays read-only, SPEC.md 6)", async () => {
     const root = freshRoot();
     const setup = new Stash({ backend: new DiskBackend({ root }) });
