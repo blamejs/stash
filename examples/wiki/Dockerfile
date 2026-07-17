@@ -40,11 +40,12 @@ ENV NODE_ENV=production \
 WORKDIR /app
 # The library source the page generator parses, then the site itself.
 COPY --chown=65532:65532 src ./src
-# SPEC.md sits at the repo root, ABOVE both trees above; the page generator
-# resolves it as path.resolve(libDir, "..", "SPEC.md") and renders it as the
-# Overview page. Without it the read throws, the page is dropped, and the
-# site's front door ships blank -- so copy it into the same /app the
-# generator resolves against.
+# README.md and SPEC.md sit at the repo root, ABOVE both trees above; the page
+# generator resolves each as path.resolve(libDir, "..", "<name>") -- the README
+# backs the Overview page (the site's front door), SPEC.md the Specification
+# page. Without them the reads throw, the pages are dropped, and the front door
+# ships blank -- so copy both into the same /app the generator resolves against.
+COPY --chown=65532:65532 README.md ./README.md
 COPY --chown=65532:65532 SPEC.md ./SPEC.md
 COPY --chown=65532:65532 examples/wiki ./examples/wiki
 

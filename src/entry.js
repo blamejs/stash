@@ -93,17 +93,21 @@ export function isExpired(entry, nowMs) {
   return entry.expiresAt !== null && entry.expiresAt <= nowMs;
 }
 
-// make(id, meta, ttlMs) -> a fresh M1/M3 entry. Size and digest are the
-// backend's to fill during the write stream; the read budget stays inert until
-// M5. `ttlMs` (null = no expiry) stamps `expiresAt` from the SAME `createdAt`
-// clock read, so the two can never come from two different reads. The sum must
-// land on a safe integer -- an expiresAt past 2^53-1 serializes as a lie (JSON
-// turns a non-finite into null = "never expires") or manufactures an integrity
-// verdict on every later read -- so a ttl that overflows it is a config-time
-// TypeError, caught here at the single construction site.
+// make(id, meta, ttlMs, reads) -> a fresh entry. Size and digest are the
+// backend's to fill during the write stream. `ttlMs` (null = no expiry) stamps
+// `expiresAt` from the SAME `createdAt` clock read, so the two can never come
+// from two different reads. The sum must land on a safe integer -- an expiresAt
+// past 2^53-1 serializes as a lie (JSON turns a non-finite into null = "never
+// expires") or manufactures an integrity verdict on every later read -- so a
+// ttl that overflows it is a config-time TypeError, caught here at the single
+// construction site. `reads` (null = unlimited) is the read budget; a budgeted
+// entry initializes `readsLeft` equal to `reads`, and both travel together
+// through the sidecar so a reader can never see one without the other. A
+// non-positive or non-integer budget is a config-time TypeError, at the same
+// single site.
 // @enforced-by guard-shape-reinlined
 // @guard-shape readsLeft\s*:
-export function make(id, meta, ttlMs = null) {
+export function make(id, meta, ttlMs = null, reads = null) {
   const createdAt = Date.now();
   let expiresAt = null;
   if (ttlMs !== null) {
@@ -112,14 +116,33 @@ export function make(id, meta, ttlMs = null) {
       throw new TypeError("push: ttl places expiresAt beyond the safe integer range");
     }
   }
+  if (reads !== null && !(Number.isSafeInteger(reads) && reads > 0)) {
+    throw new TypeError("push: reads must be a positive integer or null");
+  }
   return {
     id,
     size: 0,
     digest: null,
     createdAt,
     expiresAt,
-    reads: null,
-    readsLeft: null,
+    reads,
+    readsLeft: reads,
     meta,
   };
+}
+
+// spend(entry) -> a COPY with `readsLeft` decremented by one. The monotone
+// read-budget debit (SPEC.md 4.1, 4.2), owned by the schema home so no backend
+// hand-rolls `readsLeft` arithmetic -- the guard-shape tripwire keeps the field
+// literal here. It never mutates its argument (structuredClone discipline). A
+// caller contract, not hostile input: spending an unbudgeted entry, or one with
+// no credit left, is a TypeError -- never a silent no-op that would let a
+// budgeted entry outlive its budget. The decrement is only ever applied while
+// the caller holds the entry's claim, which is the cross-process mutex.
+// @enforced-by guard-shape-reinlined
+// @guard-shape readsLeft\s*:
+export function spend(entry) {
+  if (entry.readsLeft === null) throw new TypeError("spend: entry has no read budget");
+  if (entry.readsLeft === 0) throw new TypeError("spend: read budget already exhausted");
+  return { ...entry, readsLeft: entry.readsLeft - 1 };
 }

@@ -41,12 +41,23 @@ Expired-but-unswept entries are pruned before the store is judged full, so a
 dead entry never blocks a live push. Every rejected push leaves no partial
 behind. The backend contract gains `stats()` for the aggregate the checks read.
 
-## M5 -- Pop & budgets -- NEXT
+## M5 -- Pop & budgets -- SHIPPED (0.1.7)
 
-The claim/stream/commit cycle, `onPopFailure` (`'restore'` default, `'burn'`
-opt-in), crash recovery, read budgets on the same claim machinery.
+`pop(ref)` reads an entry and destroys it the instant the stream drains cleanly;
+two concurrent pops race on an atomic claim, so exactly one drains and the other
+rejects `RefClaimed`. `push(source, { reads: N })` gives an entry a finite read
+budget on the same claim machinery: a credit is spent only on a full,
+digest-verified `apply` drain, concurrent budgeted readers serialize so the last
+credit is never double-spent, and the read that exhausts the budget destroys the
+entry. A read that fails to drain is resolved by `onPopFailure` -- `'restore'`
+(default) or `'burn'`. On the disk backend, a claim abandoned by a process
+killed mid-pop is reclaimed on the next construction, on the first operation
+(`claimTimeout` sets the grace window before a stale claim is resolved); an
+interrupted commit is finished, never resurrected, and a drop during a live
+claim is monotone. The backend contract gains the claim lifecycle: `claim`,
+`restore`, `commit`, `listClaims`, `consumeRead`, `isClaimed`.
 
-## M6 -- Audit
+## M6 -- Audit -- NEXT
 
 `has`, `stats`, `verify` (report + opt-in repair), the event set including
 `'sweepError'`.

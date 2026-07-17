@@ -9,12 +9,12 @@
 
 import { createHash } from "node:crypto";
 import { constants as FS } from "node:fs";
-import { lstat, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, realpath, rename, rm, utimes } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { C } from "../constants.js";
-import { assertShape } from "../entry.js";
-import { IntegrityError, InvalidRef, RefNotFound } from "../errors.js";
+import { assertShape, spend } from "../entry.js";
+import { IntegrityError, InvalidRef, RefClaimed, RefNotFound } from "../errors.js";
 import { assertValid, constantTimeEqual, isValid } from "../ref.js";
 import { options } from "../validate.js";
 
@@ -59,6 +59,28 @@ const SYMLINK_GUARD_NEEDED = (FS.O_NOFOLLOW || 0) === 0;
 function _absent(err) {
   if (err && err.code === "ENOENT") return true;
   throw err;
+}
+
+// A rename that replaces an existing name is atomic on every platform, but
+// Windows -- unlike POSIX, which swaps an open file freely -- refuses it with
+// EPERM/EACCES/EBUSY while a concurrent reader holds the destination open (a
+// sidecar stat during a claim storm reads the very file consumeRead rewrites).
+// The contention window is a few event-loop turns, so a bounded backoff clears
+// it; POSIX lands on the first attempt, leaving the retry inert there.
+const RENAME_RETRY_LIMIT = 50;
+const RENAME_RETRY_DELAY_MS = 4;
+async function _renameReplacing(from, to) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (err) {
+      const transient =
+        err && (err.code === "EPERM" || err.code === "EACCES" || err.code === "EBUSY");
+      if (!transient || attempt >= RENAME_RETRY_LIMIT) throw err;
+      await new Promise((resolve) => setTimeout(resolve, RENAME_RETRY_DELAY_MS));
+    }
+  }
 }
 
 // A symlink refused at open (ELOOP, POSIX O_NOFOLLOW), a non-file the open
@@ -263,7 +285,7 @@ export class DiskBackend {
       } finally {
         await fh.close();
       }
-      await rename(tmpPath, finalPath);
+      await _renameReplacing(tmpPath, finalPath);
     } catch (err) {
       await rm(tmpPath, { force: true });
       throw err;
@@ -342,9 +364,37 @@ export class DiskBackend {
     const blobDir = await this.#containedDir("blobs");
     const blobPath = join(blobDir, entry.id);
     const damaged = "blob storage shape is damaged";
-    // A blob missing under a present sidecar is corruption, not absence.
-    const fh = await this.#openStored(blobPath, () => new IntegrityError(damaged), damaged);
+    // A blob missing from blobs/ under a present sidecar is NOT absence: it is a
+    // live claim (the blob moved to claims/ for a pop) or corruption. onAbsent
+    // hands back a RefNotFound sentinel the catch resolves to RefClaimed or
+    // IntegrityError -- never a plain RefNotFound to the caller, because the
+    // entry is not gone, it is being served or damaged.
+    let fh;
+    try {
+      fh = await this.#openStored(blobPath, () => new RefNotFound(), damaged);
+    } catch (err) {
+      if (err instanceof RefNotFound) throw await this.#claimAwareAbsent(entry.id, damaged);
+      throw err;
+    }
     return fh.createReadStream();
+  }
+
+  // #claimAwareAbsent(id, damaged) -- verdict for a blob missing from blobs/
+  // under a present sidecar (fragile area 2). A no-follow lstat of claims/<id>:
+  // present means the blob was moved there for a pop -> RefClaimed (the entry is
+  // being served, not gone); absent means the sidecar has no blob anywhere ->
+  // IntegrityError. Reporting RefClaimed keeps a concurrent reader from being
+  // told a popped entry is "corrupt" -- the boy-who-cried-wolf failure that
+  // trains operators to ignore EINTEGRITY.
+  async #claimAwareAbsent(id, damaged) {
+    const claimsDir = await this.#containedDir("claims");
+    try {
+      await lstat(join(claimsDir, id));
+      return new RefClaimed();
+    } catch (err) {
+      _absent(err);
+      return new IntegrityError(damaged);
+    }
   }
 
   // remove(id) -> boolean. Sidecar first (the entry stops existing), then
@@ -464,7 +514,12 @@ export class DiskBackend {
       try {
         bytes += (await lstat(join(blobDir, id))).size; // the blob
       } catch (err) {
-        _absent(err); // the blob vanished mid-scan -> count the sidecar only
+        _absent(err); // absent from blobs/ -> either vanished, or claimed (moved
+        try {
+          bytes += (await lstat(join(claimsDir, id))).size; // to claims/ -- a
+        } catch (e2) {
+          _absent(e2); // claimed blob still occupies the store, so count it there
+        }
       }
     }
     let claimed = 0;
@@ -472,5 +527,172 @@ export class DiskBackend {
       if (!name.endsWith(".tmp")) claimed += 1;
     }
     return { entries, bytes, claimed };
+  }
+
+  // claim(id) -> { entry, source }. Atomically claim the blob into claims/<id>
+  // and stream from there. The mutex is `link`, NOT `rename`: link FAILS with
+  // EEXIST when a claim already exists, so exactly one of two racing pops wins;
+  // rename would SILENTLY REPLACE the destination and -- a real Windows behavior
+  // (verified) -- let both "win". The blob is one inode reachable from two names
+  // (blobs/<id> and claims/<id>) only across the link->unlink below; the sidecar
+  // stays in meta/, so a claimed entry is a sidecar in meta/ plus a blob in
+  // claims/. A reader during that narrow window still opens blobs/<id> and reads
+  // the inode; the claim-aware read path condemns a claimed blob once blobs/<id>
+  // is unlinked, which is the state every non-racing reader observes.
+  async claim(id) {
+    assertValid(id);
+    const blobDir = await this.#containedDir("blobs");
+    const claimsDir = await this.#containedDir("claims");
+    const claimPath = join(claimsDir, id);
+    // The claim mutex (link) runs BEFORE reading the sidecar: a loser rejects
+    // RefClaimed at the link without ever opening the sidecar, so it never races
+    // the winner's consumeRead sidecar rewrite -- renaming over an open file is
+    // EPERM on Windows. Only the winner reads the sidecar, below.
+    try {
+      await link(join(blobDir, id), claimPath);
+    } catch (err) {
+      // EEXIST: another pop already claimed it. ENOENT: the blob left blobs/ (a
+      // committed pop, or a drop) -- disambiguate (fragile area 1), never report
+      // not-found without checking the claim first.
+      if (err && err.code === "EEXIST") throw new RefClaimed();
+      if (err && err.code === "ENOENT") {
+        try {
+          await lstat(claimPath);
+        } catch (probe) {
+          _absent(probe);
+          throw new RefNotFound();
+        }
+        throw new RefClaimed();
+      }
+      throw err;
+    }
+    // Won the claim: drop the original name; the blob now lives only at claims/<id>.
+    await rm(join(blobDir, id), { force: true });
+    // link does not touch mtime, so stamp claimedAt explicitly -- otherwise every
+    // claim on an older entry would look instantly stale to recovery (fragile
+    // area 3). A crash in the window before this leaves the old mtime, which
+    // recovery resolves per policy -- both directions are the configured policy.
+    const claimedAt = Date.now();
+    await utimes(claimPath, new Date(claimedAt), new Date(claimedAt));
+    const entry = await this.stat(id); // the winner reads the sidecar (present)
+    const damaged = "claimed blob storage shape is damaged";
+    const fh = await this.#openStored(claimPath, () => new IntegrityError(damaged), damaged);
+    return { entry, source: fh.createReadStream() };
+  }
+
+  // restore(id) -> void. Return a claimed blob claims/<id> -> blobs/<id>. POSIX
+  // rename overwrites silently, so an occupied blobs/<id> would resurrect
+  // destroyed data (monotone violation, SPEC.md 4.2) -- impossible for a
+  // unique-minted id, hence corruption, refused rather than overwritten
+  // (fragile area 7). A missing claim is RefNotFound.
+  async restore(id) {
+    assertValid(id);
+    const claimsDir = await this.#containedDir("claims");
+    // A drop during the claim destroys the entry by unlinking its sidecar,
+    // orphaning the claimed blob. Restoring that blob into blobs/ would resurrect
+    // bytes for an entry that no longer exists (SPEC 4.2 monotone) -- the same
+    // contract the memory backend's remove states: a restore of a dropped claim
+    // MUST find nothing. So finish the drop's destruction (remove the orphaned
+    // claimed blob) and report the entry gone. Any restore runs after the read
+    // has settled -- onFail/onCommit fire once the stream ends -- so the claimed
+    // blob is closed here and removing it races nothing.
+    const metaDir = await this.#containedDir("meta");
+    try {
+      await lstat(join(metaDir, id + ".json"));
+    } catch (err) {
+      _absent(err);
+      await rm(join(claimsDir, id), { force: true });
+      throw new RefNotFound();
+    }
+    const blobDir = await this.#containedDir("blobs");
+    const blobPath = join(blobDir, id);
+    try {
+      await lstat(blobPath);
+      throw new IntegrityError("restore target is occupied");
+    } catch (err) {
+      if (err instanceof IntegrityError) throw err;
+      _absent(err); // blobs/<id> is free -- proceed
+    }
+    try {
+      await rename(join(claimsDir, id), blobPath);
+    } catch (err) {
+      if (_absent(err)) throw new RefNotFound();
+      throw err;
+    }
+  }
+
+  // commit(id) -> void. Destroy a claimed entry: sidecar first, then the claimed
+  // blob -- the same delete order as remove(), so a crash between them leaves a
+  // claim without a sidecar, which recovery reads as an interrupted commit and
+  // COMPLETES (never restores a sidecar-less blob into blobs/). Force-removes,
+  // so it is idempotent -- which is what lets recovery finish a partial commit
+  // (fragile area 6).
+  async commit(id) {
+    assertValid(id);
+    const metaDir = await this.#containedDir("meta");
+    await rm(join(metaDir, id + ".json"), { force: true });
+    const claimsDir = await this.#containedDir("claims");
+    await rm(join(claimsDir, id), { force: true });
+  }
+
+  // listClaims() -> { id, claimedAt }[]. The recovery scan's input. Same
+  // name discipline as list(): a foreign name in claims/ is corruption, .tmp is
+  // invisible, and a claim that vanished between the readdir and its lstat (a
+  // concurrent restore/commit) has simply left -- skipped, not failed. claimedAt
+  // is the mtime the claim stamped.
+  async listClaims() {
+    const claimsDir = await this.#containedDir("claims");
+    const out = [];
+    for (const name of await readdir(claimsDir)) {
+      if (name.endsWith(".tmp")) continue;
+      if (!isValid(name)) throw new IntegrityError("store layout is damaged");
+      let claimedAt;
+      try {
+        // Floor to integer milliseconds: on filesystems with sub-millisecond
+        // mtime precision, mtimeMs is a float, but claimedAt is a Date.now()-style
+        // ms timestamp -- the same integer-ms contract the memory backend returns
+        // and recovery compares against claimTimeout.
+        claimedAt = Math.floor((await lstat(join(claimsDir, name))).mtimeMs);
+      } catch (err) {
+        _absent(err);
+        continue;
+      }
+      out.push({ id: name, claimedAt });
+    }
+    return out;
+  }
+
+  // isClaimed(id) -> boolean. Advisory: is a live claim held on this id right now?
+  // A single lstat of claims/<id>, no sidecar open -- apply/pop probe this before
+  // their advisory stat so a contended reader rejects RefClaimed without opening
+  // the sidecar the claim-holder is rewriting (on Windows an open reader blocks
+  // that rename-replace, which livelocks the holder). Recovery resolves stale
+  // claims before the probe runs, so a present claim is a live one.
+  async isClaimed(id) {
+    assertValid(id);
+    const claimsDir = await this.#containedDir("claims");
+    try {
+      await lstat(join(claimsDir, id));
+      return true;
+    } catch (err) {
+      _absent(err);
+      return false;
+    }
+  }
+
+  // consumeRead(id) -> remaining. Debit one read credit and return what is left.
+  // Only ever called while holding the claim -- the claim is the cross-process
+  // mutex, so no two readers race the decrement. spend() owns the arithmetic (no
+  // readsLeft literal here -- the guard-shape tripwire). The sidecar is rewritten
+  // atomically over the old one; persisting BEFORE the caller restores the blob
+  // means a crash after this leaves a correctly-decremented entry, so a completed
+  // drain is always paid for (fragile area 5).
+  async consumeRead(id) {
+    const entry = await this.stat(id);
+    const next = spend(entry);
+    const sidecar = Buffer.from(JSON.stringify(next), "utf8");
+    const metaDir = await this.#containedDir("meta");
+    await this.#writeAtomic(metaDir, id + ".json", sidecar);
+    return next.readsLeft;
   }
 }

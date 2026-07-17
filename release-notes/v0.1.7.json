@@ -1,0 +1,19 @@
+{
+  "version": "0.1.7",
+  "date": "2026-07-16",
+  "headline": "Pop reads and destroys in one move; read budgets give an entry a finite number of reads; a claim left by a killed process is recovered on the next start.",
+  "summary": "pop(ref) streams an entry and deletes it the instant the stream drains cleanly -- bytes out once, then gone -- with two concurrent pops racing on an atomic claim so exactly one drains and the other is refused. push(source, { reads: N }) gives an entry a finite read budget: a credit is spent only on a full, digest-verified drain, and the read that exhausts it destroys the entry, with concurrent budgeted readers serialized so the last credit can never be double-spent. A read that fails or is abandoned costs nothing and is resolved by onPopFailure -- restored for a retry by default, or burned. On the disk backend, a claim abandoned by a process killed mid-pop is reclaimed on the next construction rather than stranding the entry, and destruction stays monotone across the crash: a dropped entry never comes back.",
+  "sections": {
+    "Added": [
+      "`pop(ref)` reads an entry's bytes and destroys it: the stream is digest-verified as it drains, and the entry is deleted the instant it drains cleanly -- bytes out once, then gone. Two concurrent `pop(ref)` race on an atomic claim: exactly one wins and drains, the other rejects `RefClaimed` (code `ECLAIMED`). `pop` ignores any read budget -- it is terminal by definition.",
+      "`push(source, { reads: N })` gives an entry a read budget: a positive integer count of successful `apply` drains after which the entry self-destructs (`null`, the default, is unlimited). A budgeted `apply` spends one credit only on a full, digest-verified drain -- an abandoned or corrupted read costs nothing -- concurrent budgeted readers serialize through the claim so the last credit can never be double-spent, and the read that takes the budget to zero destroys the entry through the same path as `pop`. An unbudgeted `apply` stays lock-free and pays nothing for the feature.",
+      "`onPopFailure` (constructor option) decides what happens to an entry whose `pop` or budgeted `apply` fails to fully drain -- a stream destroyed early, a source error, a digest mismatch: `'restore'` (the default) returns the entry so the read can be retried, `'burn'` destroys it anyway.",
+      "Crash recovery (disk backend): a claim left behind by a process killed mid-`pop` is reclaimed on the next construction, on the first operation -- never in the constructor, which does no I/O. `claimTimeout` (constructor option, default `'10m'`) is how long such a claim is treated as another live reader's before recovery resolves it per `onPopFailure`; a younger claim is left untouched. A claim whose entry was already deleted is completed -- the interrupted deletion finishes -- never resurrected, and a drop during a live claim destroys the entry for good: an abandoned read cannot bring it back.",
+      "The `backends/*` storage contract gains `claim`, `restore`, `commit`, `listClaims`, `consumeRead`, and `isClaimed` -- the claim lifecycle the pop and budget paths drive. Both shipped backends implement them, and they are now required backend methods."
+    ],
+    "Changed": [
+      "`onPopFailure` and `claimTimeout` are now live constructor options; they previously threw at construction as not-yet-shipped. `onPopFailure` must be `'restore'` or `'burn'`, and `claimTimeout` a non-negative duration -- anything else is a config-time `TypeError`, never a silently disabled setting.",
+      "A custom backend must now implement the claim lifecycle -- `claim`, `restore`, `commit`, `listClaims`, `consumeRead`, and `isClaimed` -- alongside the existing methods, or the `Stash` constructor rejects it."
+    ]
+  }
+}

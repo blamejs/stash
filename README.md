@@ -6,6 +6,29 @@
 
 **A zero-dependency, ephemeral, crypto-agnostic content store for Node.js.**
 
+Bytes in, a random-capability ref out, bytes out once and they're gone. No key
+lives anywhere in the store, so no operator can be compelled to use one. No npm
+runtime dependencies. No TypeScript. No build step.
+
+[![npm version](https://img.shields.io/npm/v/@blamejs/stash.svg?label=%40blamejs%2Fstash&color=2563eb)](https://www.npmjs.com/package/@blamejs/stash)
+[![npm downloads](https://img.shields.io/npm/dm/@blamejs/stash.svg?color=2563eb)](https://www.npmjs.com/package/@blamejs/stash)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+[![node](https://img.shields.io/node/v/@blamejs/stash.svg)](https://nodejs.org)
+
+[![CI](https://github.com/blamejs/stash/actions/workflows/ci.yml/badge.svg)](https://github.com/blamejs/stash/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/blamejs/stash/actions/workflows/codeql.yml/badge.svg)](https://github.com/blamejs/stash/actions/workflows/codeql.yml)
+[![Fuzzing](https://github.com/blamejs/stash/actions/workflows/cflite_batch.yml/badge.svg)](https://github.com/blamejs/stash/actions/workflows/cflite_batch.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/blamejs/stash/badge)](https://scorecard.dev/viewer/?uri=github.com/blamejs/stash)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13632/badge)](https://www.bestpractices.dev/projects/13632)
+[![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev/spec/v1.0/levels#build-l3)
+
+[![Zero runtime deps](https://img.shields.io/badge/runtime%20deps-0-2ea043)](#why-this-store)
+[![No keys](https://img.shields.io/badge/keys-none%20by%20design-2563eb)](#why-this-store)
+[![No TypeScript](https://img.shields.io/badge/TypeScript-not%20required-2ea043)](#why-this-store)
+[![Fail-closed](https://img.shields.io/badge/verdicts-fail--closed-2ea043)](#why-this-store)
+
+[stashjs.com](https://stashjs.com) · [Roadmap](ROADMAP.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md)
+
 </div>
 
 You put bytes in. You get a ref back. You take the bytes out once, and they're
@@ -53,11 +76,23 @@ Requires Node `>= 24.18.0`.
 
 ## What ships today
 
-The M1 + M2 + M3 + M4 surface (see `SPEC.md` section 12 for the full delivery plan):
+The M1 + M2 + M3 + M4 + M5 surface (see `SPEC.md` section 12 for the full delivery plan):
 
-- `push` / `apply` / `show` / `list` / `drop` / `clear` over either backend,
-  with size and `sha256` digest computed as the bytes stream through and
-  digest-verified reads.
+- `push` / `pop` / `apply` / `show` / `list` / `drop` / `clear` over either
+  backend, with size and `sha256` digest computed as the bytes stream through
+  and digest-verified reads.
+- **Pop & read budgets**: `pop(ref)` streams an entry and destroys it the
+  instant the stream drains cleanly -- bytes out once, then gone -- with two
+  concurrent pops racing on an atomic claim so exactly one drains and the other
+  rejects `RefClaimed`. `push(source, { reads: N })` gives an entry a finite
+  read budget: a credit is spent only on a full, digest-verified `apply` drain
+  (an abandoned or corrupted read costs nothing), concurrent budgeted readers
+  serialize so the last credit is never double-spent, and the read that
+  exhausts the budget destroys the entry. A read that fails to drain is resolved
+  by `onPopFailure` -- `'restore'`d for a retry by default, or `'burn'`ed. On
+  the disk backend, a claim abandoned by a process killed mid-pop is reclaimed
+  on the next construction (`claimTimeout` sets the grace window), and a drop
+  during a live claim is monotone -- the entry never comes back.
 - **Limits**: `maxSize` bounds each entry and is checked as the bytes stream, so
   an oversized or unbounded source aborts with `SizeExceeded` at the limit
   rather than filling the disk; `maxEntries` and `maxTotal` bound the whole
@@ -85,14 +120,12 @@ The M1 + M2 + M3 + M4 surface (see `SPEC.md` section 12 for the full delivery pl
   frozen codes).
 - Ref generation and whitelist validation.
 
-Spec'd options whose milestone has not shipped (`onPopFailure`, `tombstoneTtl`,
-`claimTimeout`) **throw at construction** rather than sitting silently
-unenforced -- a security option that is accepted but ignored would be a
-fail-open default.
+Spec'd options whose milestone has not shipped (`tombstoneTtl`) **throw at
+construction** rather than sitting silently unenforced -- a security option that
+is accepted but ignored would be a fail-open default.
 
-Next up, in order: the claim/commit `pop` cycle with read budgets, audit
-(`verify`), and the replication primitives (`store`, tombstones). `ROADMAP.md`
-tracks status; `SPEC.md` is the contract.
+Next up, in order: the audit hook (`verify`) and the replication primitives
+(`store`, tombstones). `ROADMAP.md` tracks status; `SPEC.md` is the contract.
 
 ## Run it sandboxed
 

@@ -40,12 +40,13 @@ var STATIC_ASSETS = {
 // external content-hashed files, so the CSP carries no 'unsafe-inline'
 // anywhere; the only inline <script> is each page's JSON-LD block, admitted
 // by its sha256 hash (per page, passed to _csp below). Every image the site
-// renders is served locally, so img-src stays 'self' (plus data: for
-// completeness).
+// renders is served locally EXCEPT the README's status badges on the Overview
+// page, so img-src allows their hosts (shields.io, GitHub Actions, OpenSSF
+// Scorecard, OpenSSF Best Practices, SLSA) alongside 'self' and data:.
 function _csp(scriptHashes) {
   var script = "'self'" + (scriptHashes && scriptHashes.length ? " " + scriptHashes.join(" ") : "");
   return "default-src 'self'; " +
-    "img-src 'self' data:; " +
+    "img-src 'self' data: https://img.shields.io https://github.com https://api.securityscorecards.dev https://www.bestpractices.dev https://slsa.dev; " +
     "style-src 'self'; " +
     "script-src " + script + "; " +
     "font-src 'self'; " +

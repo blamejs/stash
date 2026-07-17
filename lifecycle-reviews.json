@@ -7,14 +7,20 @@
   },
   "stash.push": {
     "decision": "keep-experimental",
-    "reason": "The verb's shape is final (SPEC.md 4) but its per-push options (ttl, reads) are fail-loud placeholders until M3/M5, and the limits that bound it arrive at M4. Graduate when a push can carry its full documented terms.",
-    "reviewedAt": "0.1.0",
+    "reason": "The verb's shape is final (SPEC.md 4) and its per-push options are now fully enforced (ttl at M3, reads at M5), with the limits that bound it landed at M4. Tombstone writes on early destruction (M7) still extend what a push must record. Graduate with the replication primitives.",
+    "reviewedAt": "0.1.7",
     "reviewBy": "0.2.0"
   },
   "stash.apply": {
     "decision": "keep-experimental",
-    "reason": "Digest-verified streaming is in place, but read budgets (M5) change apply's lifecycle semantics -- a budgeted apply destroys through the claim path. Graduate once the budget machinery has stressed the read path.",
-    "reviewedAt": "0.1.0",
+    "reason": "Read budgets (M5) landed and now route a budgeted apply through the claim/commit path -- the budget machinery is new this release. Graduate once it has soaked alongside the audit hook (M6) that inspects claim state.",
+    "reviewedAt": "0.1.7",
+    "reviewBy": "0.2.0"
+  },
+  "stash.pop": {
+    "decision": "keep-experimental",
+    "reason": "Ships at M5 with the claim/commit lifecycle, onPopFailure, and crash recovery. The read-and-destroy verb's shape is final (SPEC.md 4), but its recovery and claim-sharing machinery is new this release. Graduate once it has soaked alongside the audit hook (M6) that inspects claim state.",
+    "reviewedAt": "0.1.7",
     "reviewBy": "0.2.0"
   },
   "stash.show": {

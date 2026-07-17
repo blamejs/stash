@@ -1,6 +1,6 @@
 {
   "generator": "scripts/refresh-api-snapshot.js",
-  "packageVersion": "0.1.6",
+  "packageVersion": "0.1.7",
   "surface": {
     "index": {
       "kind": "object",
@@ -54,6 +54,10 @@
               "kind": "function",
               "arity": 0
             },
+            "pop": {
+              "kind": "function",
+              "arity": 1
+            },
             "prune": {
               "kind": "function",
               "arity": 0
@@ -90,7 +94,27 @@
           "kind": "class",
           "arity": 0,
           "methods": {
+            "claim": {
+              "kind": "function",
+              "arity": 1
+            },
+            "commit": {
+              "kind": "function",
+              "arity": 1
+            },
+            "consumeRead": {
+              "kind": "function",
+              "arity": 1
+            },
+            "isClaimed": {
+              "kind": "function",
+              "arity": 1
+            },
             "list": {
+              "kind": "function",
+              "arity": 0
+            },
+            "listClaims": {
               "kind": "function",
               "arity": 0
             },
@@ -99,6 +123,10 @@
               "arity": 1
             },
             "remove": {
+              "kind": "function",
+              "arity": 1
+            },
+            "restore": {
               "kind": "function",
               "arity": 1
             },
@@ -125,7 +153,27 @@
           "kind": "class",
           "arity": 1,
           "methods": {
+            "claim": {
+              "kind": "function",
+              "arity": 1
+            },
+            "commit": {
+              "kind": "function",
+              "arity": 1
+            },
+            "consumeRead": {
+              "kind": "function",
+              "arity": 1
+            },
+            "isClaimed": {
+              "kind": "function",
+              "arity": 1
+            },
             "list": {
+              "kind": "function",
+              "arity": 0
+            },
+            "listClaims": {
               "kind": "function",
               "arity": 0
             },
@@ -134,6 +182,10 @@
               "arity": 1
             },
             "remove": {
+              "kind": "function",
+              "arity": 1
+            },
+            "restore": {
               "kind": "function",
               "arity": 1
             },
@@ -168,6 +220,7 @@
     "stash.Stash": "0.1.0",
     "stash.push": "0.1.0",
     "stash.apply": "0.1.0",
+    "stash.pop": "0.1.7",
     "stash.show": "0.1.0",
     "stash.list": "0.1.0",
     "stash.drop": "0.1.0",

@@ -114,29 +114,44 @@ async function run() {
       return ic.src === "/stashjs-logo.png";
     }));
 
-    // Overview: the shipped SPEC.md rendered to HTML. This page is the
+    // Overview: the repository README rendered to HTML. This page is the
     // project's front door and is loaded from a repo-ROOT file
-    // (path.resolve(libDir, "..", "SPEC.md")), which sits ABOVE the trees a
+    // (path.resolve(libDir, "..", "README.md")), which sits ABOVE the trees a
     // container image copies. The generator drops the page silently (fail
     // open) if that file is absent at runtime, so assert here that it is
-    // present AND carries real, substantial SPEC content -- an empty or
-    // missing Overview must fail the gate loudly, not ship a blank front door.
+    // present AND carries the README's real content -- an empty or missing
+    // Overview must fail the gate loudly, not ship a blank front door.
     var overview = await _get(port, "/overview");
     check("GET /overview -> 200", overview.status === 200);
-    check("overview carries substantial SPEC content (not an empty shell)", overview.body.length > 5000);
-    check("overview renders a known SPEC section heading", overview.body.indexOf("The one rule</h2>") !== -1);
-    check("overview renders the SPEC tables (Methods, Errors)", overview.body.indexOf("<table>") !== -1);
+    check("overview carries substantial README content (not an empty shell)", overview.body.length > 4000);
+    check("overview renders the README tagline", overview.body.indexOf("ephemeral, crypto-agnostic content store") !== -1);
+    check("overview renders the 'What ships today' section", overview.body.indexOf("What ships today</h2>") !== -1);
+    check("overview serves the logo from the local asset", overview.body.indexOf('src="/stashjs-logo.png"') !== -1);
+    check("overview renders the status badges as external images", overview.body.indexOf("https://img.shields.io/") !== -1);
+    check("overview renders the OpenSSF and SLSA badges",
+      overview.body.indexOf("bestpractices.dev/projects/13632") !== -1 && overview.body.indexOf("slsa.dev/images") !== -1);
+    check("overview renders fenced code (the README quick-start)", overview.body.indexOf("<pre><code") !== -1);
+    check("overview appears in the nav", overview.body.indexOf('href="/overview"') !== -1);
+
+    // Specification: the shipped SPEC.md -- the contract -- rendered as its own
+    // page, loaded from the repo-ROOT SPEC.md ABOVE the copied trees. Same
+    // fail-open risk as the Overview, so assert real, substantial SPEC content.
+    var spec = await _get(port, "/specification");
+    check("GET /specification -> 200", spec.status === 200);
+    check("specification carries substantial SPEC content (not an empty shell)", spec.body.length > 5000);
+    check("specification renders a known SPEC section heading", spec.body.indexOf("The one rule</h2>") !== -1);
+    check("specification renders the SPEC tables (Methods, Errors)", spec.body.indexOf("<table>") !== -1);
     // A table cell whose inline code carries escaped pipes
     // (`Buffer \| string \| Readable \| AsyncIterable`) must render as ONE
     // cell with the pipes as content - a naive split("|") would shatter it
     // into phantom columns, mangling the whole table.
-    check("overview renders an escaped-pipe code span intact (not shattered)",
-      overview.body.indexOf("Buffer | string | Readable | AsyncIterable") !== -1);
-    check("overview leaks no stray table-escape backslash", overview.body.indexOf("Buffer \\|") === -1);
-    check("overview renders fenced code", overview.body.indexOf("<pre><code") !== -1);
-    check("overview renders the numbered store() checks as an ordered list", overview.body.indexOf("<ol>") !== -1);
-    check("overview renders the do-not-build section as an unordered list", overview.body.indexOf("<ul>") !== -1);
-    check("overview appears in the nav", overview.body.indexOf('href="/overview"') !== -1);
+    check("specification renders an escaped-pipe code span intact (not shattered)",
+      spec.body.indexOf("Buffer | string | Readable | AsyncIterable") !== -1);
+    check("specification leaks no stray table-escape backslash", spec.body.indexOf("Buffer \\|") === -1);
+    check("specification renders fenced code", spec.body.indexOf("<pre><code") !== -1);
+    check("specification renders the numbered store() checks as an ordered list", spec.body.indexOf("<ol>") !== -1);
+    check("specification renders the do-not-build section as an unordered list", spec.body.indexOf("<ul>") !== -1);
+    check("specification appears in the nav", spec.body.indexOf('href="/specification"') !== -1);
 
     // Each namespace page.
     var docs = parser.parseTree(site.LIB_DIR);
@@ -197,9 +212,12 @@ async function run() {
     check("CSP carries no unsafe-inline", homeCsp.indexOf("unsafe-inline") === -1);
     check("CSP style-src is self only", homeCsp.indexOf("style-src 'self';") !== -1);
     check("CSP admits the page's JSON-LD by hash", /script-src 'self' 'sha256-[A-Za-z0-9+/=]+'/.test(homeCsp));
-    // Every image on the site is served locally, so img-src admits no
-    // external host.
-    check("CSP img-src stays local", homeCsp.indexOf("img-src 'self' data:;") !== -1);
+    // Images are served locally EXCEPT the README's status badges on the
+    // Overview page, so img-src allows 'self', data:, and the specific badge
+    // hosts -- and never a wildcard.
+    check("CSP img-src allows self, data:, and the badge hosts",
+      /img-src 'self' data: https:\/\/img\.shields\.io https:\/\/github\.com https:\/\/api\.securityscorecards\.dev https:\/\/www\.bestpractices\.dev https:\/\/slsa\.dev;/.test(homeCsp));
+    check("CSP img-src carries no wildcard", homeCsp.indexOf("img-src") !== -1 && !/img-src[^;]*\*/.test(homeCsp));
     // HSTS pins HTTPS for the site and its subdomains.
     check("HSTS is set with a long max-age and includeSubDomains",
       /max-age=\d{7,};\s*includeSubDomains/.test(String(home.headers["strict-transport-security"])));
