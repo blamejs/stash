@@ -33,6 +33,20 @@ const log = (...args) => console.log(...args);
 const primary = new Stash({ backend: new MemoryBackend(), tombstoneTtl: "30d" });
 const standby = new Stash({ backend: new MemoryBackend(), tombstoneTtl: "30d" });
 
+// The bytes travel with the entry over YOUR transport. Replication does NOT read
+// them back with apply(): apply() spends a read budget and would DESTROY a reads:1
+// entry mid-sync. This sketch keeps the payloads the primary holds in a map; a real
+// daemon ships each entry's bytes alongside its Entry over the wire.
+const wire = new Map(); // id -> the bytes the primary holds
+async function put(store, bytes, opts) {
+  const ref = await store.push(bytes, opts);
+  wire.set(ref, Buffer.from(bytes));
+  return ref;
+}
+
+// A verification read only -- apply() is safe on an UNBUDGETED entry (it destroys
+// nothing) and lets the example prove the replicated bytes actually round-trip. It
+// is never the replication path (that would spend a budget); see `wire` above.
 const readAll = async (store, ref) => {
   const chunks = [];
   for await (const chunk of await store.apply(ref)) chunks.push(chunk);
@@ -40,27 +54,39 @@ const readAll = async (store, ref) => {
 };
 
 // One direction of a full-scan anti-entropy pass: propagate graves FIRST (so a
-// store can never re-file an id the other side buried), then store each live
-// entry. store() preserves the entry's identity -- id, expiry, read budget,
-// meta -- and verifies the bytes against the supplied digest as they stream, so
-// a repeated pass is a free no-op and transfer corruption is caught on the way
-// in. The transport that carries `entry` and its bytes between hosts is yours.
+// store can never re-file an id the other side buried), then store each live entry
+// with the bytes from the transport. store() preserves the entry's identity -- id,
+// expiry, read budget, meta -- verbatim and verifies the bytes against the supplied
+// digest as they stream, so a repeated pass is a free no-op and transfer corruption
+// is caught on the way in.
 async function syncOnce(from, to) {
   for (const grave of await from.tombstones()) await to.drop(grave.id);
-  for (const entry of await from.list()) await to.store(entry, await readAll(from, entry.id));
+  for (const entry of await from.list()) await to.store(entry, wire.get(entry.id));
 }
 
 // --- seed the primary and replicate to the standby ----------------------------
-const alpha = await primary.push("alpha bytes", { meta: { name: "alpha" } });
-const bravo = await primary.push("bravo bytes", { meta: { name: "bravo" } });
+const alpha = await put(primary, "alpha bytes", { meta: { name: "alpha" } });
+const bravo = await put(primary, "bravo bytes", { meta: { name: "bravo" } });
+// A budgeted entry replicates through the SAME path -- store() files it with its
+// remaining read budget intact, because the bytes came from the transport, not from
+// a budget-spending apply().
+const budgeted = await put(primary, "read me twice", { reads: 2, meta: { name: "budgeted" } });
 await syncOnce(primary, standby);
 assert.deepEqual(await readAll(standby, alpha), Buffer.from("alpha bytes"), "standby holds alpha");
 assert.deepEqual(await readAll(standby, bravo), Buffer.from("bravo bytes"), "standby holds bravo");
-log("replicated 2 entries: primary -> standby");
+// The read budget survived the copy verbatim (show() is metadata-only, it spends
+// nothing), AND the sync did not spend the PRIMARY's budget -- reading via apply()
+// for replication would have (this is why syncOnce reads from `wire`, not apply).
+assert.equal((await standby.show(budgeted)).readsLeft, 2, "the read budget survived replication");
+assert.equal((await primary.show(budgeted)).readsLeft, 2, "the sync did NOT spend the primary's budget");
+log("replicated 3 entries (one budgeted): primary -> standby, budgets intact");
+// A reads:1 entry replicated to two nodes could serve one read on EACH before their
+// tombstones converge -- exactly-once becomes eventually-once. That is why the safe
+// topology serves every read from one node (the primary) and keeps the standby cold.
 
 // A repeated sync is free -- an identical store() is an idempotent no-op.
 await syncOnce(primary, standby);
-assert.equal((await standby.list()).length, 2, "re-syncing an identical store changes nothing");
+assert.equal((await standby.list()).length, 3, "re-syncing an identical store changes nothing");
 log("re-sync is a no-op (idempotent store)");
 
 // --- destroy on the primary, then converge ------------------------------------
@@ -98,4 +124,4 @@ assert.equal(await standby.store(bravoEntry, bravoBytes), false, "the grave refu
 await assert.rejects(standby.show(bravo), (err) => err.code === "ENOREF");
 log("a stale node's live copy is refused by the grave -- no resurrection");
 
-log("\ncold-standby: replicated, destroyed, converged, and proved no resurrection. OK");
+log("\ncold-standby: replicated (budgets intact), destroyed, converged, and proved no resurrection. OK");

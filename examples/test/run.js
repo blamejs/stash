@@ -29,7 +29,7 @@ const ROOT = resolve(EXAMPLES_DIR, "..");
 // error) is caught as a missing marker, not a false pass.
 const EXAMPLES = [
   { file: "lifecycle.js", marker: "lifecycle: every step asserted" },
-  { file: "cold-standby.js", marker: "cold-standby: replicated, destroyed, converged" },
+  { file: "cold-standby.js", marker: "cold-standby: replicated (budgets intact), destroyed, converged" },
   { file: "permission-flags.js", marker: "permission-flags: nothing in the process can touch the filesystem outside its grant" },
 ];
 
