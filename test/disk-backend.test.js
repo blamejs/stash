@@ -1251,6 +1251,18 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     assert.equal(existsSync(bp(root, fresh)), true, "the possibly-in-flight blob is untouched");
   });
 
+  test("verify repair reaps a directory-shaped FOREIGN file and a directory-shaped stale .tmp, not only regular files", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("keep");
+    const foreignDir = join(root, "blobs", "not-a-ref-dir"); mkdirSync(foreignDir); writeFileSync(join(foreignDir, "junk"), "x"); // a foreign-named directory
+    const tmpDir = join(root, "blobs", "half.tmp"); mkdirSync(tmpDir); writeFileSync(join(tmpDir, "junk"), "x"); // a directory-shaped .tmp
+    const old = new Date(Date.now() - TWO_HOURS); utimesSync(tmpDir, old, old); // aged past the grace -> an orphan
+    const rep = await stash.verify({ repair: true });
+    assert.equal(rep.repaired.filter((f) => f.kind === "foreign-file").length >= 1, true, "the foreign directory is condemned");
+    assert.equal(existsSync(foreignDir), false, "the directory-shaped foreign file is reaped, contents and all");
+    assert.equal(existsSync(tmpDir), false, "the directory-shaped stale .tmp is reaped too");
+  });
+
   test("a foreign file is foreign-file with id: null; no filename or path separator leaks into the report", async () => {
     const { root, stash } = freshStash();
     await stash.push("legit");

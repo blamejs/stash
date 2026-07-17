@@ -672,14 +672,17 @@ export class DiskBackend {
     await this.#condemn(id, kind, repaired);
   }
 
-  // #discard(subdir, name, kind, repaired) -- unlink a NON-entry file (a foreign
+  // #discard(subdir, name, kind, repaired) -- remove a NON-entry file (a foreign
   // name, a stale .tmp) directly, re-resolving its parent (#containedDir)
-  // immediately before the unlink so a directory swap during the walk cannot
+  // immediately before the removal so a directory swap during the walk cannot
   // redirect the delete outside the root -- the same resolve-before-use window
   // remove()/write() hold, never a directory string resolved once at the top of an
-  // unbounded walk (CWE-367). Entries route through #condemn/remove, never here.
+  // unbounded walk (CWE-367). force AND recursive: the foreign/tmp shape may itself
+  // be a tampered DIRECTORY, which repair must still reap; rm removes a
+  // final-component symlink itself, never following it (CWE-59). Entries route
+  // through #condemn/remove, never here.
   async #discard(subdir, name, kind, repaired) {
-    await rm(join(await this.#containedDir(subdir), name), { force: true });
+    await rm(join(await this.#containedDir(subdir), name), { force: true, recursive: true });
     repaired.push({ kind, id: null });
   }
 
