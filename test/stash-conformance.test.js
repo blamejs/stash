@@ -1132,6 +1132,18 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual(ev, [["popped", popRef]]);
     });
 
+    test("a burned pop emits 'popped' -- a burn's delete lands, never a silent destruction (SPEC.md 4.3)", { timeout: 8000 }, async () => {
+      const stash = new Stash({ backend: create(), onPopFailure: "burn" });
+      const ref = await stash.push(Buffer.alloc(65536, 7)); // above the highWaterMark: the stream holds, not auto-drained
+      const poppedP = once(stash, "popped");
+      const s = await stash.pop(ref);
+      s.on("error", () => {}); // the premature destroy errors the stream; swallow it
+      s.destroy(new Error("consumer aborted")); // premature -> onFail -> burn -> commit + emit 'popped'
+      const [entry] = await poppedP;
+      assert.equal(entry.id, ref, "the burned pop emitted 'popped'");
+      assert.equal(await stash.has(ref), false, "the entry is gone (burned, not restored)");
+    });
+
     test("a throwing sweep emits 'sweepError', never 'error', and the janitor survives", async () => {
       const inner = create();
       let failNext = true;

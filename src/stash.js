@@ -556,7 +556,7 @@ export class Stash extends EventEmitter {
   // error, premature destroy) restores the claim, or burns it under
   // onPopFailure: 'burn'. pop and budgeted apply differ only in onCommit, so the
   // destruction/restore machinery has exactly one home.
-  async #claimedRead(ref, onCommit) {
+  async #claimedRead(ref, onCommit, destroyedEvent) {
     const { entry, source } = await this.#backend.claim(ref);
     if (isExpired(entry, Date.now())) {
       _dispose(source);
@@ -566,8 +566,13 @@ export class Stash extends EventEmitter {
     }
     return _verifiedStream(entry, source, {
       onCommit: () => onCommit(entry),
+      // 'burn' destroys the entry the read could not consume: the delete lands the
+      // SAME as a successful terminal, so it emits the same destruction event
+      // ('popped' for pop, 'dropped' for a budgeted apply) AFTER the commit -- a
+      // burned entry is never destroyed silently (SPEC.md 4.3). 'restore' returns
+      // the entry, which survives, so it emits nothing.
       onFail: () => (this.#onPopFailure === "burn"
-        ? this.#backend.commit(ref)
+        ? this.#backend.commit(ref).then(() => this.#emit(destroyedEvent, entry))
         : this.#backend.restore(ref)),
     });
   }
@@ -712,7 +717,7 @@ export class Stash extends EventEmitter {
           await this.#backend.consumeRead(ref); // persist the debit BEFORE restoring (fragile area 5)
           await this.#backend.restore(ref); // a non-terminal read destroys nothing -- no event
         }
-      });
+      }, "dropped"); // a burned budgeted read destroys the entry -> 'dropped'
     }
     const source = await this.#backend.read(ref);
     // The gate above and this open are two awaits apart, so a short TTL can
@@ -766,7 +771,7 @@ export class Stash extends EventEmitter {
     return this.#claimedRead(ref, async (entry) => {
       await this.#backend.commit(ref);
       this.#emit("popped", entry); // a pop's terminal delete committed (SPEC.md 4.3)
-    });
+    }, "popped"); // a burned pop's delete also lands -> 'popped'
   }
 
   /**

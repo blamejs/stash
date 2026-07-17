@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 import { constants as FS } from "node:fs";
-import { link, lstat, lutimes, mkdir, open, readdir, realpath, rename, rm, unlink } from "node:fs/promises";
+import { link, lstat, lutimes, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { C } from "../constants.js";
@@ -454,9 +454,7 @@ export class DiskBackend {
     try {
       // Each directory is contained immediately before its own op, not both up
       // front: a resolve-early/use-late gap is the same directory time-of-check/
-      // time-of-use window write() closes. unlink never follows a final-component
-      // symlink, so the sidecar's existence and its deletion are one op, not a
-      // check-then-use a swap could redirect (CWE-367).
+      // time-of-use window write() closes (CWE-367).
       const metaDir = await this.#containedDir("meta");
       let had = true;
       try {
