@@ -1,6 +1,6 @@
 {
   "generator": "scripts/refresh-api-snapshot.js",
-  "packageVersion": "0.1.7",
+  "packageVersion": "0.1.8",
   "surface": {
     "index": {
       "kind": "object",
@@ -50,6 +50,10 @@
               "kind": "function",
               "arity": 1
             },
+            "has": {
+              "kind": "function",
+              "arity": 1
+            },
             "list": {
               "kind": "function",
               "arity": 0
@@ -69,6 +73,14 @@
             "show": {
               "kind": "function",
               "arity": 1
+            },
+            "stats": {
+              "kind": "function",
+              "arity": 0
+            },
+            "verify": {
+              "kind": "function",
+              "arity": 0
             }
           }
         },
@@ -138,6 +150,10 @@
               "kind": "function",
               "arity": 0
             },
+            "verify": {
+              "kind": "function",
+              "arity": 1
+            },
             "write": {
               "kind": "function",
               "arity": 3
@@ -197,6 +213,10 @@
               "kind": "function",
               "arity": 0
             },
+            "verify": {
+              "kind": "function",
+              "arity": 1
+            },
             "write": {
               "kind": "function",
               "arity": 3
@@ -226,6 +246,9 @@
     "stash.apply": "0.1.0",
     "stash.pop": "0.1.7",
     "stash.show": "0.1.0",
+    "stash.has": "0.1.8",
+    "stash.stats": "0.1.8",
+    "stash.verify": "0.1.8",
     "stash.list": "0.1.0",
     "stash.drop": "0.1.0",
     "stash.clear": "0.1.0",

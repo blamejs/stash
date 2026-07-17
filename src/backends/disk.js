@@ -28,6 +28,12 @@ const MAX_SIDECAR_BYTES = 64 * C.BYTES.KIB;
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 
+// remove()'s in-process exactly-once witness (#reaped) holds at most this many
+// recently-removed ids. Far above any real concurrent-reap window (the racers of
+// one entry are microseconds apart); the oldest is evicted past that window, where
+// a re-remove of a long-gone id -- its Windows delete long finalized -- reads ENOENT.
+const REAP_MEMO = 4096;
+
 // A stored file is read through its own descriptor: open once, verify the
 // descriptor, then read or stream from that same handle. The check and the
 // use share one fd, so nothing re-resolves the path between them -- a blob
@@ -128,28 +134,31 @@ export function descriptorMatchesName(opened, named) {
     named.dev === opened.dev && named.ino === opened.ino;
 }
 
-// verifyDescriptorAgainstName(openedStat, path, damaged) -- the fallback swap
-// guard for platforms without O_NOFOLLOW (Windows), where the open cannot
-// refuse a symlink itself. A no-follow lstat of the name is cross-checked
-// against the open descriptor's fstat via descriptorMatchesName: a symlink
-// traversed at open, or a name swapped after it, is refused as corruption. A
-// name that vanished after the open no longer vouches for the descriptor, so
-// its absence becomes IntegrityError; any other lstat fault propagates. Lifted
-// out of the read path -- as descriptorMatchesName was -- so its branches are
-// pinned directly on every platform, not only where O_NOFOLLOW is absent.
+// verifyDescriptorAgainstName(openedStat, path, damaged) -> boolean. The fallback
+// swap guard for platforms without O_NOFOLLOW (Windows), where the open cannot
+// refuse a symlink itself. A no-follow lstat of the name is cross-checked against
+// the open descriptor's fstat via descriptorMatchesName: a symlink traversed at
+// open, or a name SWAPPED for a different object after it, is refused as corruption
+// (IntegrityError). A name that VANISHED after the open (ENOENT) is a concurrent
+// REMOVAL, not a swap -- it reports absence (false), which #openStored maps to the
+// caller's onAbsent (a sidecar reads back RefNotFound, tolerated by list()/prune()
+// mid-reap). Either verdict is served the SAME way: #openStored closes the handle
+// unread, so no traversed descriptor is ever returned -- the swap defense is intact,
+// only a legitimate concurrent removal stops being misreported as corruption. Any
+// other lstat fault propagates. Lifted out of the read path -- as
+// descriptorMatchesName was -- so its branches are pinned on every platform.
 export async function verifyDescriptorAgainstName(openedStat, path, damaged) {
   let named;
   try {
     named = await lstat(path);
   } catch (err) {
-    // The name vanished or became unreadable after the open -- it no longer
-    // vouches for the descriptor, so refuse rather than serve an unverifiable
-    // handle.
-    throw _absent(err) ? new IntegrityError(damaged) : err;
+    if (_absent(err)) return false; // vanished after open -- absence (a concurrent removal), never a served handle
+    throw err; // any other lstat fault propagates
   }
   if (!descriptorMatchesName(openedStat, named)) {
     throw new IntegrityError(damaged);
   }
+  return true; // the name still vouches for the descriptor
 }
 
 /**
@@ -189,6 +198,7 @@ export class DiskBackend {
   #root;
   #realRoot = null;
   #initPromise = null;
+  #reaped = new Set(); // ids this instance has removed -- the exactly-once witness the fs cannot give on Windows
 
   constructor(opts) {
     options(opts, "new DiskBackend", { allowed: ["root"] });
@@ -281,8 +291,8 @@ export class DiskBackend {
     try {
       const opened = await fh.stat();
       if (!opened.isFile()) throw new IntegrityError(damaged);
-      if (SYMLINK_GUARD_NEEDED) {
-        await verifyDescriptorAgainstName(opened, path, damaged);
+      if (SYMLINK_GUARD_NEEDED && !(await verifyDescriptorAgainstName(opened, path, damaged))) {
+        throw onAbsent(); // the name vanished after open (a concurrent removal) -- absence, never a served descriptor
       }
     } catch (err) {
       await fh.close();
@@ -418,27 +428,59 @@ export class DiskBackend {
     }
   }
 
-  // remove(id) -> boolean. Sidecar first (the entry stops existing), then
-  // the blob. Absent is a fact, not a failure. `rm` unlinks the directory
-  // entry itself -- it never follows a final-component symlink -- so the
-  // sidecar's existence and its deletion are one operation, not a
-  // check-then-use: a swap cannot redirect the unlink to another file.
+  // remove(id) -> boolean. Sidecar first (the entry stops existing), then the
+  // blob. Absent is a fact, not a failure. The boolean is the single-writer WITNESS
+  // the 'expired'/'dropped' exactly-once emit depends on: true for EXACTLY ONE of
+  // two removes racing the same entry (a lazy read vs the sweeper). The FILESYSTEM
+  // cannot supply that witness on Windows -- an unlink (or rename) of a sidecar a
+  // concurrent reader holds open (libuv opens FILE_SHARE_DELETE) marks it for
+  // deletion but the NAME LINGERS until that handle closes, so a second remove --
+  // even one running AFTER the first returned -- still sees the name and also
+  // reports success. So the witness is kept in-process: `#reaped` records the ids
+  // this instance has removed, CLAIMED synchronously before the first await (atomic
+  // against a concurrent remove), so exactly one caller ever witnesses true. Scoped
+  // to the instance -- SPEC.md 4.3's exactly-once is per Stash (its own lazy-read
+  // gate vs its own sweeper), never cross-process. Refs are never reused, so a
+  // claimed id never legitimately returns; the record is a bounded FIFO (evicting
+  // the oldest far past any concurrent-reap window) so it cannot grow without bound.
   async remove(id) {
     assertValid(id);
-    // Each directory is contained immediately before its own unlink, not
-    // both up front: a resolve-early/use-late gap is the same directory
-    // time-of-check/time-of-use window write() closes, so meta resolves
-    // right before the sidecar unlink and blobs right before the blob one.
-    const metaDir = await this.#containedDir("meta");
-    let had = true;
+    if (this.#reaped.has(id)) return false; // this instance already removed it (the fs name may still linger)
+    this.#reaped.add(id); // claim BEFORE any await: atomic vs a concurrent remove of the same id
+    if (this.#reaped.size > REAP_MEMO) this.#reaped.delete(this.#reaped.values().next().value); // evict oldest
+    // ANY failure after the claim un-claims the marker, so a retry (once the fault
+    // clears) re-attempts rather than being told "already removed" and skipping a
+    // still-present entry -- the claim is only authoritative once the removal lands.
     try {
-      await rm(join(metaDir, id + ".json"));
+      // Each directory is contained immediately before its own op, not both up
+      // front: a resolve-early/use-late gap is the same directory time-of-check/
+      // time-of-use window write() closes (CWE-367).
+      const metaDir = await this.#containedDir("meta");
+      let had = true;
+      try {
+        // rm (recursive, NO force) removes the sidecar whether it is the normal
+        // regular file OR a tampered directory where the sidecar belongs (which
+        // verify repair must still reap) -- without force so an ENOENT is the
+        // "already gone" witness. rm removes a final-component symlink ITSELF, never
+        // following it, so a swap cannot redirect the deletion to another file
+        // (CWE-59/367); the exactly-once witness is #reaped (in-process), not this
+        // op's atomicity. _retryTransient absorbs a Windows EPERM against a lingering
+        // handle.
+        await _retryTransient(() => rm(join(metaDir, id + ".json"), { recursive: true }));
+      } catch (err) {
+        if (_absent(err)) had = false; // already gone (an external / cross-process removal) -- not us
+        else throw err;
+      }
+      const blobDir = await this.#containedDir("blobs");
+      // force AND recursive: the blob is normally a regular file (recursive is inert
+      // on one), but verify repair must also reap a tampered directory-shaped blob.
+      // rm removes a final-component symlink itself, never following it (CWE-59/367).
+      await rm(join(blobDir, id), { force: true, recursive: true });
+      return had;
     } catch (err) {
-      if (_absent(err)) had = false;
+      this.#reaped.delete(id); // a real fault anywhere above: roll the claim back for a retry
+      throw err;
     }
-    const blobDir = await this.#containedDir("blobs");
-    await rm(join(blobDir, id), { force: true });
-    return had;
   }
 
   // stat(id) -> Entry, strictly validated: bounded read, JSON.parse under
@@ -512,10 +554,12 @@ export class DiskBackend {
   // stats() -> { entries, bytes, claimed }. The stash-wide limit pre-check reads
   // this aggregate rather than parsing every sidecar: `entries` is the sidecar
   // count (`.tmp` excluded), `bytes` the stored footprint -- each entry's blob
-  // size PLUS its sidecar file size, so a limit sees the real cost and a caller
-  // can't slip past `maxTotal` with tiny blobs and huge `meta`. `claimed` is the
-  // count in claims/ (0 until the claim machinery lands, M5). Loud, not lossy: a
-  // foreign name in meta/ fails the same way list() does. The sidecar is stat'd
+  // size PLUS its sidecar file size, PLUS any sidecar-less claim or orphan blob
+  // still occupying the shelf, so a limit sees the real cost and a caller can't
+  // slip past `maxTotal` with tiny blobs and huge `meta`, nor by hoarding crashed
+  // removes' orphans. `claimed` is the count in claims/ (0 until the claim machinery
+  // lands, M5). Loud, not lossy: a foreign name in ANY layout dir fails the same way
+  // list() does. The sidecar is stat'd
   // BEFORE the entry is counted, so a sidecar that vanished between the readdir
   // and its lstat (a concurrent sweep or drop) is skipped entirely -- not counted
   // as an entry with zero bytes -- keeping `entries` in step with what list()
@@ -563,13 +607,303 @@ export class DiskBackend {
       // against the footprint, or repeating pop+drop+abandon would hoard claim
       // blobs that every bounded push sees as an empty store (a maxTotal bypass).
       if (counted.has(name)) continue;
+      counted.add(name); // account this claim's blob so the blobs/ walk cannot double-count a duplicate-link
       try {
         bytes += (await lstat(join(claimsDir, name))).size;
       } catch (err) {
         _absent(err); // vanished mid-scan (a concurrent restore/commit) -- skip
       }
     }
+    // blobs/: an ORPHAN blob -- a valid ref name with no sidecar and no claim (a
+    // crashed remove deletes the sidecar first, leaving the blob) -- still occupies
+    // the store. Count it, or repeated crashed removes hoard orphans every bounded
+    // push sees as free space: the same maxTotal bypass the sidecar-less claim above
+    // closes. A foreign name is loud (like meta/ and claims/); a .tmp is an
+    // in-flight push's partial, skipped.
+    for (const name of await readdir(blobDir)) {
+      if (name.endsWith(".tmp")) continue;
+      if (!isValid(name)) throw new IntegrityError("store layout is damaged");
+      if (counted.has(name)) continue; // already counted via its sidecar or its claim
+      try {
+        bytes += (await lstat(join(blobDir, name))).size;
+      } catch (err) {
+        _absent(err); // vanished mid-scan (a concurrent verify/drop) -- skip
+      }
+    }
+    // tombstones/: M7's records; M6 writes none, so there are no bytes to count yet,
+    // but the aggregate stays loud on a foreign name here as in every layout dir.
+    for (const name of await readdir(await this.#containedDir("tombstones"))) {
+      if (name.endsWith(".tmp")) continue;
+      if (!isValid(name)) throw new IntegrityError("store layout is damaged");
+      // a valid ref name is an M7 tombstone -- its bytes are M7's to count
+    }
     return { entries, bytes, claimed };
+  }
+
+  // #hashBlob(path) -> { size, digest }. Stream-hash a stored blob through the
+  // contained, symlink-refused open (never a full-blob read, SPEC.md 2): a symlink
+  // where the blob belongs is refused at #openStored (O_NOFOLLOW / fstat guard),
+  // so verify follows nothing (CWE-59). Reads in bounded chunks off the descriptor.
+  async #hashBlob(path) {
+    const fh = await this.#openStored(path, () => new RefNotFound(), "blob storage shape is damaged");
+    try {
+      const hash = createHash("sha256");
+      let size = 0;
+      const buf = Buffer.allocUnsafe(64 * C.BYTES.KIB);
+      for (;;) {
+        const { bytesRead } = await fh.read(buf, 0, buf.length, null);
+        if (bytesRead === 0) break;
+        hash.update(buf.subarray(0, bytesRead));
+        size += bytesRead;
+      }
+      return { size, digest: "sha256:" + hash.digest("hex") };
+    } finally {
+      await fh.close();
+    }
+  }
+
+  // #condemn(id, kind, repaired) -- destroy a damaged entry: remove() deletes the
+  // sidecar BEFORE the blob (the M2 order -- a crash between them leaves an
+  // invisible blob orphan the next verify reaps, never a served half-entry).
+  async #condemn(id, kind, repaired) {
+    await this.remove(id);
+    repaired.push({ kind, id });
+  }
+
+  // #condemnIfUnclaimed(id, kind, repaired) -- destroy a damaged entry ONLY if it
+  // is not claimed RIGHT NOW. Claim state is re-checked LIVE at the condemnation,
+  // never trusted from a snapshot taken earlier in the walk: the digest is verified
+  // by an UNBOUNDED hash, and a pop can claim the blob DURING that hash, so a flag
+  // read before it is already stale. A blob that became claimed while verify read
+  // it is a live mid-pop entry -- its damage is reported (the finding was already
+  // pushed) but it is NEVER condemned; the pop's drain-verify / recovery owns
+  // resolving it (CWE-362/367). The residual check->remove window is the same
+  // microsecond TOCTOU every store fs op holds (SPEC.md 2.1), not the whole hash.
+  async #condemnIfUnclaimed(id, kind, repaired) {
+    if (await this.#isPresent(join(await this.#containedDir("claims"), id))) return; // claimed now -- leave it for recovery
+    await this.#condemn(id, kind, repaired);
+  }
+
+  // #discard(subdir, name, kind, repaired) -- remove a NON-entry file (a foreign
+  // name, a stale .tmp) directly, re-resolving its parent (#containedDir)
+  // immediately before the removal so a directory swap during the walk cannot
+  // redirect the delete outside the root -- the same resolve-before-use window
+  // remove()/write() hold, never a directory string resolved once at the top of an
+  // unbounded walk (CWE-367). force AND recursive: the foreign/tmp shape may itself
+  // be a tampered DIRECTORY, which repair must still reap; rm removes a
+  // final-component symlink itself, never following it (CWE-59). Entries route
+  // through #condemn/remove, never here.
+  async #discard(subdir, name, kind, repaired) {
+    await rm(join(await this.#containedDir(subdir), name), { force: true, recursive: true });
+    repaired.push({ kind, id: null });
+  }
+
+  // #isPresent(path) -> boolean. lstat probe: present -> true; ENOENT -> false; any
+  // OTHER errno is an fs FAULT and propagates. Re-checks a claim or a sidecar LIVE
+  // at a condemnation decision rather than trusting a stale top-of-walk snapshot,
+  // the way stats() re-checks claims/ before it counts (CWE-362).
+  async #isPresent(path) {
+    try {
+      await lstat(path);
+      return true;
+    } catch (err) {
+      _absent(err); // ENOENT -> genuinely absent; any other errno throws
+      return false;
+    }
+  }
+
+  // #auditOrphanTmp(subdir, dir, name, now, opts, findings, repaired) -> boolean.
+  // The ONE `.tmp` verdict for every layout dir. A `.tmp` is an atomic write in
+  // progress (write() / #writeAtomic stream to <name>.tmp, fsync, rename): a FRESH
+  // one is that in-flight write and is spared (deleting it would corrupt a live
+  // push -- CWE-367); one AGED past the grace is a crashed write's orphan --
+  // reported as orphan-tmp and, under repair, discarded (parent re-resolved). Every
+  // walk (meta/, blobs/, claims/) routes its `.tmp` handling here so none can strand
+  // a stale temp the others reap (the meta/ and claims/ walks once skipped `.tmp`
+  // unconditionally). Returns true when `name` was a `.tmp` -- the caller skips it.
+  async #auditOrphanTmp(subdir, dir, name, now, opts, findings, repaired) {
+    if (!name.endsWith(".tmp")) return false;
+    let tmpStat = null;
+    try {
+      tmpStat = await lstat(join(dir, name));
+    } catch (err) {
+      _absent(err); // vanished mid-walk (the rename landed): a fault re-raises, ENOENT leaves tmpStat null
+    }
+    // A null tmpStat means the .tmp raced out from under us -- still a .tmp the
+    // caller skips, just nothing left to age. A present one aged past the grace is
+    // a crashed write's orphan; a fresh one is an in-flight write, spared (CWE-367).
+    if (tmpStat !== null && now - tmpStat.mtimeMs >= C.AUDIT.TMP_GRACE_MS) {
+      findings.push({ kind: "orphan-tmp", id: null });
+      if (opts.repair) await this.#discard(subdir, name, "orphan-tmp", repaired);
+    }
+    return true; // it WAS a .tmp -- the caller skips it either way (never an entry)
+  }
+
+  // verify(opts) -> { scanned, findings, repaired }. Audit the physical layout,
+  // composing the read choke points: #containedDir per subdir (re-resolved before
+  // every readdir and unlink), this.stat for per-sidecar validation, #hashBlob for
+  // the symlink-refused digest walk. Damage is a FINDING (returned); an fs FAULT
+  // (EACCES, a vanished layout dir) THROWS -- a walk error absorbed into a clean
+  // report is the fail-open-verify shape (CWE-392). Dry by default; repair removes
+  // ONLY what it condemns (blob AND sidecar together), never a stale claim
+  // (SPEC.md 6 recovery's job). It never deletes bytes a live operation still owns
+  // (CWE-367): a claim taken mid-walk is re-checked LIVE before a missing-blob
+  // verdict, and an orphan blob is condemned only once AGED past the grace with no
+  // live sidecar or claim -- a fresh blob may be a push's post-rename/pre-sidecar
+  // window, spared like an in-flight .tmp. ids in the report are refs (the embedder
+  // owns the store); a foreign/tmp name reports id: null -- verify never echoes an
+  // on-disk filename (SPEC.md 10).
+  async verify(opts) {
+    const now = Date.now();
+    const findings = [];
+    const repaired = [];
+    const scanned = new Set(); // ref ids with a ref-shaped sidecar (an entry)
+
+    // Each directory is re-resolved (#containedDir) immediately before the readdir
+    // that enumerates it, before every per-entry blob read, and before every
+    // destructive unlink -- never once at the top: the hash walk runs for an
+    // unbounded time, so a same-privilege directory swap mid-walk is caught at the
+    // next resolve, the tight window remove() and write() hold, not a directory
+    // string vouched for once and reused across the whole walk (CWE-367).
+    const metaDir = await this.#containedDir("meta");
+
+    // meta/: each sidecar is an entry -- validate it, then check its blob.
+    for (const name of await readdir(metaDir)) {
+      if (await this.#auditOrphanTmp("meta", metaDir, name, now, opts, findings, repaired)) continue; // an in-flight or orphaned sidecar write
+      const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
+      if (id === null || !isValid(id)) {
+        findings.push({ kind: "foreign-file", id: null });
+        if (opts.repair) await this.#discard("meta", name, "foreign-file", repaired);
+        continue;
+      }
+      scanned.add(id);
+      const blobDir = await this.#containedDir("blobs"); // re-resolved per entry, right before this entry's blob reads
+      let entry;
+      try {
+        entry = await this.stat(id); // bounded read + assertShape + id match, free
+      } catch (err) {
+        if (err instanceof RefNotFound) continue; // vanished mid-walk (a concurrent drop)
+        if (err instanceof IntegrityError) {
+          // stat composes #containedDir (a vanished meta/ throws "store layout is
+          // damaged" -- an fs FAULT) AND #readSidecar (a bad sidecar throws --
+          // DAMAGE). Both are IntegrityError, so re-resolve the layout to
+          // disambiguate: a still-present meta/ means the damage is this sidecar's
+          // (a finding); a vanished meta/ RE-THROWS the fault rather than masking a
+          // walk that fell over as N spurious corrupt-sidecar findings (CWE-392).
+          await this.#containedDir("meta");
+          findings.push({ kind: "corrupt-sidecar", id });
+          // A corrupt sidecar may belong to a CLAIMED entry (a crash mid consumeRead
+          // rewrite leaves the sidecar unparsable while the blob is live in claims/):
+          // report the damage, but condemn only if it is not claimed right now.
+          if (opts.repair) await this.#condemnIfUnclaimed(id, "corrupt-sidecar", repaired);
+          continue;
+        }
+        throw err; // an fs FAULT -- never a finding
+      }
+      // Find the blob: normally blobs/<id>, but a pop/apply may have claimed it into
+      // claims/<id> after this walk began -- re-check claims/ LIVE, never a stale
+      // snapshot. A claimed blob is a live entry mid-read: it is STILL digest-checked
+      // (a read audits every blob's integrity without mutating), but every condemn
+      // routes through #condemnIfUnclaimed, which re-checks the claim state LIVE at
+      // the destruction -- a blob claimed DURING the (unbounded) hash is never
+      // destroyed out from under the reader (CWE-362). Only a blob absent from BOTH
+      // blobs/ and claims/ is genuinely missing.
+      let blobPath = join(blobDir, id);
+      let blobStat;
+      try {
+        blobStat = await lstat(blobPath);
+      } catch (err) {
+        _absent(err); // absent from blobs/ (ENOENT); any other errno propagates
+        blobPath = join(await this.#containedDir("claims"), id);
+        try {
+          blobStat = await lstat(blobPath);
+        } catch (err2) {
+          _absent(err2); // absent from claims/ too -> genuinely missing
+          findings.push({ kind: "missing-blob", id });
+          if (opts.repair) await this.#condemnIfUnclaimed(id, "missing-blob", repaired);
+          continue;
+        }
+      }
+      if (blobStat.size !== entry.size) {
+        findings.push({ kind: "size-mismatch", id });
+        if (opts.repair) await this.#condemnIfUnclaimed(id, "size-mismatch", repaired);
+        continue;
+      }
+      let got;
+      try {
+        got = await this.#hashBlob(blobPath);
+      } catch (err) {
+        if (err instanceof RefNotFound) continue; // vanished mid-walk (a claim committed / a drop)
+        if (err instanceof IntegrityError) { // a symlink / non-regular blob, refused
+          findings.push({ kind: "digest-mismatch", id });
+          if (opts.repair) await this.#condemnIfUnclaimed(id, "digest-mismatch", repaired);
+          continue;
+        }
+        throw err;
+      }
+      if (!constantTimeEqual(got.digest, entry.digest)) {
+        findings.push({ kind: "digest-mismatch", id });
+        if (opts.repair) await this.#condemnIfUnclaimed(id, "digest-mismatch", repaired);
+      }
+    }
+
+    // blobs/: orphan blobs (no sidecar), stale .tmp orphans, foreign files.
+    const blobScan = await this.#containedDir("blobs");
+    for (const name of await readdir(blobScan)) {
+      if (await this.#auditOrphanTmp("blobs", blobScan, name, now, opts, findings, repaired)) continue; // an in-flight push or orphaned .tmp
+      if (!isValid(name)) {
+        findings.push({ kind: "foreign-file", id: null });
+        if (opts.repair) await this.#discard("blobs", name, "foreign-file", repaired);
+        continue;
+      }
+      if (scanned.has(name)) continue; // a sidecar in the meta snapshot vouches for it
+      // No sidecar in the snapshot -- but write() renames the blob to its FINAL
+      // name BEFORE the sidecar lands, so an in-flight push is indistinguishable
+      // from an orphan by name alone. Condemn ONLY an AGED blob whose sidecar and
+      // claim are BOTH absent LIVE: a fresh blob gets the same grace the .tmp
+      // branch gives a streaming write (it may be the post-rename/pre-sidecar
+      // window of a live push), and a live sidecar/claim is a healthy entry the
+      // snapshot missed -- never delete a just-written blob (CWE-367).
+      let orphanStat;
+      try { orphanStat = await lstat(join(blobScan, name)); } catch (err) { _absent(err); continue; }
+      if (now - orphanStat.mtimeMs < C.AUDIT.TMP_GRACE_MS) continue; // fresh -- a possibly-in-flight push
+      if (await this.#isPresent(join(await this.#containedDir("meta"), name + ".json"))) continue; // sidecar landed after the snapshot
+      if (await this.#isPresent(join(await this.#containedDir("claims"), name))) continue; // claimed after the snapshot
+      findings.push({ kind: "orphan-blob", id: name });
+      if (opts.repair) await this.#condemn(name, "orphan-blob", repaired);
+    }
+
+    // claims/: stale claims are REPORTED, never repaired (deleting a restorable
+    // claim would be data loss; SPEC.md 6 recovery owns resolution).
+    const claimsDir = await this.#containedDir("claims");
+    for (const name of await readdir(claimsDir)) {
+      if (await this.#auditOrphanTmp("claims", claimsDir, name, now, opts, findings, repaired)) continue; // an orphaned .tmp (claims/ writes none in normal flow)
+      if (!isValid(name)) {
+        findings.push({ kind: "foreign-file", id: null });
+        if (opts.repair) await this.#discard("claims", name, "foreign-file", repaired);
+        continue;
+      }
+      let claimStat;
+      try { claimStat = await lstat(join(claimsDir, name)); } catch (err) { _absent(err); continue; }
+      if (now - claimStat.mtimeMs >= opts.claimTimeoutMs) findings.push({ kind: "stale-claim", id: name });
+    }
+
+    // tombstones/: M7's replication records live here; M6 writes none. verify still
+    // audits the dir for layout damage -- a foreign name is loud (like every layout
+    // dir), an aged .tmp is an orphan -- but leaves any valid-ref-name file for M7 to
+    // own, never condemning a tombstone whose lifecycle this milestone does not yet
+    // define.
+    const tombstonesDir = await this.#containedDir("tombstones");
+    for (const name of await readdir(tombstonesDir)) {
+      if (await this.#auditOrphanTmp("tombstones", tombstonesDir, name, now, opts, findings, repaired)) continue;
+      if (!isValid(name)) {
+        findings.push({ kind: "foreign-file", id: null });
+        if (opts.repair) await this.#discard("tombstones", name, "foreign-file", repaired);
+      }
+      // a valid ref name is an M7 tombstone -- left untouched
+    }
+
+    return { scanned: scanned.size, findings, repaired };
   }
 
   // claim(id) -> { entry, source }. Atomically claim the blob into claims/<id>

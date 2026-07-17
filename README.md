@@ -76,10 +76,11 @@ Requires Node `>= 24.18.0`.
 
 ## What ships today
 
-The M1 + M2 + M3 + M4 + M5 surface (see `SPEC.md` section 12 for the full delivery plan):
+The M1 + M2 + M3 + M4 + M5 + M6 surface (see `SPEC.md` section 12 for the full delivery plan):
 
-- `push` / `pop` / `apply` / `show` / `list` / `drop` / `clear` over either
-  backend, with size and `sha256` digest computed as the bytes stream through
+- `push` / `pop` / `apply` / `show` / `has` / `list` / `stats` / `verify` /
+  `drop` / `clear` over either backend, with size and `sha256` digest computed
+  as the bytes stream through
   and digest-verified reads.
 - **Pop & read budgets**: `pop(ref)` streams an entry and destroys it the
   instant the stream drains cleanly -- bytes out once, then gone -- with two
@@ -99,6 +100,15 @@ The M1 + M2 + M3 + M4 + M5 surface (see `SPEC.md` section 12 for the full delive
   store and refuse an over-budget push with `StashFull` without evicting
   anything already stored. Expired-but-unswept entries are reaped before the
   store is judged full, and every rejected push leaves no partial behind.
+- **Audit & events**: `verify()` walks the store and reports physical damage --
+  a bit-flipped blob, a corrupt sidecar, an orphaned blob or half-written
+  `.tmp`, a foreign file, a stale claim -- streaming a `sha256` over every blob;
+  it is a dry run by default, and `verify({ repair: true })` removes only what it
+  condemns, sparing healthy entries, an in-flight `.tmp`, and a claim recovery
+  owns. A `Stash` is an `EventEmitter` -- `'pushed'` / `'popped'` / `'dropped'` /
+  `'expired'` (exactly once per reaped entry) / `'sweepError'` (never the
+  process-killing `'error'`) -- and is async-iterable. `has(ref)` is a boolean
+  existence check; `stats()` returns `{ entries, bytes, claimed }`.
 - **Expiry**: a construct-time `ttl` default (`'24h'`, `'7d'`, ms, or `null`),
   overridable per `push`. An expired entry reads back as `RefNotFound` and is
   dropped in passing, before any sweep. `list()` hides expired entries by
@@ -124,8 +134,8 @@ Spec'd options whose milestone has not shipped (`tombstoneTtl`) **throw at
 construction** rather than sitting silently unenforced -- a security option that
 is accepted but ignored would be a fail-open default.
 
-Next up, in order: the audit hook (`verify`) and the replication primitives
-(`store`, tombstones). `ROADMAP.md` tracks status; `SPEC.md` is the contract.
+Next up: the replication primitives (`store`, tombstones). `ROADMAP.md` tracks
+status; `SPEC.md` is the contract.
 
 ## Run it sandboxed
 

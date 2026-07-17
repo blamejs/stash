@@ -24,6 +24,14 @@
  *   on any method and no cipher import anywhere in the tree. Encryption
  *   belongs to the consumer; StashJS is a shelf.
  *
+ *   A `Stash` is an `EventEmitter`. It emits `'pushed'` (Entry) after a push
+ *   commits, `'popped'` (Entry) after a pop's delete lands, `'dropped'` (Entry)
+ *   on `drop` / `clear` / a budget-exhausting read, `'expired'` (Entry) exactly
+ *   once per reaped entry, and `'sweepError'` (Error) -- never `'error'`, which
+ *   would crash the process -- when a background sweep throws. Payloads are full,
+ *   defensive-copy Entry objects emitted after the change commits, so a throwing
+ *   listener cannot unwind the committed operation.
+ *
  * @card
  *   The policy layer -- push bytes in for a random-capability ref, stream
  *   them back out, destroy on demand; write-once entries, fail-closed
@@ -31,6 +39,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { Transform, pipeline } from "node:stream";
 
 import { C } from "./constants.js";
@@ -56,7 +65,7 @@ const UNIMPLEMENTED_PUSH_OPTIONS = [];
 // The backend surface Stash drives today. Validated at construction so a
 // misassembled backend fails at boot, not at first push.
 const REQUIRED_BACKEND_METHODS = [
-  "write", "read", "remove", "stat", "list", "stats",
+  "write", "read", "remove", "stat", "list", "stats", "verify",
   "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
 ];
 
@@ -305,7 +314,7 @@ function _positiveCount(value, label) {
  *
  *   const stash = new Stash({ backend: new MemoryBackend(), ttl: "24h" });
  */
-export class Stash {
+export class Stash extends EventEmitter {
   #backend;
   #ttlMs = null;
   #sweepTimer = null;
@@ -324,6 +333,7 @@ export class Stash {
   #nextRecoverAt = 0;
 
   constructor(opts) {
+    super();
     options(opts, "new Stash", {
       allowed: ["backend", "ttl", "sweepInterval", "maxSize", "maxEntries", "maxTotal", "onPopFailure", "claimTimeout"],
       unimplemented: UNIMPLEMENTED_OPTIONS,
@@ -402,13 +412,33 @@ export class Stash {
     if (this.#sweepInFlight !== null) return;
     const work = this.prune();
     this.#sweepInFlight = work.then(() => {}, () => {});
-    // Drop-silent by design (drift rule 8's tier-3 sink): a rejected background
-    // sweep would become an unhandledRejection, fatal on Node, and a janitor must
-    // never take the process down. M6 replaces this silence with the 'sweepError'
-    // emit; vector 16 pins survival now. The failure routes through `.catch`, so
-    // the in-flight flag always clears -- no try/finally to misread as fail-open.
-    await work.catch(() => {});
+    // A rejected background sweep must never become an unhandledRejection (fatal
+    // on Node -- the exact outcome SPEC.md 4.3 exists to prevent): surface it as
+    // 'sweepError' (NEVER 'error' -- an unhandled 'error' crashes the process; a
+    // janitor must not be able to take the app down), through #emitSweepError, which
+    // contains a listener's OWN failure -- sync throw OR async rejection -- so it
+    // cannot escape either. #emitSweepError returns synchronously, so the chain
+    // always fulfils and the guard below always clears (a stuck guard would silently
+    // disable the janitor for the process's life) -- no try/finally to misread as a
+    // fail-open swallow.
+    await work.catch((err) => this.#emitSweepError(err));
     this.#sweepInFlight = null;
+  }
+
+  // #emitSweepError(err) -- emit 'sweepError' such that NO listener can crash the
+  // janitor. EventEmitter.emit does not await listeners, so an ASYNC listener's
+  // rejected promise would escape as an unhandledRejection (fatal on Node -- the
+  // outcome the sweep exists to prevent), and a SYNCHRONOUS throw would propagate
+  // out of the emit. So each listener runs inside its own promise chain: the one
+  // trailing `.catch` contains BOTH failure modes. A handler's own failure is
+  // dropped here -- the one sanctioned drop-silent sink (drift rule 8), the reason
+  // the failure channel is 'sweepError' and never the fatal 'error'. rawListeners
+  // preserves `once` semantics (its wrapper self-removes when called). Emits nothing
+  // when there are no listeners.
+  #emitSweepError(err) {
+    for (const listener of this.rawListeners("sweepError")) {
+      Promise.resolve().then(() => listener.call(this, err)).catch(() => {});
+    }
   }
 
   // #statLive(ref) -- the shared lazy-expiry gate. stat the entry, and if it is
@@ -421,10 +451,22 @@ export class Stash {
   async #statLive(ref) {
     const entry = await this.#backend.stat(ref);
     if (isExpired(entry, Date.now())) {
-      await this.#backend.remove(ref);
+      // The remove that returns true is the single 'I destroyed it' witness, so a
+      // lazy reap racing the sweeper emits 'expired' exactly once (the loser sees
+      // false). No in-process once-set to desync from the fs truth (SPEC.md 4.3).
+      if (await this.#backend.remove(ref)) this.#emit("expired", entry);
       throw new RefNotFound();
     }
     return entry;
+  }
+
+  // #emit(event, entry) -- emit a lifecycle event with a DEFENSIVE COPY of the
+  // Entry (SPEC.md 4.3): a listener that mutates its payload must never reach a
+  // subsequent show()/list(). The single place the copy is made, so no emit site
+  // can leak a live Entry reference. Emits fire at the verb layer, AFTER the state
+  // change commits, so M7's store() stays silent by construction (no bypass flag).
+  #emit(event, entry) {
+    this.emit(event, structuredClone(entry));
   }
 
   // #rejectIfClaimed(ref) -- the claim gates contended access to an entry's
@@ -514,18 +556,23 @@ export class Stash {
   // error, premature destroy) restores the claim, or burns it under
   // onPopFailure: 'burn'. pop and budgeted apply differ only in onCommit, so the
   // destruction/restore machinery has exactly one home.
-  async #claimedRead(ref, onCommit) {
+  async #claimedRead(ref, onCommit, destroyedEvent) {
     const { entry, source } = await this.#backend.claim(ref);
     if (isExpired(entry, Date.now())) {
       _dispose(source);
       await this.#backend.restore(ref);
-      await this.#backend.remove(ref); // lazy-drop the now-expired entry
+      if (await this.#backend.remove(ref)) this.#emit("expired", entry); // lazy-drop, witnessed
       throw new RefNotFound();
     }
     return _verifiedStream(entry, source, {
       onCommit: () => onCommit(entry),
+      // 'burn' destroys the entry the read could not consume: the delete lands the
+      // SAME as a successful terminal, so it emits the same destruction event
+      // ('popped' for pop, 'dropped' for a budgeted apply) AFTER the commit -- a
+      // burned entry is never destroyed silently (SPEC.md 4.3). 'restore' returns
+      // the entry, which survives, so it emits nothing.
       onFail: () => (this.#onPopFailure === "burn"
-        ? this.#backend.commit(ref)
+        ? this.#backend.commit(ref).then(() => this.#emit(destroyedEvent, entry))
         : this.#backend.restore(ref)),
     });
   }
@@ -619,6 +666,7 @@ export class Stash {
     }
     const bounded = _boundedSource(chunks, this.#maxSize, residual);
     const stored = await this.#backend.write(id, bounded, entry);
+    this.#emit("pushed", stored); // after the write commits (SPEC.md 4.3)
     return stored.id;
   }
 
@@ -664,11 +712,12 @@ export class Stash {
       return this.#claimedRead(ref, async (claimed) => {
         if (claimed.readsLeft === 1) {
           await this.#backend.commit(ref); // the last credit: destroy through the commit path
+          this.#emit("dropped", claimed); // budget-exhaust is a 'dropped', NOT a 'popped' (SPEC.md 4.3)
         } else {
           await this.#backend.consumeRead(ref); // persist the debit BEFORE restoring (fragile area 5)
-          await this.#backend.restore(ref);
+          await this.#backend.restore(ref); // a non-terminal read destroys nothing -- no event
         }
-      });
+      }, "dropped"); // a burned budgeted read destroys the entry -> 'dropped'
     }
     const source = await this.#backend.read(ref);
     // The gate above and this open are two awaits apart, so a short TTL can
@@ -679,7 +728,11 @@ export class Stash {
     // afterward is not killed mid-stream (the read is claimed at this point).
     if (isExpired(entry, Date.now())) {
       _dispose(source);
-      await this.#backend.remove(ref);
+      // Reap in passing on the same remove-witness the lazy gate uses: this is a
+      // third 'expired' emit site (alongside #statLive and #claimedRead), so an
+      // entry that lapses in the stat->read window is still audited exactly once
+      // (the loser of a sweep race sees false) -- never reaped silently (SPEC.md 4.3).
+      if (await this.#backend.remove(ref)) this.#emit("expired", entry);
       throw new RefNotFound();
     }
     return _verifiedStream(entry, source);
@@ -715,7 +768,10 @@ export class Stash {
     await this.#recover();
     await this.#rejectIfClaimed(ref); // a concurrent pop's loser bails before the advisory stat
     await this.#statLive(ref); // advisory: reject an expired entry with zero claim taken
-    return this.#claimedRead(ref, () => this.#backend.commit(ref));
+    return this.#claimedRead(ref, async (entry) => {
+      await this.#backend.commit(ref);
+      this.#emit("popped", entry); // a pop's terminal delete committed (SPEC.md 4.3)
+    }, "popped"); // a burned pop's delete also lands -> 'popped'
   }
 
   /**
@@ -739,6 +795,113 @@ export class Stash {
     assertValid(ref);
     await this.#recover();
     return this.#statLive(ref);
+  }
+
+  /**
+   * @primitive  stash.has
+   * @signature  stash.has(ref) -> Promise<boolean>
+   * @since      0.1.8
+   * @status     experimental
+   * @spec       SPEC.md 4, SPEC.md 5, SPEC.md 7
+   * @related    stash.show, stash.list
+   *
+   * Existence check without the try/catch `show` needs. `true` for a live entry,
+   * `false` for an unknown OR expired ref -- an expired entry is reaped in passing,
+   * exactly as `show`/`apply` treat it. A malformed ref still dies at the whitelist
+   * with `InvalidRef` BEFORE any backend access -- a boolean query is not a licence
+   * to fail open on hostile input -- and a corrupt entry throws `IntegrityError`
+   * rather than answering `false`: a clean boolean must never hide corruption.
+   *
+   * @example
+   *   if (await stash.has(ref)) console.log("still present");
+   */
+  async has(ref) {
+    assertValid(ref);
+    await this.#recover();
+    try {
+      await this.#statLive(ref);
+      return true;
+    } catch (err) {
+      if (err instanceof RefNotFound) return false;
+      throw err; // IntegrityError / fs faults propagate -- never absorbed into false
+    }
+  }
+
+  /**
+   * @primitive  stash.stats
+   * @signature  stash.stats() -> Promise<{ entries, bytes, claimed }>
+   * @since      0.1.8
+   * @status     experimental
+   * @spec       SPEC.md 4, SPEC.md 9
+   * @related    stash.list, stash.verify
+   *
+   * Aggregate counts, never refs: `entries` (live plus expired-but-unswept),
+   * `bytes` (the stored footprint -- each blob plus its metadata), and `claimed`
+   * (in-flight pop / budgeted-read claims). The object carries exactly those three
+   * keys. Aggregates are the physical truth of the shelf: an expired entry still
+   * counts until a read or `prune()` reaps it, so it is a fast lstat walk. A
+   * foreign file in the layout fails the aggregate loudly with `IntegrityError`,
+   * never a silently smaller number; content integrity (a corrupt sidecar, a
+   * bit-flipped blob) is `verify()`'s job, not this count's.
+   *
+   * @example
+   *   const { entries, bytes, claimed } = await stash.stats();
+   */
+  async stats() {
+    await this.#recover();
+    return this.#backend.stats();
+  }
+
+  /**
+   * @primitive  stash.verify
+   * @signature  stash.verify(opts?) -> Promise<Report>
+   * @since      0.1.8
+   * @status     experimental
+   * @spec       SPEC.md 4, FIPS 180-4
+   * @related    stash.stats, stash.prune
+   *
+   * Audit the store's physical integrity. Dry-run by default: it digest-checks
+   * every blob (streamed, never a full-blob read) and reports damage --
+   * `digest-mismatch`, `size-mismatch`, `corrupt-sidecar`, `missing-blob`,
+   * `orphan-blob`, `orphan-tmp`, `foreign-file`, `stale-claim` -- without touching
+   * anything. `{ repair: true }` removes ONLY what it condemns (a damaged entry's
+   * blob and sidecar together); healthy entries survive byte-identical, a fresh
+   * push's in-flight `.tmp` is spared, and a stale claim is reported but never
+   * deleted (resolving it is crash recovery's job -- deleting a restorable claim
+   * would be data loss). The Report is `{ scanned, findings: [{ kind, id }],
+   * repaired: [{ kind, id }] }`; `id` is the ref for ref-shaped damage (the store
+   * is the embedder's) and `null` for a foreign name -- verify never echoes an
+   * on-disk path. Damage is a FINDING; an I/O fault (a permission denial, a
+   * vanished layout dir) THROWS -- a walk error absorbed into a clean report would
+   * be fail-open. Repair is local until replication (a condemnation writes no
+   * tombstone yet -- M7).
+   *
+   * @example
+   *   const report = await stash.verify();      // dry run: report only
+   *   await stash.verify({ repair: true });     // remove the condemned
+   */
+  async verify(opts = {}) {
+    options(opts, "verify", { allowed: ["repair"] });
+    if (opts.repair !== undefined && typeof opts.repair !== "boolean") {
+      throw new TypeError("verify: repair must be a boolean");
+    }
+    // verify does NOT run #recover: it AUDITS the store as-is and REPORTS stale
+    // claims (SPEC.md 6 -- resolving one is recovery's job, run by every mutating
+    // verb and at construction, never by an audit). Recovering here would make a
+    // dry run MUTATE (a restore/burn) and would hide the very stale-claim finding
+    // verify exists to surface -- a fresh auditor process whose first call is
+    // verify() must see the crash residue, not silently clean it. claimTimeout is
+    // policy (M5), passed down so the backend can age a stale claim without owning
+    // the threshold; the tmp grace is C.AUDIT.
+    return this.#backend.verify({ repair: opts.repair === true, claimTimeoutMs: this.#claimTimeoutMs });
+  }
+
+  // [Symbol.asyncIterator] -- `for await (const entry of stash)` is sugar over
+  // list(): the live entries, expired ones filtered, contents never yielded.
+  // Documented on the list() primitive; a Symbol method has no dotted name for
+  // its own wiki page. Iterating an empty stash completes at once.
+  async *[Symbol.asyncIterator]() {
+    for (const entry of await this.list()) yield entry;
   }
 
   /**
@@ -786,7 +949,10 @@ export class Stash {
    * Delete an entry without reading it. Resolves `false` when the ref names
    * nothing -- an absent entry is a fact, not a failure. A malformed ref
    * still throws `InvalidRef`; replication input and typos both die at the
-   * whitelist.
+   * whitelist. A corrupt entry is still removed -- drop deletes without reading,
+   * so a sidecar too damaged to parse never blocks cleanup; it carries no
+   * lifecycle event (there is no whole Entry to hand a listener). `verify` is the
+   * audit path that classifies the damage.
    *
    * @example
    *   await stash.drop(ref); // true -- gone
@@ -794,7 +960,33 @@ export class Stash {
   async drop(ref) {
     assertValid(ref);
     await this.#recover();
-    return this.#backend.remove(ref);
+    // stat BEFORE remove for the Entry payload; the remove-returns-false witness
+    // covers the vanish race (a concurrent drop/pop). An expired entry is
+    // nonexistent on every public surface (SPEC.md 7), so dropping one reaps it as
+    // 'expired' and returns false -- only a LIVE removal is a 'dropped' true.
+    let entry;
+    try {
+      entry = await this.#backend.stat(ref);
+    } catch (err) {
+      if (err instanceof RefNotFound) {
+        // The ref names no live entry -- but a crash mid-remove (sidecar first, then
+        // blob) can strand an orphaned blob under this id. drop deletes without
+        // reading, so it still removes to clean that orphan (as it did before it
+        // stat'd for the event payload); the ref named nothing live, so -> false.
+        await this.#backend.remove(ref);
+        return false;
+      }
+      // A sidecar too corrupt to parse must not make the entry un-droppable: drop
+      // deletes without reading (unlike show/has, which surface the corruption).
+      // Destroy it and report the removal; there is no whole Entry to carry, so no
+      // event fires -- verify({ repair: true }) is the richer audit path.
+      if (err instanceof IntegrityError) return this.#backend.remove(ref);
+      throw err;
+    }
+    const expired = isExpired(entry, Date.now());
+    if (!(await this.#backend.remove(ref))) return false; // vanished between stat and remove
+    this.#emit(expired ? "expired" : "dropped", entry);
+    return !expired;
   }
 
   /**
@@ -813,10 +1005,23 @@ export class Stash {
   async clear() {
     await this.#recover();
     const entries = await this.#backend.list();
+    const now = Date.now();
+    // Destroy EVERYTHING first, recording each removal and its cause, and emit only
+    // once the whole clear has committed: a lifecycle listener that throws must not
+    // abort the loop and strand the un-visited entries (an event observes a
+    // completed state change, it never interrupts one -- SPEC.md 4.3). A live entry
+    // is 'dropped' and counts; an expired one is 'expired' and does not (it was
+    // already nonexistent, SPEC.md 4.3, 7).
+    const reaped = [];
     let destroyed = 0;
     for (const entry of entries) {
-      if (await this.#backend.remove(entry.id)) destroyed += 1;
+      const expired = isExpired(entry, now);
+      if (await this.#backend.remove(entry.id)) {
+        reaped.push([expired ? "expired" : "dropped", entry]);
+        if (!expired) destroyed += 1;
+      }
     }
+    for (const [event, entry] of reaped) this.#emit(event, entry);
     return destroyed;
   }
 
@@ -849,11 +1054,17 @@ export class Stash {
     await this.#recover();
     const entries = await this.#backend.list();
     const now = Date.now();
-    let destroyed = 0;
+    // Reap every expired entry FIRST, emit only after: a throwing 'expired'
+    // listener must not abort the reap and strand the rest (this runs on the sweep
+    // timer, where a stranded expired entry would linger until a lazy read finds
+    // it). An entry a concurrent drop removed first fails the remove-witness and is
+    // never double-counted (SPEC.md 4.3).
+    const reaped = [];
     for (const entry of entries) {
-      if (isExpired(entry, now) && await this.#backend.remove(entry.id)) destroyed += 1;
+      if (isExpired(entry, now) && await this.#backend.remove(entry.id)) reaped.push(entry);
     }
-    return destroyed;
+    for (const entry of reaped) this.#emit("expired", entry);
+    return reaped.length;
   }
 
   /**

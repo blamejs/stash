@@ -57,12 +57,21 @@ interrupted commit is finished, never resurrected, and a drop during a live
 claim is monotone. The backend contract gains the claim lifecycle: `claim`,
 `restore`, `commit`, `listClaims`, `consumeRead`, `isClaimed`.
 
-## M6 -- Audit -- NEXT
+## M6 -- Audit -- SHIPPED (0.1.8)
 
-`has`, `stats`, `verify` (report + opt-in repair), the event set including
-`'sweepError'`.
+`verify(opts?)` audits physical integrity: it streams a `sha256` over every blob
+and reports damage -- `digest-mismatch`, `size-mismatch`, `corrupt-sidecar`,
+`missing-blob`, `orphan-blob`, `orphan-tmp`, `foreign-file`, `stale-claim` -- as
+`{ scanned, findings, repaired }`. Dry-run by default; `{ repair: true }` removes
+only what it condemns, sparing healthy entries, a live push's in-flight `.tmp`,
+and a claim recovery owns. Damage is a finding; an I/O fault throws. A `Stash` is
+now an `EventEmitter` (`'pushed'` / `'popped'` / `'dropped'` / `'expired'` once
+per reaped entry / `'sweepError'`, never `'error'`), with full defensive-copy
+Entry payloads emitted after commit, and is async-iterable. `has(ref)` is a
+boolean existence check; `stats()` returns `{ entries, bytes, claimed }`. The
+backend contract gains `verify`.
 
-## M7 -- Replication
+## M7 -- Replication -- NEXT
 
 Tombstones on every early-destruction path, `store()` with the SPEC.md
 section 4.4 order of checks, `tombstones()`, `tombstoneTtl` pruning.

@@ -6,6 +6,7 @@
 // by adding a factory to BACKENDS.
 import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { Readable } from "node:stream";
 
 import { Stash, RefNotFound, RefClaimed, InvalidRef, IntegrityError, StashError, SizeExceeded, StashFull } from "../src/index.js";
@@ -49,7 +50,7 @@ async function drain(readable) {
 // listClaims call throws); this array keeps every mock in step with
 // REQUIRED_BACKEND_METHODS as the contract grows across milestones.
 const BACKEND_METHODS = [
-  "write", "read", "remove", "stat", "list", "stats",
+  "write", "read", "remove", "stat", "list", "stats", "verify",
   "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
 ];
 
@@ -414,6 +415,29 @@ for (const { name, create } of BACKENDS) {
       await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
       assert.equal(readCalled, true, "the read WAS opened -- the reject came from the post-open re-check, not the pre-gate");
       assert.deepEqual(await stash.list({ includeExpired: true }), []); // dropped in passing, source disposed
+    });
+
+    test("apply's serve-time expiry reap emits 'expired' exactly once (SPEC.md 4.3), like the gate and the budgeted path", async () => {
+      // The same stat->read lapse window, but asserting the AUDIT trail: an entry
+      // reaped by the post-open re-check must fire 'expired' once -- every OTHER
+      // reap path (#statLive, #claimedRead) emits, so this lazy-read path cannot
+      // be the one that destroys an entry silently.
+      const inner = create();
+      const backend = {
+        ...wrapBackend(inner),
+        read: async (id) => {
+          const e = await inner.stat(id);
+          while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2)); // poll, don't sleep
+          return inner.read(id);
+        },
+      };
+      const stash = new Stash({ backend });
+      const seen = [];
+      stash.on("expired", (e) => seen.push(e));
+      const ref = await stash.push("secret bytes", { ttl: 150 }); // alive at the gate; expires in the delayed open
+      await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+      assert.equal(seen.length, 1, "the serve-time reap emitted 'expired' exactly once");
+      assert.equal(seen[0].id, ref, "the payload is the reaped entry");
     });
 
     test("apply's expiry re-check tolerates an already-closed read source: still drops, no leak", async () => {
@@ -940,6 +964,252 @@ for (const { name, create } of BACKENDS) {
       held.destroy(); // abandon the read -- its onFail restore must NOT resurrect the dropped entry
       // retry past any in-flight restore (RefClaimed), then confirm the entry stays gone
       await assert.rejects(retryClaimed(() => stash.apply(ref)), RefNotFound);
+    });
+
+    // ---- M6: audit surface (has / stats / verify) + the event set (SPEC.md 4, 4.3) ----
+    test("has: true for a live entry, false for an unknown ref, InvalidRef for a hostile one", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push("here");
+      assert.equal(await stash.has(ref), true);
+      assert.equal(await stash.has(generate()), false); // well-formed but absent
+      for (const hostile of ["v1_../../etc", "../secret", "v1_short", "not-a-ref"]) {
+        await assert.rejects(stash.has(hostile), InvalidRef); // whitelist before any backend touch
+      }
+    });
+
+    test("has: an expired entry is false, reaped in passing, emitting 'expired' exactly once", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push("gone", { ttl: 0 }); // expired at push time
+      const seen = [];
+      stash.on("expired", (e) => seen.push(e.id));
+      assert.equal(await stash.has(ref), false);
+      assert.equal(await stash.has(ref), false); // already reaped -> still false, no second emit
+      assert.deepEqual(seen, [ref], "reaped once, one 'expired'");
+    });
+
+    test("stats: aggregates only, exactly { entries, bytes, claimed }, never refs", async () => {
+      const stash = new Stash({ backend: create() });
+      assert.deepEqual(await stash.stats(), { entries: 0, bytes: 0, claimed: 0 });
+      await stash.push(Buffer.alloc(100, 1));
+      await stash.push(Buffer.alloc(50, 2));
+      const s = await stash.stats();
+      assert.deepEqual(Object.keys(s).sort(), ["bytes", "claimed", "entries"]);
+      assert.equal(s.entries, 2);
+      assert.ok(s.bytes >= 150, "counts both blobs plus their metadata");
+      assert.equal(JSON.stringify(s).includes("v1_"), false, "no ref leaks into stats");
+    });
+
+    test("stats.claimed counts a live in-flight pop claim, back to 0 after the drain", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push(Buffer.alloc(65536, 9)); // above the highWaterMark: the claim holds un-drained
+      const held = await stash.pop(ref);
+      assert.equal((await stash.stats()).claimed, 1);
+      await drain(held);
+      assert.equal((await stash.stats()).claimed, 0);
+    });
+
+    test("verify: a clean store reports no findings; bad opts are config-time TypeErrors", async () => {
+      const stash = new Stash({ backend: create() });
+      await stash.push("a");
+      await stash.push("b");
+      const report = await stash.verify();
+      assert.deepEqual(Object.keys(report).sort(), ["findings", "repaired", "scanned"]);
+      assert.equal(report.scanned, 2);
+      assert.deepEqual(report.findings, []);
+      assert.deepEqual(report.repaired, []);
+      await assert.rejects(stash.verify({ nope: 1 }), TypeError);
+      await assert.rejects(stash.verify({ repair: "yes" }), TypeError);
+      await assert.rejects(stash.verify(null), TypeError);
+    });
+
+    test("verify().scanned counts a claimed entry, matching stats().entries on every backend (parity)", async () => {
+      // A claimed entry (mid-pop) still occupies the store: disk keeps its sidecar
+      // in meta/, memory holds it in #claims. Both must count it in `scanned`, or
+      // the shared-contract report diverges across backends for one logical store.
+      const stash = new Stash({ backend: create() });
+      await stash.push("live");
+      const ref = await stash.push(Buffer.alloc(65536, 4)); // above the highWaterMark: the claim holds un-drained
+      const held = await stash.pop(ref); // claimed, not yet drained -> mid-pop
+      try {
+        const s = await stash.stats();
+        const v = await stash.verify();
+        assert.equal(s.claimed, 1, "one entry is mid-pop");
+        assert.equal(v.scanned, s.entries, "verify scans every entry stats counts -- claimed included");
+        assert.equal(v.scanned, 2, "both the live and the claimed entry are scanned");
+      } finally {
+        await drain(held); // release the claim so cleanup is clean
+      }
+    });
+
+    test("'pushed' fires after commit with a full defensive-copy Entry; 'dropped' fires per drop and per clear", async () => {
+      const stash = new Stash({ backend: create() });
+      const pushed = [];
+      stash.on("pushed", (e) => pushed.push(e));
+      const ref = await stash.push("x", { meta: { k: 1 } });
+      assert.equal(pushed.length, 1);
+      assert.equal(pushed[0].id, ref);
+      assert.equal(typeof pushed[0].digest, "string"); // size/digest populated post-commit
+      assert.equal(pushed[0].size, 1);
+      pushed[0].meta.k = 999; // mutate the payload
+      assert.equal((await stash.show(ref)).meta.k, 1, "the emit is a defensive copy");
+      const dropped = [];
+      stash.on("dropped", (e) => dropped.push(e.id));
+      assert.equal(await stash.drop(ref), true);
+      assert.deepEqual(dropped, [ref]);
+      dropped.length = 0;
+      await stash.push("a"); await stash.push("b");
+      assert.equal(await stash.clear(), 2);
+      assert.equal(dropped.length, 2, "clear emits 'dropped' per live entry");
+    });
+
+    test("a throwing 'pushed' listener does not unwind a committed push", async () => {
+      const stash = new Stash({ backend: create() });
+      stash.on("pushed", () => { throw new Error("listener boom"); });
+      // the emit is synchronous, so push() rejects -- but the entry is committed
+      await assert.rejects(stash.push("committed"), /listener boom/);
+      const [entry] = await stash.list();
+      assert.ok(entry, "the push committed before the listener threw");
+      assert.equal(await stash.has(entry.id), true);
+    });
+
+    test("drop(expired) returns false and emits 'expired'; clear over live+expired counts only the live", async () => {
+      const stash = new Stash({ backend: create() });
+      const expiredRef = await stash.push("dead", { ttl: 0 });
+      const events = [];
+      stash.on("expired", (e) => events.push(["expired", e.id]));
+      stash.on("dropped", (e) => events.push(["dropped", e.id]));
+      assert.equal(await stash.drop(expiredRef), false, "an expired entry is nonexistent -> false");
+      assert.deepEqual(events, [["expired", expiredRef]]);
+      const live = await stash.push("live");
+      await stash.push("dead2", { ttl: 0 });
+      events.length = 0;
+      assert.equal(await stash.clear(), 1, "only the live entry counts");
+      assert.equal(events.filter(([k]) => k === "dropped").length, 1);
+      assert.equal(events.filter(([k]) => k === "expired").length, 1);
+      assert.ok(events.some(([k, id]) => k === "dropped" && id === live));
+    });
+
+    test("'expired' fires exactly once under a lazy-read / prune race, on both backends", async () => {
+      for (const order of [0, 1]) {
+        const stash = new Stash({ backend: create() });
+        const ref = await stash.push("racer", { ttl: 0 });
+        const seen = [];
+        stash.on("expired", (e) => seen.push(e.id));
+        const a = stash.show(ref).catch(() => {});
+        const b = stash.prune();
+        await Promise.all(order === 0 ? [a, b] : [b, a]);
+        assert.deepEqual(seen, [ref], "the remove-witness makes it exactly one 'expired'");
+      }
+    });
+
+    test("clear() destroys EVERY entry before emitting -- a throwing listener cannot leave the store half-cleared", async () => {
+      const stash = new Stash({ backend: create() });
+      await stash.push("a"); await stash.push("b"); await stash.push("c");
+      stash.on("dropped", () => { throw new Error("listener boom"); }); // throws on the first emit
+      await assert.rejects(stash.clear(), /listener boom/);
+      assert.deepEqual(await stash.list(), [], "the whole store is cleared despite the throwing listener -- removes finish before events");
+    });
+
+    test("prune() reaps EVERY expired entry before emitting -- a throwing listener cannot strand one", async () => {
+      const stash = new Stash({ backend: create() });
+      await stash.push("x", { ttl: 0 }); await stash.push("y", { ttl: 0 });
+      stash.on("expired", () => { throw new Error("listener boom"); });
+      await assert.rejects(stash.prune(), /listener boom/);
+      assert.deepEqual(await stash.list({ includeExpired: true }), [], "all expired entries reaped despite the throwing listener");
+    });
+
+    test("budget exhaustion emits 'dropped' not 'popped'; a pop emits 'popped' exactly once", async () => {
+      const stash = new Stash({ backend: create() });
+      const budgeted = await stash.push(Buffer.from("bud"), { reads: 1 });
+      const ev = [];
+      stash.on("dropped", (e) => ev.push(["dropped", e.id]));
+      stash.on("popped", (e) => ev.push(["popped", e.id]));
+      await drain(await stash.apply(budgeted)); // last credit -> destroy -> 'dropped'
+      assert.deepEqual(ev, [["dropped", budgeted]]);
+      ev.length = 0;
+      const popRef = await stash.push("pop-me");
+      await drain(await stash.pop(popRef));
+      assert.deepEqual(ev, [["popped", popRef]]);
+    });
+
+    test("a burned pop emits 'popped' -- a burn's delete lands, never a silent destruction (SPEC.md 4.3)", { timeout: 8000 }, async () => {
+      const stash = new Stash({ backend: create(), onPopFailure: "burn" });
+      const ref = await stash.push(Buffer.alloc(65536, 7)); // above the highWaterMark: the stream holds, not auto-drained
+      const poppedP = once(stash, "popped");
+      const s = await stash.pop(ref);
+      s.on("error", () => {}); // the premature destroy errors the stream; swallow it
+      s.destroy(new Error("consumer aborted")); // premature -> onFail -> burn -> commit + emit 'popped'
+      const [entry] = await poppedP;
+      assert.equal(entry.id, ref, "the burned pop emitted 'popped'");
+      assert.equal(await stash.has(ref), false, "the entry is gone (burned, not restored)");
+    });
+
+    test("a throwing sweep emits 'sweepError', never 'error', and the janitor survives", async () => {
+      const inner = create();
+      let failNext = true;
+      const backend = wrapBackend(inner, {
+        list: (...a) => { if (failNext) { failNext = false; throw new Error("sweep boom"); } return inner.list(...a); },
+      });
+      const stash = new Stash({ backend, sweepInterval: 20 }); // arm the sweep
+      const errors = [];
+      stash.on("error", () => errors.push("error")); // an unhandled 'error' would crash the process
+      const [err] = await once(stash, "sweepError"); // poll via node:events once -- no sleep
+      assert.equal(err.message, "sweep boom");
+      assert.deepEqual(errors, [], "a background failure is 'sweepError', never the fatal 'error'");
+      await stash.push("survivor"); // the janitor survived; a later op works
+      assert.equal(await stash.prune(), 0);
+      await stash.close();
+    });
+
+    test("an ASYNC-rejecting 'sweepError' listener is contained: no unhandledRejection, the janitor keeps sweeping", { timeout: 8000 }, async () => {
+      // emit() does not await listeners, so an async handler that rejects returns a
+      // promise nobody awaits -> an unhandledRejection (fatal on Node), the very
+      // outcome the sweep exists to prevent. It must be contained like a sync throw.
+      const inner = create();
+      const backend = wrapBackend(inner, { list: () => { throw new Error("sweep boom"); } });
+      const stash = new Stash({ backend, sweepInterval: 15 });
+      const unhandled = [];
+      const capture = (e) => unhandled.push(e);
+      process.on("unhandledRejection", capture);
+      let count = 0;
+      try {
+        stash.on("sweepError", async () => { count += 1; throw new Error("async handler boom"); }); // an async handler that REJECTS
+        await pollUntil(() => count >= 2, { timeout: 6000 }); // the guard clears; later ticks keep sweeping
+        await new Promise((r) => setTimeout(r, 40)); // give any escaped rejection a turn to surface
+        assert.deepEqual(unhandled, [], "an async-rejecting sweepError handler never becomes an unhandledRejection");
+      } finally {
+        process.removeListener("unhandledRejection", capture);
+        await stash.close();
+      }
+    });
+
+    test("a THROWING 'sweepError' listener cannot brick the janitor: the in-flight guard clears and later ticks still sweep", { timeout: 8000 }, async () => {
+      // A sweepError handler that itself throws must not (a) crash the process via
+      // an unhandledRejection, nor (b) leave #sweepInFlight stuck so every later
+      // tick no-ops -- silently disabling the janitor for the process's life. Every
+      // sweep fails and every handler throws; seeing multiple sweepErrors proves the
+      // guard cleared after the first throwing handler and the timer kept sweeping.
+      const inner = create();
+      const backend = wrapBackend(inner, { list: () => { throw new Error("sweep boom"); } });
+      const stash = new Stash({ backend, sweepInterval: 15 });
+      let sweepErrors = 0;
+      const fatal = [];
+      stash.on("error", () => fatal.push("error")); // an unhandled 'error' would crash the process
+      stash.on("sweepError", () => { sweepErrors += 1; throw new Error("handler boom"); });
+      await pollUntil(() => sweepErrors >= 2, { timeout: 6000 }); // >= 2 => the guard cleared and a later tick ran
+      assert.deepEqual(fatal, [], "a throwing sweepError handler never escalates to the fatal 'error'");
+      await stash.close();
+    });
+
+    test("for await (const entry of stash) yields the same id set as list()", async () => {
+      const stash = new Stash({ backend: create() });
+      const empty = [];
+      for await (const e of stash) empty.push(e.id); // an empty stash completes at once
+      assert.deepEqual(empty, []);
+      const a = await stash.push("a"); const b = await stash.push("b");
+      const ids = [];
+      for await (const e of stash) ids.push(e.id);
+      assert.deepEqual(ids.sort(), [a, b].sort());
     });
   });
 }
