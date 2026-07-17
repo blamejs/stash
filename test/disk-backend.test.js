@@ -824,15 +824,44 @@ suite("disk: crash recovery (SPEC 6)", () => {
     assert.equal(existsSync(join(root, "blobs", ref)), true, "the blob is live under blobs/ again");
   });
 
-  test("an abandoned claim burns under onPopFailure:'burn', leaving no residue", async () => {
+  test("an abandoned claim burns under onPopFailure:'burn', leaving a GRAVE and no live residue (no resurrection)", async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("condemned");
     plantClaim(root, ref);
     const next = new Stash({ backend: new DiskBackend({ root }), onPopFailure: "burn" });
     await assert.rejects(next.apply(ref), RefNotFound);
     for (const dir of ["blobs", "meta", "claims"]) {
-      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ holds no residue`);
+      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ holds no live residue`);
     }
+    // A burn IS a destruction: it must leave a grave, or a replica could store() the id
+    // back and resurrect content the burn policy removed (SPEC.md 4.4).
+    const graves = await next.tombstones();
+    assert.equal(graves.length, 1, "the recovery burn left a grave");
+    assert.equal(graves[0].id, ref);
+    assert.ok(["pop", "spent"].includes(graves[0].cause), "the grave records a read-claim destruction");
+    const digest = "sha256:" + require$hash("reborn");
+    assert.equal(
+      await next.store({ id: ref, size: 6, digest, createdAt: 1, expiresAt: null, reads: null, readsLeft: null, meta: {} }, "reborn"),
+      false,
+      "the grave refuses resurrection via store()",
+    );
+  });
+
+  test("recovery FINISHES a decided destruction: a stale claim whose grave already stands is committed, never restored", async () => {
+    // A terminal #destroy (pop / spent budget) writes the grave, then the process crashes
+    // BEFORE its commit -- the sidecar and claim survive AND a grave stands. Recovery, even
+    // under the DEFAULT restore policy, must FINISH the deletion, never hand the entry back:
+    // a restore would resurrect an entry a grave says is gone (SPEC.md 4.2, 4.4).
+    const { root, stash } = freshStash();
+    const ref = await stash.push("decided");
+    plantClaim(root, ref); // stale claim, sidecar intact
+    writeFileSync(join(root, "tombstones", ref + ".json"), JSON.stringify({ id: ref, destroyedAt: 1000, cause: "pop" }));
+    const next = new Stash({ backend: new DiskBackend({ root }) }); // DEFAULT (restore) policy
+    await assert.rejects(next.apply(ref), RefNotFound, "the decided destruction was finished, not restored");
+    for (const dir of ["blobs", "meta", "claims"]) {
+      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ emptied -- recovery finished the deletion`);
+    }
+    assert.equal((await next.tombstones()).length, 1, "the grave still stands");
   });
 
   test("a FRESH claim is left alone -- another process's live pop is not resolved out from under it", async () => {

@@ -556,6 +556,13 @@ export class Stash extends EventEmitter {
           if (err instanceof RefNotFound) hasSidecar = false;
           else throw err;
         }
+        // A grave already standing for this id means a TERMINAL #destroy (a pop or a
+        // spent budget) wrote it and then crashed BEFORE its commit: the destruction
+        // was decided, so recovery FINISHES it (commit) and never restores -- a restore
+        // would resurrect an entry a grave says is gone (SPEC.md 4.2, 4.4). A
+        // sidecar-less claim is the same interrupted commit to finish. A fault reading
+        // the grave is a real fault -- it propagates to clear the memo for a retry.
+        const graved = await this.#backend.hasTombstone(id);
         // Resolve the stale claim, tolerating one that ANOTHER process's recovery
         // over the same root already resolved between our listClaims and here: two
         // simultaneous starts can list the same stale claim, and the loser's
@@ -565,7 +572,17 @@ export class Stash extends EventEmitter {
         // swallow the fault; a claim still standing after a failed restore/commit is
         // a real fault, propagated to clear the memo for a retry.
         try {
-          if (!hasSidecar || this.#onPopFailure === "burn") {
+          if (graved || !hasSidecar) {
+            await this.#backend.commit(id); // finish a decided/interrupted destruction
+          } else if (this.#onPopFailure === "burn") {
+            // A stale read-claim burned by policy is a FRESH destruction -- it must leave
+            // a grave (SPEC.md 4.4) or a replica could store() the id back, resurrecting
+            // content the burn intended to remove. Grave BEFORE commit (the #destroy
+            // ordering). Recovery reconciles a PRIOR process's residue -- an entry this
+            // process's listeners never observed -- so it writes the durable grave but
+            // emits no event (unlike the live burn). The claim cannot say whether it was
+            // a pop or a budgeted read, so the grave records the generic read cause.
+            await this.#backend.writeTombstone(id, makeTombstone(id, "pop"));
             await this.#backend.commit(id);
           } else {
             await this.#backend.restore(id);
