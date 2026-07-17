@@ -1456,7 +1456,26 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual(await B.list(), [], "both stores converge to empty");
     });
 
-    test("expiry writes NO grave (lazy read path AND sweeper); clear writes one per live entry; drop of an absent id writes none", async () => {
+    test("a grave propagates through an EMPTY replica: a node that never held the id adopts the grave, refusing a later resurrection", async () => {
+      // Reconciliation propagates graves by drop()-ing each of the other node's grave ids
+      // (SPEC.md 4.4). A node that never held the id must still ADOPT the grave, or a later
+      // sync from a stale node resurrects the entry the destruction removed.
+      const A = new Stash({ backend: create() });
+      const B = new Stash({ backend: create() }); // empty -- never holds the id
+      const C = new Stash({ backend: create() }); // stale -- still has a live copy
+      const payload = Buffer.from("burned on A");
+      const id = await A.push(payload);
+      assert.equal(await C.store(makeStoredEntry(id, payload), payload), true, "C holds a live copy");
+      await drain(await A.pop(id)); // A pops it -> a grave on A
+      // Sync A -> B: propagate A's grave to the EMPTY B (the done-when's drop loop).
+      for (const g of await A.tombstones()) assert.equal(await B.drop(g.id), false, "nothing live on B, but the grave is adopted");
+      assert.equal((await B.tombstones()).length, 1, "B adopted the grave though it never held the id");
+      // A stale C now tries to re-file its live copy onto B -- the propagated grave refuses it.
+      assert.equal(await B.store(makeStoredEntry(id, payload), payload), false, "the propagated grave refuses the resurrection");
+      await assert.rejects(B.show(id), RefNotFound);
+    });
+
+    test("expiry writes NO grave (lazy read path AND sweeper); clear writes one per live entry; drop of an absent id STILL writes a grave (propagation)", async () => {
       const s1 = new Stash({ backend: create() });
       const dead = await s1.push("dead", { ttl: 0 });
       await s1.show(dead).catch(() => {}); // lazy read reaps the expired entry
@@ -1470,8 +1489,12 @@ for (const { name, create } of BACKENDS) {
       assert.ok(graves.every((g) => g.cause === "clear"));
 
       const s3 = new Stash({ backend: create() });
-      assert.equal(await s3.drop(generate()), false);
-      assert.deepEqual(await s3.tombstones(), [], "drop of a never-held id writes no grave");
+      const absent = generate();
+      assert.equal(await s3.drop(absent), false, "no LIVE entry was destroyed");
+      const g3 = await s3.tombstones();
+      assert.equal(g3.length, 1, "but the id is tombstoned -- a grave propagates through a node that never held it");
+      assert.equal(g3[0].id, absent);
+      assert.equal(g3[0].cause, "drop");
     });
 
     test("concurrent same-id destroyers converge to ONE grave with a clean verdict -- no raw fs error escapes", async () => {

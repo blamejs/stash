@@ -1194,13 +1194,18 @@ export class Stash extends EventEmitter {
    * @spec       SPEC.md 4
    * @related    stash.clear, stash.list
    *
-   * Delete an entry without reading it. Resolves `false` when the ref names
-   * nothing -- an absent entry is a fact, not a failure. A malformed ref
-   * still throws `InvalidRef`; replication input and typos both die at the
-   * whitelist. A corrupt entry is still removed -- drop deletes without reading,
-   * so a sidecar too damaged to parse never blocks cleanup; it carries no
-   * lifecycle event (there is no whole Entry to hand a listener). `verify` is the
-   * audit path that classifies the damage.
+   * Delete an entry without reading it, and tombstone the id. Resolves `false`
+   * when the ref names nothing LIVE -- an absent entry is a fact, not a failure --
+   * and `true` when a live entry was destroyed. A malformed ref still throws
+   * `InvalidRef`; replication input and typos both die at the whitelist. A corrupt
+   * entry is still removed -- drop deletes without reading, so a sidecar too
+   * damaged to parse never blocks cleanup; it carries no lifecycle event (there is
+   * no whole Entry to hand a listener). `verify` is the audit path that classifies
+   * the damage. Dropping an id the store never held still leaves a grave: that is
+   * how a tombstone propagates across replicas (SPEC.md 4.4) -- reconciliation
+   * `drop`s each of the other node's grave ids, so a destroyed id is refused even
+   * on a node that never held it. Expiry is the one exception that leaves no grave
+   * (its terms travel with the entry, and every replica reaches the same deadline).
    *
    * @example
    *   await stash.drop(ref); // true -- gone
@@ -1217,11 +1222,15 @@ export class Stash extends EventEmitter {
       entry = await this.#backend.stat(ref);
     } catch (err) {
       if (err instanceof RefNotFound) {
-        // The ref names no live entry -- but a crash mid-remove (sidecar first, then
-        // blob) can strand an orphaned blob under this id. drop deletes without
-        // reading, so it still removes to clean that orphan; the ref named nothing
-        // live, so it gets NO grave (a replica cannot adopt a foreign grave for an
-        // entry it never held, SPEC.md 4.4) and returns false.
+        // The ref names no live entry here, but drop STILL writes a grave: this is how a
+        // tombstone PROPAGATES across replicas (SPEC.md 4.4 -- reconciliation drop()s each
+        // of the other node's grave ids). A node that never held the id must adopt the
+        // grave, or a later sync from a stale node resurrects the entry the destruction
+        // removed -- the resurrection an empty or intermediate replica would otherwise
+        // permit. Grave BEFORE the remove (the #destroy ordering); remove() also cleans an
+        // orphaned blob a crash mid-remove (sidecar first, then blob) may have stranded.
+        // Returns false -- no LIVE entry was destroyed -- but the id is now tombstoned.
+        await this.#backend.writeTombstone(ref, makeTombstone(ref, "drop"));
         await this.#backend.remove(ref);
         return false;
       }
