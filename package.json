@@ -1,6 +1,6 @@
 {
   "name": "@blamejs/stash",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Zero-dependency, ephemeral, crypto-agnostic content store for Node.js. Bytes in, ref out; bytes out once, and they're gone.",
   "keywords": [
     "stash",
@@ -44,6 +44,7 @@
     "gates": "node test/codebase-patterns.test.js && node scripts/validate-source-comment-blocks.js && node scripts/check-api-snapshot.js && node scripts/check-status-lifecycle.js",
     "coverage": "node --test --experimental-test-coverage",
     "wiki:e2e": "node examples/wiki/test/e2e.js",
+    "examples": "node examples/test/run.js",
     "smoke": "node scripts/smoke.js",
     "release": "node scripts/release.js",
     "prepack": "node scripts/check-pack-against-gitignore.js"

@@ -149,8 +149,61 @@ The M1 + M2 + M3 + M4 + M5 + M6 + M7 surface (see `SPEC.md` section 12 for the f
 Every option `SPEC.md` defines is now accepted and enforced; an unknown option is a
 config-time `TypeError`.
 
-Next up: documentation polish and runnable examples (`ROADMAP.md` M8). `SPEC.md`
-is the contract.
+The `SPEC.md` section 12 delivery plan is complete; the store is feature-complete
+pre-1.0. `SPEC.md` is the contract.
+
+## The verbs
+
+The moving verbs are `git stash`'s, with the same mental model; the rest are
+queries and janitorial work. Every verb runs against either backend, unmodified.
+
+| Verb | Does | Destroys? |
+|---|---|---|
+| `push(source, opts?)` | Store bytes; mint a random-capability ref. | no |
+| `store(entry, source)` | File an already-created entry, identity preserved (replication). | no |
+| `apply(ref)` | Stream an entry, digest-verified; a read budget spends one credit. | only on the budget-exhausting read |
+| `pop(ref)` | Stream an entry, then destroy it the instant it drains cleanly. | yes |
+| `show(ref)` | Resolve a ref to its metadata (never the bytes). | no |
+| `has(ref)` | Boolean existence check. | no |
+| `list(opts?)` | Every live entry's metadata (expired hidden by default). | no |
+| `stats()` | `{ entries, bytes, claimed }` for the whole store. | no |
+| `tombstones()` | The graves `{ id, destroyedAt, cause }`, for reconciliation. | no |
+| `verify(opts?)` | Audit physical integrity; `{ repair: true }` removes only what it condemns. | only under `repair` |
+| `drop(ref)` | Delete an entry (and tombstone the id). | yes |
+| `clear()` | Drop everything; return the count. | yes |
+| `prune()` | Reap expired entries on demand. | yes (expired only) |
+| `close()` | Stop the background sweep (also `await using`). | no |
+
+## Error codes
+
+Every failure is a typed `StashError` with a frozen `.code` -- branch on the code,
+never the message (messages improve between patches; codes do not, `SPEC.md`
+section 10). No message ever contains a ref, a `meta` value, or a path.
+
+<!-- BEGIN error-codes (generated from src/errors.js by scripts/regen-readme.js) -->
+
+| Code | Class | Raised when |
+|---|---|---|
+| `ENOREF` | `RefNotFound` | Unknown or expired ref. |
+| `ECLAIMED` | `RefClaimed` | A concurrent pop already claimed the entry. |
+| `EINTEGRITY` | `IntegrityError` | Blob bytes no longer match the recorded digest. |
+| `E2BIG` | `SizeExceeded` | maxSize crossed mid-stream. |
+| `EFULL` | `StashFull` | maxEntries / maxTotal reached; the push was refused. |
+| `EBADREF` | `InvalidRef` | Malformed ref string; refused before any storage access. |
+
+<!-- END error-codes -->
+
+## Runnable examples
+
+Each is a plain-node script, zero dependencies, runnable straight from a clone:
+
+```
+node examples/lifecycle.js         # push -> show -> apply -> pop -> gone; budgets; expiry
+node examples/cold-standby.js      # replicate a store without resurrecting the dead
+node examples/permission-flags.js  # run under --permission; prove the grant is scoped
+```
+
+They assert every step, so `npm run examples` keeps them honest in CI.
 
 ## Run it sandboxed
 

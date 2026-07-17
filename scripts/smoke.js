@@ -60,6 +60,7 @@ const STATIC_STAGES = [
   { name: "api-snapshot", args: ["scripts/check-api-snapshot.js"] },
   { name: "status-lifecycle", args: ["scripts/check-status-lifecycle.js"] },
   { name: "changelog-regen", args: ["scripts/regen-changelog.js", "--check"] },
+  { name: "readme-regen", args: ["scripts/regen-readme.js", "--check"] },
   { name: "pack-gate", args: ["scripts/check-pack-against-gitignore.js"] },
 ];
 
@@ -67,6 +68,7 @@ const RUNTIME_STAGES = [
   { name: "node-test", args: ["--test"] },
   { name: "sandboxed", args: ["scripts/run-sandboxed.js"] },
   { name: "fuzz-smoke", args: [".clusterfuzzlite/local-smoke.js"] },
+  { name: "examples", args: ["examples/test/run.js"] },
 ];
 
 function runStage(stage) {
