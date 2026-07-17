@@ -65,7 +65,7 @@ const DEFAULT_TOMBSTONE_TTL = "30d";
 // The backend surface Stash drives today. Validated at construction so a
 // misassembled backend fails at boot, not at first push.
 const REQUIRED_BACKEND_METHODS = [
-  "write", "read", "remove", "stat", "list", "stats", "verify",
+  "write", "read", "remove", "stat", "list", "listReconcilable", "stats", "verify",
   "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
   "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone",
 ];
@@ -1255,6 +1255,45 @@ export class Stash extends EventEmitter {
     if (opts.includeExpired) return entries;
     const now = Date.now();
     return entries.filter((entry) => !isExpired(entry, now));
+  }
+
+  /**
+   * @primitive  stash.reconcilable
+   * @signature  stash.reconcilable() -> Promise<{ entries: Entry[], corrupt: string[] }>
+   * @since      0.1.14
+   * @status     experimental
+   * @spec       SPEC.md 4, SPEC.md 4.4
+   * @related    stash.list, stash.tombstones, stash.store, stash.verify
+   *
+   * The reconciliation-grade listing for anti-entropy (SPEC.md 4.4). `list()` is
+   * loud over a corrupt sidecar -- it fails the whole listing so damage is never
+   * silently dropped -- which is right for an audit but wrong for a sync loop: a
+   * single unreadable entry would abort enumeration and stall replication of every
+   * healthy one. `reconcilable()` returns `{ entries, corrupt }` instead. `entries`
+   * is the healthy metadata a full-scan pass replicates (expired entries filtered,
+   * exactly as `list()`), and `corrupt` is the ref ids whose sidecars are too damaged
+   * to read. One rotten sidecar no longer blocks the sync of sound entries, and the
+   * damage is SURFACED, never swallowed -- route `corrupt` to `verify({ repair: true })`
+   * to reap it. Structural layout damage (a foreign file in the store) and I/O faults
+   * still throw, as in `list()`: neither is a per-entry corruption with a ref to
+   * report. Contents never appear; a listing that leaked blob bytes would defeat the
+   * point of refs as capabilities.
+   *
+   * @example
+   *   const { entries, corrupt } = await from.reconcilable();
+   *   for (const entry of entries) await to.store(entry, bytesFor(entry.id));
+   *   if (corrupt.length) console.warn("corrupt sidecars, run verify({ repair: true }):", corrupt.length);
+   */
+  async reconcilable() {
+    await this.#recover();
+    const { entries, corrupt } = await this.#backend.listReconcilable();
+    const now = Date.now();
+    // Filter expired entries exactly as list() does: an expired entry is
+    // nonexistent on every read surface (SPEC.md 7), and every replica reaches the
+    // same deadline on its own clock, so store() no-ops one anyway -- shipping it is
+    // wasted transport. `corrupt` passes through untouched: a damaged sidecar's terms
+    // are unreadable, so it cannot be judged expired and is surfaced regardless.
+    return { entries: entries.filter((entry) => !isExpired(entry, now)), corrupt };
   }
 
   /**

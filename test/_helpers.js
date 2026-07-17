@@ -66,13 +66,17 @@ export function makeStoredEntry(id, bytes, overrides = {}) {
 
 // syncOnce(from, to, bytesOf) -- one direction of a full-scan anti-entropy pass,
 // ~drop-graves-then-store-live, no transport (the topology belongs to the consumer,
-// SPEC.md 3). `bytesOf(id)` yields the payload a live entry replicates (the harness
-// cannot re-read a budgeted entry via apply -- that would spend a credit, fragile
-// area -- so the caller supplies the bytes it pushed). Graves first so a store can
-// never re-file an id the other side buried.
+// SPEC.md 3). The source read is reconcilable(), not list(): list() is loud over a
+// corrupt sidecar (right for an audit, wrong for replicating every HEALTHY entry), so
+// one damaged entry would halt the whole sync; reconcilable() yields the healthy
+// entries and reports the corrupt ids separately. `bytesOf(id)` yields the payload a
+// live entry replicates (the harness cannot re-read a budgeted entry via apply --
+// that would spend a credit -- so the caller supplies the bytes it pushed). Graves
+// first so a store can never re-file an id the other side buried.
 export async function syncOnce(from, to, bytesOf) {
   for (const grave of await from.tombstones()) await to.drop(grave.id);
-  for (const entry of await from.list()) await to.store(entry, bytesOf(entry.id));
+  const { entries } = await from.reconcilable();
+  for (const entry of entries) await to.store(entry, bytesOf(entry.id));
 }
 
 // The full backend method set. A probe/corrupting mock wraps a real backend and
@@ -80,7 +84,7 @@ export async function syncOnce(from, to, bytesOf) {
 // listClaims call throws); this array keeps every mock in step with
 // REQUIRED_BACKEND_METHODS as the contract grows across milestones.
 export const BACKEND_METHODS = [
-  "write", "read", "remove", "stat", "list", "stats", "verify",
+  "write", "read", "remove", "stat", "list", "listReconcilable", "stats", "verify",
   "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
   "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone",
 ];

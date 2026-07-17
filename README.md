@@ -78,9 +78,9 @@ Requires Node `>= 24.18.0`.
 
 The M1 + M2 + M3 + M4 + M5 + M6 + M7 surface (see `SPEC.md` section 12 for the full delivery plan):
 
-- `push` / `pop` / `apply` / `show` / `has` / `list` / `stats` / `verify` /
-  `store` / `tombstones` / `drop` / `clear` over either backend, with size and
-  `sha256` digest computed as the bytes stream through and digest-verified reads.
+- `push` / `pop` / `apply` / `show` / `has` / `list` / `reconcilable` / `stats` /
+  `verify` / `store` / `tombstones` / `drop` / `clear` over either backend, with size
+  and `sha256` digest computed as the bytes stream through and digest-verified reads.
 - **Pop & read budgets**: `pop(ref)` streams an entry and destroys it the
   instant the stream drains cleanly -- bytes out once, then gone -- with two
   concurrent pops racing on an atomic claim so exactly one drains and the other
@@ -144,7 +144,12 @@ The M1 + M2 + M3 + M4 + M5 + M6 + M7 surface (see `SPEC.md` section 12 for the f
   reconciliation, and feeding each id to a replica's `drop()` converges two stores
   with no resurrection. `tombstoneTtl` (default `'30d'`, `null` never prunes) reaps
   a grave once older than the window -- keep it above the longest gap between
-  reconciliations, or a forgotten grave lets an id come back.
+  reconciliations, or a forgotten grave lets an id come back. A sync reads its source
+  with `reconcilable()`, not `list()`: `list()` fails the whole listing on one corrupt
+  sidecar (right for an audit, wrong for a sync), so `reconcilable()` returns the
+  healthy `entries` to copy plus the `corrupt` ref ids whose sidecars are unreadable
+  -- surfaced for `verify({ repair: true })` -- so a single damaged entry never halts
+  replication of the sound ones.
 
 - **Digest agility**: the integrity hash is a construct-time choice --
   `new Stash({ backend, digest })` selects `sha256` (default), `sha512`, `sha3-256`,
@@ -173,6 +178,7 @@ queries and janitorial work. Every verb runs against either backend, unmodified.
 | `show(ref)` | Resolve a ref to its metadata (never the bytes). | no |
 | `has(ref)` | Boolean existence check. | no |
 | `list(opts?)` | Every live entry's metadata (expired hidden by default). | no |
+| `reconcilable()` | Reconciliation source read: healthy `entries` plus `corrupt` ref ids, so one damaged sidecar never halts a sync. | no |
 | `stats()` | `{ entries, bytes, claimed }` for the whole store. | no |
 | `tombstones()` | The graves `{ id, destroyedAt, cause }`, for reconciliation. | no |
 | `verify(opts?)` | Audit physical integrity; `{ repair: true }` removes only what it condemns. | only under `repair` |

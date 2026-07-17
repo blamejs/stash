@@ -1426,6 +1426,36 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual(await B.list(), [], "both stores converge to empty");
     });
 
+    test("reconcilable() is the resilient source read: healthy entries plus an empty corrupt set, a clean drop-in for the sync loop", async () => {
+      // The reconciliation-grade listing (SPEC.md 4.4). On an uncorrupted store it
+      // returns every healthy entry (expired filtered, exactly as list()) and an
+      // empty corrupt set -- so it is a byte-for-byte drop-in for the documented
+      // anti-entropy source read. The disk-only corrupt-sidecar vector proves it
+      // keeps enumerating past damage; this cross-backend case pins the clean shape.
+      const from = new Stash({ backend: create() });
+      const to = new Stash({ backend: create() });
+      const wire = new Map();
+      const put = async (bytes, opts) => {
+        const ref = await from.push(bytes, opts);
+        wire.set(ref, Buffer.from(bytes));
+        return ref;
+      };
+      const a = await put("alpha");
+      const budgeted = await put("read me twice", { reads: 2 });
+      const c = await put("charlie");
+      await put("already dead", { ttl: 0 }); // expired -> filtered, exactly as list()
+
+      const { entries, corrupt } = await from.reconcilable();
+      assert.deepEqual(corrupt, [], "no corruption -> an empty corrupt set");
+      assert.deepEqual(entries.map((e) => e.id).sort(), [a, budgeted, c].sort(), "the expired entry is filtered, the live ones listed");
+
+      // Drives the documented loop end to end; the read budget survives the copy.
+      for (const grave of await from.tombstones()) await to.drop(grave.id);
+      for (const entry of entries) await to.store(entry, wire.get(entry.id));
+      assert.equal((await to.list()).length, 3, "every healthy entry replicated");
+      assert.equal((await to.show(budgeted)).readsLeft, 2, "the budget rode through reconcilable() -> store() intact");
+    });
+
     test("a grave propagates through an EMPTY replica: a node that never held the id adopts the grave, refusing a later resurrection", async () => {
       // Reconciliation propagates graves by drop()-ing each of the other node's grave ids
       // (SPEC.md 4.4). A node that never held the id must still ADOPT the grave, or a later

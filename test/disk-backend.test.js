@@ -471,6 +471,58 @@ suite("disk: layout and atomicity", () => {
     const backend = new DiskBackend({ root });
     await assert.rejects(backend.list(), IntegrityError);
   });
+
+  test("reconcilable() replicates the healthy entries and surfaces a corrupt sidecar's id without halting", async () => {
+    // Issue #42: the documented anti-entropy loop reads the source with list(),
+    // which is loud over ONE corrupt sidecar -- so a single damaged entry aborts
+    // enumeration and stalls replication of EVERY healthy entry. reconcilable() is
+    // the resilient source read: it lists the healthy entries and surfaces the
+    // corrupt id separately, so a rotten sidecar no longer blocks the sync of sound
+    // entries AND the corruption is reported, never silently skipped.
+    const { root, stash: from } = freshStash();
+    const { stash: to } = freshStash();
+    const wire = new Map();
+    const put = async (bytes) => {
+      const ref = await from.push(bytes);
+      wire.set(ref, Buffer.from(bytes));
+      return ref;
+    };
+    const a = await put("alpha bytes");
+    const rotten = await put("bravo bytes");
+    const c = await put("charlie bytes");
+    const d = await put("delta bytes");
+    // Corrupt ONE sidecar into invalid JSON (the disk corruption fixture pattern).
+    writeFileSync(join(root, "meta", rotten + ".json"), "{ not valid json");
+
+    // list() stays loud over the corrupt sidecar -- the audit contract is intact.
+    await assert.rejects(from.list(), IntegrityError);
+
+    // reconcilable() enumerates the healthy entries and surfaces the corrupt id.
+    const { entries, corrupt } = await from.reconcilable();
+    assert.deepEqual(entries.map((e) => e.id).sort(), [a, c, d].sort(), "every healthy entry is listed");
+    assert.deepEqual(corrupt, [rotten], "the corrupt id is surfaced, not swallowed");
+
+    // The documented anti-entropy loop, resilient: every healthy entry replicates
+    // despite the corrupt sidecar the old loop would have halted on.
+    for (const grave of await from.tombstones()) await to.drop(grave.id);
+    for (const entry of entries) await to.store(entry, wire.get(entry.id));
+    assert.deepEqual(
+      (await to.list()).map((e) => e.id).sort(),
+      [a, c, d].sort(),
+      "all three healthy entries replicated across one corrupt sidecar",
+    );
+  });
+
+  test("reconcilable() stays loud over structural layout damage and fs faults, as list() does", async () => {
+    // A corrupt SIDECAR (a ref-named entry whose contents are damaged) is surfaced
+    // in `corrupt`; a FOREIGN file in meta/ is not a per-entry corruption with a
+    // ref to report -- it is structural layout damage, and stays loud in both faces.
+    const { root, stash } = freshStash();
+    await stash.push("healthy");
+    writeFileSync(join(root, "meta", "not-a-ref.json"), JSON.stringify({ id: "x" }));
+    await assert.rejects(stash.reconcilable(), IntegrityError);
+    await assert.rejects(stash.list(), IntegrityError);
+  });
 });
 
 suite("disk: containment", () => {
@@ -1081,7 +1133,7 @@ suite("disk: crash recovery (SPEC 6)", () => {
     const inner = new DiskBackend({ root });
     let raced = false;
     const backend = {};
-    for (const m of ["write", "read", "remove", "stat", "list", "stats", "verify", "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed", "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone"]) {
+    for (const m of ["write", "read", "remove", "stat", "list", "listReconcilable", "stats", "verify", "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed", "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone"]) {
       backend[m] = (...a) => inner[m](...a);
     }
     backend.stat = async (id) => {

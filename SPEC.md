@@ -104,7 +104,7 @@ Each of these will look like a helpful addition and is a mistake.
   two `Stash` instances with two roots already do without it.
 - **No sync transport or oplog.** Replication support is limited to §4.4's tombstones and
   `store()`; the wire format, schedule, and topology belong to the caller. No change journal
-  either — full-scan anti-entropy over `list()` + `tombstones()` is cheap at `maxEntries`
+  either — full-scan anti-entropy over `reconcilable()` + `tombstones()` is cheap at `maxEntries`
   scale, and a journal is the kind of central mutable file the sidecar design (§9) avoids.
 - **No logging of refs or metadata values.** A ref is a capability, so a ref in a log is a
   leaked capability. Log counts and error codes, never identifiers or `meta` contents.
@@ -140,6 +140,7 @@ const stash = new Stash({
 | `show(ref)` | `Promise<Entry>` | Metadata only, never the contents. |
 | `has(ref)` | `Promise<boolean>` | Existence check without the try/catch that `show` needs. An expired entry reads as `false`. |
 | `list(opts?)` | `Promise<Entry[]>` | Metadata only. `opts`: `{ includeExpired }`. |
+| `reconcilable()` | `Promise<{ entries: Entry[], corrupt: string[] }>` | Reconciliation-grade listing (§4.4): healthy `entries` plus the ref ids whose sidecars are too damaged to read. A corrupt sidecar is surfaced, not swallowed, and never halts the sync of sound entries — where `list()` fails loud. |
 | `tombstones()` | `Promise<Tombstone[]>` | `{ id, destroyedAt, cause }[]`, for reconciliation. |
 | `drop(ref)` | `Promise<boolean>` | Delete without reading. `false` if the ref names nothing. |
 | `clear()` | `Promise<number>` | Delete everything; returns the count. |
@@ -153,9 +154,9 @@ const stash = new Stash({
 set — `store` maps to `git stash store`, the plumbing command scripts use to file an
 already-made stash, which is the role it plays here too. Naming them after git stash protects
 the lifecycle: don't add lifecycle verbs git doesn't have, and don't rename `pop` to `take` or
-`consume`. The remaining methods (`has`, `stats`, `verify`, `tombstones`, `prune`, `close`) are
-queries and maintenance; they inspect or clean up the store but never move bytes in or out. A
-new method has to fit one of those two groups.
+`consume`. The remaining methods (`has`, `stats`, `verify`, `tombstones`, `reconcilable`, `prune`,
+`close`) are queries and maintenance; they inspect or clean up the store but never move bytes
+in or out. A new method has to fit one of those two groups.
 
 ### Entry
 
@@ -273,6 +274,19 @@ against the supplied digest as they stream, so transfer corruption is caught on 
 `store` emits no event. A sync daemon that heard its own writes would echo them back
 indefinitely, so keeping `store` silent removes that class of bug rather than leaving every
 caller to work around it.
+
+**`reconcilable()`** is the source-side read a full-scan pass runs. `list()` is deliberately
+loud over a corrupt sidecar — it fails the whole listing, because silently dropping a damaged
+entry from an audit would hide the corruption. That is right for an audit and wrong for a sync:
+a reconciliation loop reading its source with `list()` stalls entirely on one unreadable entry,
+so a single rotten sidecar blocks the replication of every healthy one — an availability failure
+where one damaged entry holds the whole store hostage. `reconcilable()` returns
+`{ entries, corrupt }` instead: `entries` is the healthy metadata to replicate (expired filtered,
+exactly as `list()`), and `corrupt` is the ref ids whose sidecars cannot be read. A full-scan
+pass copies every sound entry and surfaces the damaged ids — feed them to `verify({ repair: true })`
+— rather than halting. The corruption is never swallowed, only decoupled from the sync of the
+sound entries; structural layout damage (a foreign file in the store) and I/O faults still throw,
+as in `list()`.
 
 **What replication costs (document this for the caller, not just here).** A read budget is
 enforced per store. Two replicas holding a `reads: 1` entry can each serve one full read before
@@ -463,7 +477,8 @@ holds the bytes.
   async commit(id) {},                  // finalize a claim (delete)
   async remove(id) {},                  // → boolean
   async stat(id) {},                    // → Entry
-  async list() {},                      // → Entry[]
+  async list() {},                      // → Entry[]  (loud over a corrupt sidecar)
+  async listReconcilable() {},          // → { entries, corrupt }  (list(), resilient over a corrupt sidecar for §4.4 reconciliation)
   async listClaims() {},                // → { id, claimedAt }[]  (for recovery)
   async stats() {},                     // → { entries, bytes, claimed }
   async consumeRead(id) {},             // atomic readsLeft decrement → remaining

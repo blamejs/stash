@@ -560,17 +560,24 @@ export class DiskBackend {
     return parsed;
   }
 
-  // list() -> Entry[]. Loud, not lossy: a sidecar that fails validation
-  // fails the listing -- silently skipping corruption would hide it.
-  // In-flight .tmp files are invisible by design. The scan is readdir-then-stat,
-  // so an entry can be removed (a concurrent drop, or the sweeper reaping an
-  // expired one) between the two steps: a sidecar seen by readdir is gone by the
-  // stat. That entry has simply left the listing, so a RefNotFound for it is
-  // skipped -- but corruption and every other fault still fail loudly, since a
-  // damaged sidecar must never be silently dropped from a listing.
-  async list() {
+  // #scanEntries(collectCorrupt) -> { entries, corrupt }. The single meta/ walk
+  // behind both list() and listReconcilable(): readdir, then a per-name stat.
+  // In-flight .tmp files are invisible by design. The scan is readdir-then-stat, so
+  // an entry can be removed (a concurrent drop, or the sweeper reaping an expired
+  // one) between the two steps: a sidecar seen by readdir is gone by the stat. That
+  // entry has simply left the listing, so a RefNotFound for it is skipped in BOTH
+  // faces. The ONE difference is a CORRUPT sidecar (an IntegrityError from stat):
+  // list() (collectCorrupt false) is loud -- it rethrows, because silently dropping
+  // a damaged sidecar from a listing would hide corruption; the reconciliation face
+  // (collectCorrupt true) COLLECTS the id into `corrupt` and keeps walking, so one
+  // rotten sidecar cannot halt replication of the healthy entries -- the damage is
+  // SURFACED, never swallowed. Structural layout damage (a foreign name,
+  // an invalid ref name) and every fs FAULT stay loud in BOTH faces: neither is a
+  // per-entry corruption with a ref to report.
+  async #scanEntries(collectCorrupt) {
     const metaDir = await this.#containedDir("meta");
-    const out = [];
+    const entries = [];
+    const corrupt = [];
     for (const name of await readdir(metaDir)) {
       if (name.endsWith(".tmp")) continue;
       const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
@@ -580,11 +587,35 @@ export class DiskBackend {
         entry = await this.stat(id);
       } catch (err) {
         if (err instanceof RefNotFound) continue; // removed between readdir and stat -- no longer listed
-        throw err;
+        if (collectCorrupt && err instanceof IntegrityError) { corrupt.push(id); continue; } // reported, never swallowed
+        throw err; // list()'s loud-not-lossy contract, and every fs fault, in both faces
       }
-      out.push(entry);
+      entries.push(entry);
     }
-    return out;
+    return { entries, corrupt };
+  }
+
+  // list() -> Entry[]. Loud, not lossy: a sidecar that fails validation fails the
+  // listing -- silently skipping corruption would hide it. A RefNotFound for a
+  // sidecar removed between the readdir and its stat is skipped (it has left the
+  // listing); corruption and every other fault fail loudly. #scanEntries owns the
+  // walk; list() is its loud face.
+  async list() {
+    return (await this.#scanEntries(false)).entries;
+  }
+
+  // listReconcilable() -> { entries, corrupt }. The reconciliation-grade listing
+  // (SPEC.md 4.4): the healthy entries a full-scan anti-entropy pass can replicate,
+  // plus the ref ids whose sidecars are too damaged to read. Where list() is loud
+  // over a corrupt sidecar -- one damaged entry would abort the whole readdir walk
+  // and stall replication of every healthy entry -- this face reports the corrupt
+  // id in `corrupt` and keeps enumerating, so a single rotten sidecar
+  // never blocks the sync of sound entries. Corruption is SURFACED, never silently
+  // skipped: the caller replicates `entries` and routes `corrupt` to
+  // verify({ repair: true }). Structural layout damage and fs faults stay loud, as
+  // in list(). #scanEntries owns the walk; this is its resilient face.
+  async listReconcilable() {
+    return this.#scanEntries(true);
   }
 
   // stats() -> { entries, bytes, claimed }. The stash-wide limit pre-check reads

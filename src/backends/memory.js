@@ -136,6 +136,17 @@ export class MemoryBackend {
     return out;
   }
 
+  // listReconcilable() -> { entries, corrupt }. The reconciliation-grade listing
+  // (SPEC.md 4.4). On the disk backend list() aborts the whole readdir walk on one
+  // corrupt sidecar, stalling replication of every healthy entry, so the contract
+  // offers this resilient face: the healthy entries plus the ref ids whose
+  // metadata could not be read. A Map holds no corrupt sidecars by construction --
+  // stat never throws IntegrityError here -- so `corrupt` is always empty and this
+  // is list() with the parallel shape. Defensive copies, like list().
+  async listReconcilable() {
+    return { entries: await this.list(), corrupt: [] };
+  }
+
   // claim(id) -> { entry, source }. Atomically move the entry from live to
   // claimed and hand back its metadata plus a fresh Readable over its bytes. The
   // move is the atomicity: no await precedes it, so two concurrent claims cannot
