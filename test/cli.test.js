@@ -180,15 +180,21 @@ suite("cli", { skip: SANDBOXED }, () => {
     assert.equal(again.status, 2, "the CLI did not conjure an empty store on the first run");
   });
 
-  test("a PARTIAL layout (meta/ but no blobs/) is refused, not completed into an empty store", () => {
-    // A directory carrying only some of the layout is not a stash. Checking one
-    // subdir would let the backend fill in the rest and report "0 entries", masking
-    // the mistake -- the CLI must require the full layout.
-    const root = freshScratchDir("cli-partial");
-    mkdirSync(join(root, "meta"), { recursive: true }); // meta/ present, blobs/ absent
-    const { status } = runCli(["stats", "--root", root]);
-    assert.equal(status, 2, "a partial layout is a usage error");
-    assert.ok(!readdirSync(root).includes("blobs"), "the CLI did not create the missing blobs/ dir");
+  test("a PARTIAL layout is refused, not completed into an empty store -- EVERY required dir is checked", () => {
+    // A directory carrying only some of the layout is not a stash. Checking a subset
+    // of the required dirs would let the backend fill in the rest and report "0
+    // entries", masking the mistake -- the CLI must require the FULL layout.
+    const metaOnly = freshScratchDir("cli-partial-1");
+    mkdirSync(join(metaOnly, "meta"), { recursive: true }); // meta/ present, blobs/ absent
+    assert.equal(runCli(["stats", "--root", metaOnly]).status, 2, "meta/-only is a usage error");
+    assert.ok(!readdirSync(metaOnly).includes("blobs"), "the CLI did not create the missing blobs/ dir");
+
+    // A layout missing ONLY tombstones/ (three of four dirs) is still refused -- a
+    // subset check that stopped at blobs/+meta/ would wrongly accept this.
+    const noTombstones = freshScratchDir("cli-partial-2");
+    for (const d of ["blobs", "meta", "claims"]) mkdirSync(join(noTombstones, d), { recursive: true });
+    assert.equal(runCli(["stats", "--root", noTombstones]).status, 2, "a layout missing tombstones/ is refused");
+    assert.ok(!readdirSync(noTombstones).includes("tombstones"), "the CLI did not create the missing tombstones/ dir");
   });
 
   test("a malformed ref is refused (EBADREF) BEFORE the root is opened -- even a missing root", () => {

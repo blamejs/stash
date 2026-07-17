@@ -263,6 +263,10 @@
             }
           }
         },
+        "SUBDIRS": {
+          "kind": "array",
+          "length": 4
+        },
         "_writeAll": {
           "kind": "function",
           "arity": 3

@@ -42,7 +42,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-import { DiskBackend } from "./backends/disk.js";
+import { DiskBackend, SUBDIRS } from "./backends/disk.js";
 import { StashError } from "./errors.js";
 import { Stash, version } from "./index.js";
 import { isValid } from "./ref.js";
@@ -102,17 +102,17 @@ function resolveRoot(flags, env) {
 
 // assertStashLayout(root) -- refuse a missing/non-stash root rather than letting
 // DiskBackend #init conjure an empty store from a typo (which would report "0
-// entries" and mask the mistake). A real root carries the meta/ sidecar directory.
-// No path is echoed (capability-in-error-message) -- the operator sees their own
-// --root argument.
+// entries" and mask the mistake). No path is echoed (capability-in-error-message) --
+// the operator sees their own --root argument.
 function assertStashLayout(root) {
-  // A real disk root carries the full layout; require the two load-bearing
-  // directories (blobs/ + meta/) so a partial or wrong directory is refused, not
-  // silently completed into an empty store. A missing directory (ENOENT/ENOTDIR) is
-  // "no stash here" -- a usage error the operator fixes by correcting --root -- but
-  // an access or I/O fault (EACCES, ...) is a REAL fault surfaced distinctly, never
-  // masked as "not found". No path is echoed (the operator sees their own --root).
-  for (const sub of ["blobs", "meta"]) {
+  // A real disk root carries the FULL layout; require EVERY directory #init creates
+  // (SUBDIRS, imported so this can never drift from the backend), so a partial or
+  // wrong directory is refused, not silently completed into an empty store -- #init
+  // would otherwise re-create any missing one on first use. A missing directory
+  // (ENOENT/ENOTDIR) is "no stash here" -- a usage error the operator fixes by
+  // correcting --root -- but an access or I/O fault (EACCES, ...) is a REAL fault
+  // surfaced distinctly, never masked as "not found".
+  for (const sub of SUBDIRS) {
     let st;
     try {
       st = statSync(join(root, sub));
