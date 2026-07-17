@@ -32,6 +32,7 @@ import { Readable } from "node:stream";
 
 import { spend } from "../entry.js";
 import { IntegrityError, RefClaimed, RefNotFound } from "../errors.js";
+import { constantTimeEqual } from "../ref.js";
 
 /**
  * @primitive  stash.backends.MemoryBackend
@@ -211,5 +212,40 @@ export class MemoryBackend {
       entries += 1;
     }
     return { entries, bytes, claimed: this.#claims.size };
+  }
+
+  // verify(opts) -> Report. Digest-check every held entry against its stored
+  // digest. A Map has no orphan halves, no corrupt sidecars, and no in-flight
+  // .tmp by construction, so those finding kinds are structurally empty here --
+  // the report SHAPE matches the disk backend's. A claimed entry (mid-pop) still
+  // occupies the store and is COUNTED in `scanned` -- disk counts its sidecar in
+  // meta/, so both backends report the same scanned total for one logical store
+  // (cross-backend parity) -- but its digest is not re-checked here, matching
+  // disk's walk, which skips a blob that lives under claims/. A stale claim (older
+  // than the lease) is REPORTED, never repaired (resolving it is crash recovery's
+  // job). Repair removes only a digest-mismatched entry -- its chunks and metadata
+  // go together, and healthy entries survive untouched.
+  async verify(opts) {
+    const findings = [];
+    const repaired = [];
+    let scanned = 0;
+    for (const [id, held] of this.#entries) {
+      scanned += 1;
+      const hash = createHash("sha256");
+      for (const buf of held.chunks) hash.update(buf);
+      if (!constantTimeEqual("sha256:" + hash.digest("hex"), held.entry.digest)) {
+        findings.push({ kind: "digest-mismatch", id });
+        if (opts.repair) {
+          this.#entries.delete(id);
+          repaired.push({ kind: "digest-mismatch", id });
+        }
+      }
+    }
+    const now = Date.now();
+    for (const [id, held] of this.#claims) {
+      scanned += 1; // a claimed blob still occupies the store; disk counts its meta/ sidecar, so match
+      if (now - held.claimedAt >= opts.claimTimeoutMs) findings.push({ kind: "stale-claim", id });
+    }
+    return { scanned, findings, repaired };
   }
 }

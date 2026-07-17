@@ -18,18 +18,20 @@ function deepFreeze(obj) {
   return Object.freeze(obj);
 }
 
+const TIME = {
+  SECOND: 1000,
+  MINUTE: 60 * 1000,
+  HOUR: 60 * 60 * 1000,
+  DAY: 24 * 60 * 60 * 1000,
+  // The 2^31-1 ceiling Node's timers accept: a delay above it silently
+  // wraps to ~1ms and fires in a busy loop (a TimeoutOverflowWarning +
+  // backend hammering). A sweepInterval above this is a config error, not a
+  // rounding; operators needing rarer sweeps call prune() on their own clock.
+  MAX_TIMER_MS: 2147483647,
+};
+
 export const C = deepFreeze({
-  TIME: {
-    SECOND: 1000,
-    MINUTE: 60 * 1000,
-    HOUR: 60 * 60 * 1000,
-    DAY: 24 * 60 * 60 * 1000,
-    // The 2^31-1 ceiling Node's timers accept: a delay above it silently
-    // wraps to ~1ms and fires in a busy loop (a TimeoutOverflowWarning +
-    // backend hammering). A sweepInterval above this is a config error, not a
-    // rounding; operators needing rarer sweeps call prune() on their own clock.
-    MAX_TIMER_MS: 2147483647,
-  },
+  TIME,
   BYTES: {
     KIB: 1024,
     MIB: 1024 * 1024,
@@ -40,5 +42,12 @@ export const C = deepFreeze({
     RANDOM_BYTES: 32,
     // 32 bytes -> unpadded base64url
     ENCODED_LENGTH: 43,
+  },
+  AUDIT: {
+    // A blobs/<id>.tmp younger than this is a push in flight, not a crash
+    // orphan: verify reports such a tmp but NEVER repairs it, so an audit
+    // racing a live writer cannot delete its half-written blob (CWE-367). One
+    // hour is orders of magnitude above any real push, composed from TIME.
+    TMP_GRACE_MS: TIME.HOUR,
   },
 });

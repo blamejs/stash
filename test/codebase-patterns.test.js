@@ -185,6 +185,7 @@ const VALID_ALLOW_CLASSES = {
   "sandbox-widening-import": 1,
   "permission-probe-branch": 1,
   "error-event-emit": 1,
+  "emit-outside-policy": 1,
   "capability-in-error-message": 1,
   "catch-return-swallow": 1,
   "fail-open-verify": 1,
@@ -345,6 +346,22 @@ test("error-event-emit -- background failures never emit 'error'", () => {
   let bad = _scanLines(_srcFiles(), re, { prepare: _stripComments });
   bad = _filterMarkers(bad, "error-event-emit");
   _report("SPEC.md 4.3: no emit('error') in src/ -- the background failure channel is 'sweepError'", bad);
+});
+
+// (4a) emit-outside-policy -- SPEC.md 4.3, 4.4
+// ---------------------------------------------------------------------------
+
+test("emit-outside-policy -- only the policy layer emits lifecycle events", () => {
+  // reason: events are POLICY. A backend -- or any src module but stash.js --
+  // calling .emit( would open a second event surface the emit-at-verb-layer
+  // design and M7's silent store() (SPEC.md 4.4 echo suppression) cannot see, so
+  // an entry replicated in could fire a spurious 'pushed'. Rename-proof: the call
+  // SHAPE, not a symbol. stash.js is the one policy owner and is excluded.
+  const re = /(?<![\w$.])emit\s*\(|\.emit\s*\(/;
+  const files = _srcFiles().filter((f) => !/[\\/]stash\.js$/.test(f));
+  let bad = _scanLines(files, re, { prepare: _stripComments });
+  bad = _filterMarkers(bad, "emit-outside-policy");
+  _report("SPEC.md 4.3: events are policy -- only src/stash.js emits (a backend emit is a second surface)", bad);
 });
 
 // ---------------------------------------------------------------------------
@@ -773,7 +790,10 @@ test("unimported-builtin-call -- no bare call to an unbound node builtin export"
     const lines = _lines(subject);
     const rawLines = _lines(raw);
     for (let i = 0; i < lines.length; i++) {
-      const callRe = /(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g;
+      // Exclude a leading `#` too: `this.#init()` is a private-method call, never
+      // a bare builtin invocation (node:events exports an `init`, so the private
+      // name would otherwise false-positive).
+      const callRe = /(?<![.\w$#])([A-Za-z_$][\w$]*)\s*\(/g;
       let c;
       while ((c = callRe.exec(lines[i])) !== null) {
         const name = c[1];

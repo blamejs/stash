@@ -8,6 +8,7 @@ import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
 import {
   appendFileSync,
+  chmodSync,
   constants,
   existsSync,
   linkSync,
@@ -84,6 +85,11 @@ const FIFO_OK = canMkfifo();
 // the unsandboxed suite and in CI; the sandboxed pass proves the library
 // itself, not the test scaffolding.
 const SANDBOXED = typeof process.permission !== "undefined";
+
+// chmod-000 does not deny access on win32 (modes are advisory) nor to root
+// (which bypasses permission bits), so the verify-FAULT vector skips there and
+// runs on CI's unprivileged Linux runner.
+const CANNOT_FAULT = process.platform === "win32" || (typeof process.getuid === "function" && process.getuid() === 0);
 
 async function drain(readable) {
   const chunks = [];
@@ -942,7 +948,7 @@ suite("disk: crash recovery (SPEC 6)", () => {
     const inner = new DiskBackend({ root });
     let raced = false;
     const backend = {};
-    for (const m of ["write", "read", "remove", "stat", "list", "stats", "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed"]) {
+    for (const m of ["write", "read", "remove", "stat", "list", "stats", "verify", "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed"]) {
       backend[m] = (...a) => inner[m](...a);
     }
     backend.stat = async (id) => {
@@ -1157,5 +1163,220 @@ suite("disk: drop races the claim lifecycle (SPEC 4.2)", () => {
       assert.deepEqual(readdirSync(join(root, "meta")), [], `round ${round}: no sidecar survives a dropped entry`);
       assert.deepEqual(readdirSync(join(root, "blobs")), [], `round ${round}: no blob orphaned in blobs/`);
     }
+  });
+});
+
+suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
+  const bp = (root, ref) => join(root, "blobs", ref);
+  const mp = (root, ref) => join(root, "meta", ref + ".json");
+  const TWO_HOURS = 2 * 60 * 60 * 1000;
+
+  test("THE DONE-WHEN: a bit-flipped blob, a stale orphan .tmp, and a meta-without-blob report (dry) then repair, a healthy entry surviving", async () => {
+    const { root, stash } = freshStash();
+    const flipped = await stash.push(Buffer.alloc(64, 7));   // (a) will be bit-flipped
+    const missing = await stash.push("no blob here");        // (c) meta-without-blob
+    const healthy = await stash.push("survivor");
+    const buf = readFileSync(bp(root, flipped)); buf[0] ^= 0xff; writeFileSync(bp(root, flipped), buf);
+    const tmp = join(root, "blobs", "orphan.tmp"); writeFileSync(tmp, "half a push"); // (b) stale orphan tmp
+    const old = new Date(Date.now() - TWO_HOURS); utimesSync(tmp, old, old);
+    rmSync(bp(root, missing));
+
+    const dry = await stash.verify();
+    assert.deepEqual(dry.findings.map((f) => f.kind).sort(), ["digest-mismatch", "missing-blob", "orphan-tmp"]);
+    assert.deepEqual(dry.repaired, [], "dry run touches nothing");
+    assert.ok(existsSync(bp(root, flipped)) && existsSync(mp(root, missing)) && existsSync(tmp), "every planted file still on disk");
+
+    const rep = await stash.verify({ repair: true });
+    assert.equal(rep.repaired.length, 3, "all three condemned");
+    assert.ok(!existsSync(bp(root, flipped)) && !existsSync(mp(root, flipped)), "the digest-mismatch pair (blob+sidecar) removed together");
+    assert.ok(!existsSync(mp(root, missing)), "the missing-blob sidecar removed");
+    assert.ok(!existsSync(tmp), "the orphan .tmp removed");
+    assert.deepEqual(await drain(await stash.apply(healthy)), Buffer.from("survivor"), "the healthy survivor round-trips byte-identical");
+  });
+
+  test("a FRESH .tmp is not condemned -- an in-flight push is spared (CWE-367)", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("real");
+    const tmp = join(root, "blobs", "inflight.tmp"); writeFileSync(tmp, "being written"); // mtime = now
+    const rep = await stash.verify({ repair: true });
+    assert.deepEqual(rep.repaired, [], "a fresh tmp is never repaired");
+    assert.equal(existsSync(tmp), true, "the in-flight tmp is untouched");
+  });
+
+  test("an AGED blob without a sidecar is orphan-blob, removed only under repair", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("keep");
+    const orphan = generate(); writeFileSync(bp(root, orphan), "orphaned bytes");
+    const old = new Date(Date.now() - TWO_HOURS); utimesSync(bp(root, orphan), old, old); // aged past the grace -> a genuine orphan
+    const dry = await stash.verify();
+    assert.deepEqual(dry.findings, [{ kind: "orphan-blob", id: orphan }]);
+    assert.equal(existsSync(bp(root, orphan)), true, "the dry run leaves it");
+    await stash.verify({ repair: true });
+    assert.equal(existsSync(bp(root, orphan)), false, "repair removes the orphan blob");
+  });
+
+  test("a FRESH sidecarless blob is SPARED -- write() renames blob->final BEFORE the sidecar, so it may be an in-flight push (CWE-367)", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("keep");
+    // A blob with its final name and NO sidecar looks identical to a push caught
+    // between the blob rename and the sidecar write. Condemning a fresh one would
+    // delete the just-written blob and leave a live push a corrupt sidecar-only
+    // entry. It gets the same grace an in-flight .tmp does; a later verify past the
+    // grace reaps it if it truly is an orphan.
+    const fresh = generate(); writeFileSync(bp(root, fresh), "just landed"); // mtime = now
+    const dry = await stash.verify();
+    assert.deepEqual(dry.findings, [], "a fresh sidecarless blob is not condemned");
+    const rep = await stash.verify({ repair: true });
+    assert.deepEqual(rep.repaired, [], "repair spares it too");
+    assert.equal(existsSync(bp(root, fresh)), true, "the possibly-in-flight blob is untouched");
+  });
+
+  test("a foreign file is foreign-file with id: null; no filename or path separator leaks into the report", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("legit");
+    writeFileSync(join(root, "meta", "AAAA.json"), "{}");
+    writeFileSync(join(root, "blobs", "not-a-ref"), "x");
+    const report = await stash.verify();
+    const foreign = report.findings.filter((f) => f.kind === "foreign-file");
+    assert.equal(foreign.length, 2);
+    assert.ok(foreign.every((f) => f.id === null), "a foreign name is never a ref");
+    const json = JSON.stringify(report);
+    assert.equal(json.includes("AAAA"), false, "the foreign filename is not echoed");
+    assert.equal(json.includes("not-a-ref"), false);
+    assert.equal(json.includes("/"), false, "no path separator leaks");
+    assert.equal(json.includes("\\"), false);
+  });
+
+  test("a corrupt sidecar is corrupt-sidecar (verify does not throw); repair removes sidecar and blob", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("valid");
+    writeFileSync(mp(root, ref), "{ not valid json");
+    const dry = await stash.verify(); // corruption is verify's SUBJECT -- it reports, never throws
+    assert.deepEqual(dry.findings, [{ kind: "corrupt-sidecar", id: ref }]);
+    await stash.verify({ repair: true });
+    assert.ok(!existsSync(mp(root, ref)) && !existsSync(bp(root, ref)), "sidecar and blob both removed");
+  });
+
+  test("drop over a CORRUPT sidecar still removes it -- drop reads nothing, so corruption never blocks cleanup", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("valid");
+    writeFileSync(mp(root, ref), "{ not valid json");
+    const events = [];
+    stash.on("dropped", (e) => events.push(e.id));
+    stash.on("expired", (e) => events.push(e.id));
+    assert.equal(await stash.drop(ref), true, "a corrupt entry is still droppable -- drop never parses the sidecar");
+    assert.ok(!existsSync(mp(root, ref)) && !existsSync(bp(root, ref)), "sidecar and blob both gone");
+    assert.deepEqual(events, [], "no lifecycle event -- there is no whole Entry to carry");
+  });
+
+  test("verify SPARES a blob claimed DURING the walk -- the missing-blob check re-reads claims/ LIVE, never a stale snapshot (CWE-362)", async () => {
+    const root = freshRoot();
+    // A probe backend that, on the target's per-entry stat (verify's own read),
+    // moves its blob blobs/ -> claims/ exactly as a concurrent pop's claim would --
+    // AFTER verify began its walk. The blob is then absent from blobs/ but live in
+    // claims/; a stale top-of-walk snapshot would call it missing-blob and, under
+    // repair, destroy the sidecar out from under the reader.
+    class ClaimMidWalk extends DiskBackend {
+      root; armId = null;
+      async stat(id) {
+        const e = await super.stat(id);
+        if (id === this.armId) { this.armId = null; renameSync(join(this.root, "blobs", id), join(this.root, "claims", id)); }
+        return e;
+      }
+    }
+    const probe = new ClaimMidWalk({ root }); probe.root = root;
+    const stash = new Stash({ backend: probe });
+    const ref = await stash.push("live-and-being-read");
+    probe.armId = ref; // the next stat(ref) is verify's per-entry read; it claims the blob mid-walk
+    const rep = await stash.verify({ repair: true });
+    assert.deepEqual(rep.findings.filter((f) => f.kind === "missing-blob"), [], "a claimed blob is NOT missing");
+    assert.deepEqual(rep.repaired, [], "repair destroys nothing -- the entry is live, mid-read");
+    assert.equal(existsSync(mp(root, ref)), true, "the sidecar survives -- never yanked out from under the reader");
+    assert.equal(existsSync(join(root, "claims", ref)), true, "the blob is safe in claims/");
+  });
+
+  test("verify FAULTS (throws) when meta/ vanishes mid-walk -- a layout fault is never masked as corrupt-sidecar findings (CWE-392)", async () => {
+    const root = freshRoot();
+    // A probe that removes meta/ on the per-entry stat, so stat's #containedDir
+    // raises the "store layout is damaged" IntegrityError -- the SAME error class a
+    // corrupt sidecar raises. verify must re-resolve and re-throw the FAULT, not
+    // record a spurious corrupt-sidecar finding for an undamaged entry.
+    class VanishMeta extends DiskBackend {
+      root; armed = false;
+      async stat(id) {
+        if (this.armed) { this.armed = false; rmSync(join(this.root, "meta"), { recursive: true, force: true }); }
+        return super.stat(id);
+      }
+    }
+    const probe = new VanishMeta({ root }); probe.root = root;
+    const stash = new Stash({ backend: probe });
+    await stash.push("entry");
+    probe.armed = true; // the next stat -- verify's per-entry read -- removes meta/ then hits the layout fault
+    await assert.rejects(stash.verify(), (e) => e instanceof IntegrityError);
+  });
+
+  test("a size-mismatched blob is size-mismatch, removed under repair", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("exact");
+    appendFileSync(bp(root, ref), "extra");
+    const dry = await stash.verify();
+    assert.deepEqual(dry.findings, [{ kind: "size-mismatch", id: ref }]);
+    await stash.verify({ repair: true });
+    assert.equal(existsSync(bp(root, ref)), false);
+  });
+
+  test("a symlink where a blob should be is a finding, its target never opened", { skip: !FILE_SYMLINKS }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("real");
+    const outside = freshRoot(); mkdirSync(outside, { recursive: true });
+    const secret = join(outside, "secret"); writeFileSync(secret, "attacker");
+    rmSync(bp(root, ref)); symlinkSync(secret, bp(root, ref), "file");
+    const report = await stash.verify();
+    assert.ok(report.findings.some((f) => f.id === ref), "the symlinked blob is a finding");
+    assert.equal(readFileSync(secret, "utf8"), "attacker", "the link target was never opened or followed");
+  });
+
+  test("a stale claim is stale-claim, REPORTED but never repaired (recovery owns resolution)", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("claimed");
+    plantClaim(root, ref); // stale claim, sidecar intact
+    const dry = await stash.verify();
+    assert.ok(dry.findings.some((f) => f.kind === "stale-claim" && f.id === ref));
+    await stash.verify({ repair: true });
+    assert.equal(existsSync(join(root, "claims", ref)), true, "the claimed bytes stay -- deleting a restorable claim would be data loss");
+  });
+
+  test("verify FAULTS on an I/O error, never resolves a clean report", { skip: CANNOT_FAULT }, async () => {
+    const { root, stash } = freshStash();
+    await stash.push("x");
+    chmodSync(join(root, "meta"), 0o000); // deny the walk
+    try {
+      await assert.rejects(stash.verify(), (e) => e.code === "EACCES" || e.code === "EPERM");
+    } finally {
+      chmodSync(join(root, "meta"), 0o700); // restore so cleanup can remove the dir
+    }
+  });
+
+  test("stats is loud on a FOREIGN file in the layout, matching list()", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("ok");
+    writeFileSync(join(root, "meta", "not-json-not-ref"), "x");
+    await assert.rejects(stash.stats(), IntegrityError);
+  });
+
+  test("has over a corrupt sidecar throws IntegrityError, never answering false (CWE-703)", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("v");
+    writeFileSync(mp(root, ref), "{ corrupt");
+    await assert.rejects(stash.has(ref), IntegrityError);
+  });
+
+  test("an expired-but-unswept entry is counted by stats until prune reaps it", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("live");
+    await stash.push("dead", { ttl: 0 }); // expired, unswept
+    assert.equal((await stash.stats()).entries, 2, "the expired entry still counts physically");
+    assert.equal(await stash.prune(), 1);
+    assert.equal((await stash.stats()).entries, 1, "reaped -> no longer counted");
   });
 });

@@ -35,6 +35,24 @@
     "reviewedAt": "0.1.0",
     "reviewBy": "0.2.0"
   },
+  "stash.has": {
+    "decision": "keep-experimental",
+    "reason": "Ships at M6. Existence query with the settled expired-as-false / InvalidRef-on-hostile / IntegrityError-not-absorbed contract; pre-1.0 the whole surface stays experimental until frozen for 1.0.",
+    "reviewedAt": "0.1.8",
+    "reviewBy": "0.2.0"
+  },
+  "stash.stats": {
+    "decision": "keep-experimental",
+    "reason": "Ships at M6. Aggregate counts (entries/bytes/claimed) over a fast physical walk; the claimed field's exactness rests on the M5 claim machinery still soaking. Pre-1.0 experimental until the option/error surface freezes for 1.0.",
+    "reviewedAt": "0.1.8",
+    "reviewBy": "0.2.0"
+  },
+  "stash.verify": {
+    "decision": "keep-experimental",
+    "reason": "Ships at M6. The finding-kind set and Report shape are new this release; M7 replication will extend the walk to tombstones and decide whether repair writes a tombstone, so the report contract is not frozen. Pre-1.0 experimental.",
+    "reviewedAt": "0.1.8",
+    "reviewBy": "0.2.0"
+  },
   "stash.drop": {
     "decision": "keep-experimental",
     "reason": "Deletion semantics are final for a single store; tombstone writes on early destruction (M7) extend what drop must record. Graduate with the replication primitives.",
