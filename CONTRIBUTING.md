@@ -19,7 +19,7 @@ cd stash
 node --test test/
 
 # 3. Run the static gates (CI runs all of them)
-npm run gates   # codebase-patterns + comment-block validator + api-snapshot
+npm run gates   # codebase-patterns + comment-block validator + api-snapshot + status-lifecycle
 
 # 4. Run the suite under the Node permission model, scoped to the test root
 npm run test:sandboxed
@@ -108,8 +108,8 @@ Contributions are accepted under the [Developer Certificate of Origin](https://d
 Good contribution areas:
 
 1. **Adversarial test vectors** -- malformed refs, symlink plants, partial-write recovery, concurrent-pop and budget races.
-2. **Milestone work** -- SPEC.md section 12 sequences the build (M2 disk backend through M8 docs). Comment on the tracking issue for a milestone before starting; milestones land one at a time, in order.
-3. **Documentation and runnable examples** -- especially the `--permission` launch flags and the cold-standby replication sketch the spec calls for.
+2. **Coverage and hardening** -- the SPEC.md section 12 delivery plan (M1-M8) is complete, so the open work is deepening the tests around the shipped surface: uncovered branches, crash/chaos injection on the claim and tombstone-recovery paths, and fuzz-corpus growth on the untrusted-bytes parsers.
+3. **Documentation and runnable examples** -- clearer prose, more runnable examples, and doc-correctness fixes against the shipped behavior.
 
 What we don't want:
 

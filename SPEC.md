@@ -47,12 +47,18 @@ The Node permission model went stable in 23.5, so on 24.18.0 the flag is `--perm
 `--experimental-permission`. StashJS should run cleanly under:
 
 ```
-node --permission --allow-fs-read=./.stash/* --allow-fs-write=./.stash/* app.js
+mkdir -p .stash
+node --permission --allow-fs-read=. --allow-fs-write=./.stash app.js
 ```
 
-This is §1 again, enforced by the runtime instead of by discipline: the process that holds the
-blobs is confined to the directory that holds them. A compromised dependency elsewhere in the
-application can't read the stash, and StashJS can't read anything outside its root.
+This is §1 again, enforced by the runtime instead of by discipline. It is a PROCESS-LEVEL
+filesystem allowlist, not per-module isolation: the read grant spans the app directory (Node
+loads its module graph -- your code and `node_modules` -- from disk) while only the store's
+directory is writable, so a compromised dependency anywhere in the process cannot reach the
+wider filesystem -- only the app's own source and the store. Code sharing the process can still
+read the store root; run the store in its own process to isolate it from other in-process code.
+The store's directory must be pre-created: under the sandbox the backend fills it but cannot
+create it (that would need write on its parent).
 
 Design implications, all mandatory:
 
@@ -139,7 +145,7 @@ const stash = new Stash({
 | `clear()` | `Promise<number>` | Delete everything; returns the count. |
 | `prune()` | `Promise<number>` | Delete expired entries only; returns the count. |
 | `stats()` | `Promise<Stats>` | `{ entries, bytes, claimed }`: aggregates only, never refs. |
-| `verify(opts?)` | `Promise<Report>` | Audit: digest-checks blobs and finds orphaned `.tmp` files, meta/blob halves, and stale claims. Dry-run by default; `{ repair: true }` removes what it finds. |
+| `verify(opts?)` | `Promise<Report>` | Audit: digest-checks blobs and finds bit rot, corrupt sidecars/tombstones, orphaned `.tmp` files, meta/blob halves, foreign files, and stale claims. Dry-run by default; `{ repair: true }` removes damaged blob/sidecar pairs, orphans, foreign files, and corrupt tombstones -- but leaves stale claims for crash recovery (§6), never deleting a restorable claim. |
 | `close()` | `Promise<void>` | Stops the sweep timer. Idempotent. |
 | `[Symbol.asyncIterator]()` | `AsyncIterator<Entry>` | `for await (const entry of stash)`, shorthand for `list()`. |
 
@@ -479,7 +485,7 @@ Writes go to `blobs/<id>.tmp` and are `fs.rename`d into place, so a reader never
 blob. Directories are mode `0700` and files `0600`; nothing is world-readable.
 
 **StashJS does its own containment check.** Per §2.1 the permission model follows symlinks out
-of granted paths, so `--allow-fs-read=./.stash/*` doesn't actually confine the process if
+of granted paths, so the filesystem grant doesn't actually confine the process if
 something plants a symlink in the root. On construction, `realpath` the root and store it. On
 every resolved blob/meta/claim path, `realpath` the parent and check it's still under that root,
 refusing with `InvalidRef` otherwise. Use `fs.lstat`, not `fs.stat`, to check whether an entry

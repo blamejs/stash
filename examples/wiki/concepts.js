@@ -115,12 +115,12 @@
  * @related stash.Stash, stash.backends.MemoryBackend
  *
  * StashJS is designed to run cleanly under the Node permission model:
- * `node --permission --allow-fs-read=./.stash/* --allow-fs-write=./.stash/*`.
- * The process holding the blobs is locked to the directory holding the
- * blobs and nothing else -- a compromised dependency elsewhere in the
- * consumer's tree cannot read the stash, and the stash cannot read
- * anything else. It is the store's crypto-agnostic argument enforced by
- * the runtime instead of by discipline.
+ * `mkdir -p .stash && node --permission --allow-fs-read=. --allow-fs-write=./.stash app.js`.
+ * It is a process-level filesystem allowlist, not per-module isolation: the
+ * read grant spans the app directory (Node loads its module graph from disk)
+ * while only the store is writable, so a compromised dependency cannot reach
+ * outside the grant to the wider filesystem. It is the store's crypto-agnostic
+ * argument enforced by the runtime instead of by discipline.
  *
  * @section What the library gives up for it
  *   No child processes, no worker threads, no native addons, no WASI --
