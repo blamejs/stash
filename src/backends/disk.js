@@ -135,8 +135,26 @@ function _openTamper(err) {
 // no-follow guard on a platform without O_NOFOLLOW, where the open cannot
 // refuse a symlink itself -- exported so its contract is pinned directly.
 export function descriptorMatchesName(opened, named) {
-  return !named.isSymbolicLink() &&
-    named.dev === opened.dev && named.ino === opened.ino;
+  return !named.isSymbolicLink() && sameFile(opened, named);
+}
+
+// sameFile(a, b) -- do two fs.Stats describe the SAME on-disk object? The disk
+// backend's file-identity comparison, declared ONCE so no other path re-inlines a
+// dev+ino check that drifts. dev+ino is the POSIX identity, but Windows synthesizes
+// ino from the NTFS file index and can transiently report 0 for distinct files
+// under heavy parallel I/O -- so two different in-root files can collide at
+// {dev, ino:0}. size and birthtimeMs are ANDed on as tiebreaks: both are populated
+// on the Windows fstat AND lstat path, and identical for one object (fstat and lstat
+// of the same inode agree), so an untampered read never false-rejects; the terms
+// only ever make the predicate MORE selective, so the swap defense cannot be
+// weakened (hard rule 12), while two distinct files must now ALSO collide on size
+// and creation time to be mistaken for one -- not attacker-controllable in the swap
+// window over write-once immutable blobs.
+// @enforced-by guard-shape-reinlined
+// @guard-shape \.ino\s*===
+export function sameFile(a, b) {
+  return a.dev === b.dev && a.ino === b.ino &&
+    a.size === b.size && a.birthtimeMs === b.birthtimeMs;
 }
 
 // verifyDescriptorAgainstName(openedStat, path, damaged) -> boolean. The fallback
@@ -1148,12 +1166,13 @@ export class DiskBackend {
       _absent(err); // blobs/<id> is free -- proceed to the rename below
     }
     if (occupant) {
-      // blobs/<id> is occupied. If it is the SAME inode as the claim, the process
-      // died after link() but before removing the original name -- an interrupted
-      // claim leaves a duplicate link. The entry is already live at blobs/<id>, so
-      // complete the recovery by dropping the redundant claim name (never a
-      // rename onto itself). A DIFFERENT inode is a genuine occupied target -- two
-      // blobs for one unique id -- corruption, refused. A claim gone here is
+      // blobs/<id> is occupied. If it is the SAME file as the claim (sameFile: dev
+      // +ino, guarded against a Windows ino:0 collision by size+birthtime), the
+      // process died after link() but before removing the original name -- an
+      // interrupted claim leaves a duplicate link. The entry is already live at
+      // blobs/<id>, so complete the recovery by dropping the redundant claim name
+      // (never a rename onto itself). A DIFFERENT file is a genuine occupied target
+      // -- two blobs for one unique id -- corruption, refused. A claim gone here is
       // RefNotFound.
       let claimed;
       try {
@@ -1162,7 +1181,7 @@ export class DiskBackend {
         _absent(err);
         throw new RefNotFound();
       }
-      if (occupant.ino === claimed.ino && occupant.dev === claimed.dev) {
+      if (sameFile(occupant, claimed)) {
         await rm(join(claimsDir, id), { force: true });
         return;
       }

@@ -49,7 +49,8 @@ Pre-1.0, only the latest published `0.x.y` receives fixes. See
 ## Continuous fuzzing
 
 The store's untrusted-input surfaces -- hostile ref strings, the disk
-backend's entry-sidecar bytes, and its tombstone-grave bytes -- are fuzzed
+backend's entry-sidecar bytes, its tombstone-grave bytes, and the
+self-describing digest parser (`"<algo>:<hex>"`) -- are fuzzed
 continuously with ClusterFuzzLite (jazzer.js): pull requests that touch
 `src/` get a short fuzzing burst against the changed code, and a scheduled
 batch run fuzzes the grown corpus daily. The targets treat a typed `StashError` as the correct fail-closed

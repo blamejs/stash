@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { C } from "../src/constants.js";
+import { fuzz as fuzzDigest } from "./fuzz_digest.js";
 import { fuzz as fuzzRef } from "./fuzz_ref.js";
 import { fuzz as fuzzSidecar, ROOT as SIDECAR_ROOT } from "./fuzz_sidecar.js";
 import { fuzz as fuzzTombstone, ROOT as TOMBSTONE_ROOT } from "./fuzz_tombstone.js";
@@ -30,6 +31,20 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // on disk must have a row here, and every row a seed -- an uncatalogued
 // seed would run without an assertion and prove nothing.
 const EXPECTED = {
+  fuzz_digest: {
+    "valid-sha256.txt": "valid",
+    "valid-sha3-512.txt": "valid",
+    "valid-shake256.txt": "valid",
+    "unknown-algo.txt": "rejected",
+    "short-hex.txt": "algo-only",
+    "long-hex.txt": "algo-only",
+    "no-colon.txt": "rejected",
+    "bare-marker.txt": "algo-only",
+    "uppercase-hex.txt": "algo-only",
+    "non-hex.txt": "algo-only",
+    "multi-colon.txt": "algo-only",
+    "empty.txt": "rejected",
+  },
   fuzz_ref: {
     "valid-shape.txt": "ENOREF",
     "traversal.txt": "EBADREF",
@@ -132,6 +147,20 @@ function prngBytes(length, seed) {
 }
 
 async function runGenerated() {
+  // Noise carries no registry "<algo>:" prefix, so the digest parser rejects it.
+  check(
+    "fuzz_digest/<generated 256B noise>",
+    await verdictOf(fuzzDigest, "fuzz_digest/<generated 256B noise>", prngBytes(256, 4)),
+    "rejected",
+  );
+  // A known algorithm prefix with a wildly-oversized hex tail: the shape gate
+  // rejects it (wrong length) while algoOf still resolves the prefix -> algo-only,
+  // and the O(n) parser neither hangs nor OOMs on the large input.
+  check(
+    "fuzz_digest/<generated sha256: + 96KiB>",
+    await verdictOf(fuzzDigest, "fuzz_digest/<generated sha256: + 96KiB>", Buffer.from("sha256:" + "a".repeat(96 * C.BYTES.KIB))),
+    "algo-only",
+  );
   // Any 4 KiB of noise decodes to a string far off the whitelist.
   check(
     "fuzz_ref/<generated 4KiB noise>",
@@ -166,6 +195,7 @@ async function runGenerated() {
 }
 
 async function main() {
+  await runSeeds("fuzz_digest", fuzzDigest);
   await runSeeds("fuzz_ref", fuzzRef);
   await runSeeds("fuzz_sidecar", fuzzSidecar);
   await runSeeds("fuzz_tombstone", fuzzTombstone);

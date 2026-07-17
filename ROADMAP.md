@@ -111,6 +111,18 @@ an entry with its algorithm intact. Omitting the option keeps `sha256`, so every
 existing store is byte-identical. This extends the `SPEC.md` section 12 plan beyond
 its original close.
 
+## Hardening -- disk file identity -- SHIPPED (0.1.13)
+
+On a filesystem without `O_NOFOLLOW` (Windows), the disk backend cross-checks an
+open descriptor's identity against a no-follow lookup of the name to catch a
+symlink traversed at open or a name swapped after it. That check keyed on device
++ inode alone; Windows can transiently report inode `0` for a file under heavy
+parallel I/O, so two distinct files could be mistaken for one -- a fail-open in
+the swap guard. The identity comparison now also requires size and creation time
+to agree; the terms are ANDed, so the check is strictly more selective and an
+untampered read still matches. It is the single choke point behind both the
+read-path swap guard and the crash-recovery interrupted-claim check.
+
 ## Standing constraints
 
 Every milestone honors the one rule (no decrypt capability), zero
