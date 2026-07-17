@@ -460,8 +460,15 @@ export class DiskBackend {
       const metaDir = await this.#containedDir("meta");
       let had = true;
       try {
-        // _retryTransient absorbs a Windows EPERM against a lingering sidecar handle.
-        await _retryTransient(() => unlink(join(metaDir, id + ".json")));
+        // rm (recursive, NO force) removes the sidecar whether it is the normal
+        // regular file OR a tampered directory where the sidecar belongs (which
+        // verify repair must still reap) -- without force so an ENOENT is the
+        // "already gone" witness. rm removes a final-component symlink ITSELF, never
+        // following it, so a swap cannot redirect the deletion to another file
+        // (CWE-59/367); the exactly-once witness is #reaped (in-process), not this
+        // op's atomicity. _retryTransient absorbs a Windows EPERM against a lingering
+        // handle.
+        await _retryTransient(() => rm(join(metaDir, id + ".json"), { recursive: true }));
       } catch (err) {
         if (_absent(err)) had = false; // already gone (an external / cross-process removal) -- not us
         else throw err;

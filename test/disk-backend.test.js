@@ -1356,6 +1356,17 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     await assert.rejects(stash.verify(), (e) => e instanceof IntegrityError);
   });
 
+  test("verify repair reaps a directory-shaped SIDECAR (tampering), not only a regular file", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("entry");
+    rmSync(mp(root, ref));
+    mkdirSync(mp(root, ref)); // a directory where the sidecar belongs -> stat opens it, not-a-file -> corrupt-sidecar
+    writeFileSync(join(mp(root, ref), "junk"), "x"); // non-empty: a non-recursive removal would EISDIR
+    const rep = await stash.verify({ repair: true });
+    assert.ok(rep.repaired.some((f) => f.id === ref), "the corrupt (directory-shaped) sidecar is condemned");
+    assert.equal(existsSync(mp(root, ref)), false, "the directory-shaped sidecar is removed, contents and all");
+  });
+
   test("verify repair reaps a directory-shaped blob (tampering), contents and all -- not just a regular file", async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("entry");
