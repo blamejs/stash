@@ -1538,6 +1538,17 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     await assert.rejects(stash.stats(), IntegrityError);
   });
 
+  test("stats and verify both audit tombstones/ for a foreign file (M7's dir, but layout damage is caught in M6)", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("ok"); // #init creates tombstones/
+    writeFileSync(join(root, "tombstones", "not-a-ref"), "x");
+    await assert.rejects(stash.stats(), IntegrityError);
+    const dry = await stash.verify();
+    assert.ok(dry.findings.some((f) => f.kind === "foreign-file"), "verify reports the foreign tombstones/ file");
+    await stash.verify({ repair: true });
+    assert.equal(existsSync(join(root, "tombstones", "not-a-ref")), false, "and reaps it under repair");
+  });
+
   test("stats counts an ORPHANED blob (a crashed remove left it), closing the maxTotal bypass", async () => {
     const { root, stash } = freshStash();
     await stash.push("keep"); // a live entry

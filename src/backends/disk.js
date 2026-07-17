@@ -625,6 +625,13 @@ export class DiskBackend {
         _absent(err); // vanished mid-scan (a concurrent verify/drop) -- skip
       }
     }
+    // tombstones/: M7's records; M6 writes none, so there are no bytes to count yet,
+    // but the aggregate stays loud on a foreign name here as in every layout dir.
+    for (const name of await readdir(await this.#containedDir("tombstones"))) {
+      if (name.endsWith(".tmp")) continue;
+      if (!isValid(name)) throw new IntegrityError("store layout is damaged");
+      // a valid ref name is an M7 tombstone -- its bytes are M7's to count
+    }
     return { entries, bytes, claimed };
   }
 
@@ -874,6 +881,21 @@ export class DiskBackend {
       let claimStat;
       try { claimStat = await lstat(join(claimsDir, name)); } catch (err) { _absent(err); continue; }
       if (now - claimStat.mtimeMs >= opts.claimTimeoutMs) findings.push({ kind: "stale-claim", id: name });
+    }
+
+    // tombstones/: M7's replication records live here; M6 writes none. verify still
+    // audits the dir for layout damage -- a foreign name is loud (like every layout
+    // dir), an aged .tmp is an orphan -- but leaves any valid-ref-name file for M7 to
+    // own, never condemning a tombstone whose lifecycle this milestone does not yet
+    // define.
+    const tombstonesDir = await this.#containedDir("tombstones");
+    for (const name of await readdir(tombstonesDir)) {
+      if (await this.#auditOrphanTmp("tombstones", tombstonesDir, name, now, opts, findings, repaired)) continue;
+      if (!isValid(name)) {
+        findings.push({ kind: "foreign-file", id: null });
+        if (opts.repair) await this.#discard("tombstones", name, "foreign-file", repaired);
+      }
+      // a valid ref name is an M7 tombstone -- left untouched
     }
 
     return { scanned: scanned.size, findings, repaired };
