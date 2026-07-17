@@ -1149,6 +1149,28 @@ for (const { name, create } of BACKENDS) {
       await stash.close();
     });
 
+    test("an ASYNC-rejecting 'sweepError' listener is contained: no unhandledRejection, the janitor keeps sweeping", { timeout: 8000 }, async () => {
+      // emit() does not await listeners, so an async handler that rejects returns a
+      // promise nobody awaits -> an unhandledRejection (fatal on Node), the very
+      // outcome the sweep exists to prevent. It must be contained like a sync throw.
+      const inner = create();
+      const backend = wrapBackend(inner, { list: () => { throw new Error("sweep boom"); } });
+      const stash = new Stash({ backend, sweepInterval: 15 });
+      const unhandled = [];
+      const capture = (e) => unhandled.push(e);
+      process.on("unhandledRejection", capture);
+      let count = 0;
+      try {
+        stash.on("sweepError", async () => { count += 1; throw new Error("async handler boom"); }); // an async handler that REJECTS
+        await pollUntil(() => count >= 2, { timeout: 6000 }); // the guard clears; later ticks keep sweeping
+        await new Promise((r) => setTimeout(r, 40)); // give any escaped rejection a turn to surface
+        assert.deepEqual(unhandled, [], "an async-rejecting sweepError handler never becomes an unhandledRejection");
+      } finally {
+        process.removeListener("unhandledRejection", capture);
+        await stash.close();
+      }
+    });
+
     test("a THROWING 'sweepError' listener cannot brick the janitor: the in-flight guard clears and later ticks still sweep", { timeout: 8000 }, async () => {
       // A sweepError handler that itself throws must not (a) crash the process via
       // an unhandledRejection, nor (b) leave #sweepInFlight stuck so every later

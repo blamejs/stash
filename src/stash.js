@@ -414,17 +414,31 @@ export class Stash extends EventEmitter {
     this.#sweepInFlight = work.then(() => {}, () => {});
     // A rejected background sweep must never become an unhandledRejection (fatal
     // on Node -- the exact outcome SPEC.md 4.3 exists to prevent): surface it as
-    // 'sweepError', NEVER 'error' (an unhandled 'error' crashes the process; a
-    // janitor must not be able to take the app down). With zero listeners this is
-    // a no-op -- only 'error' is fatal. A 'sweepError' listener that ITSELF throws
-    // is contained by the trailing `.catch`, so its throw can neither escape as an
-    // unhandledRejection nor leave the guard below unreached -- a stuck guard would
-    // silently disable the janitor for the process's life (every later tick a
-    // no-op). The chain therefore always fulfils, so the flag always clears -- no
-    // try/finally to misread as a fail-open swallow. A throwing sweepError handler
-    // is dropped here (drift-rule-8 tier-3 sink -- the one sanctioned silent drop).
-    await work.catch((err) => this.emit("sweepError", err)).catch(() => {});
+    // 'sweepError' (NEVER 'error' -- an unhandled 'error' crashes the process; a
+    // janitor must not be able to take the app down), through #emitSweepError, which
+    // contains a listener's OWN failure -- sync throw OR async rejection -- so it
+    // cannot escape either. #emitSweepError returns synchronously, so the chain
+    // always fulfils and the guard below always clears (a stuck guard would silently
+    // disable the janitor for the process's life) -- no try/finally to misread as a
+    // fail-open swallow.
+    await work.catch((err) => this.#emitSweepError(err));
     this.#sweepInFlight = null;
+  }
+
+  // #emitSweepError(err) -- emit 'sweepError' such that NO listener can crash the
+  // janitor. EventEmitter.emit does not await listeners, so an ASYNC listener's
+  // rejected promise would escape as an unhandledRejection (fatal on Node -- the
+  // outcome the sweep exists to prevent), and a SYNCHRONOUS throw would propagate
+  // out of the emit. So each listener runs inside its own promise chain: the one
+  // trailing `.catch` contains BOTH failure modes. A handler's own failure is
+  // dropped here -- the one sanctioned drop-silent sink (drift rule 8), the reason
+  // the failure channel is 'sweepError' and never the fatal 'error'. rawListeners
+  // preserves `once` semantics (its wrapper self-removes when called). Emits nothing
+  // when there are no listeners.
+  #emitSweepError(err) {
+    for (const listener of this.rawListeners("sweepError")) {
+      Promise.resolve().then(() => listener.call(this, err)).catch(() => {});
+    }
   }
 
   // #statLive(ref) -- the shared lazy-expiry gate. stat the entry, and if it is
