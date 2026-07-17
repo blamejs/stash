@@ -620,12 +620,16 @@ suite("disk: fd-based read discipline (CWE-367)", () => {
     }
   });
 
-  test("verifyDescriptorAgainstName: a name that vanished after the open is IntegrityError", async () => {
+  test("verifyDescriptorAgainstName: a name that vanished after the open reports absence (a concurrent removal, not a swap)", async () => {
     const dir = freshScratchDir("vd-gone");
     mkdirSync(dir, { recursive: true });
     const gone = join(dir, "never-created");
     const openedStat = { dev: 1, ino: 1, isSymbolicLink: () => false };
-    await assert.rejects(verifyDescriptorAgainstName(openedStat, gone, "damaged"), IntegrityError);
+    // A vanished name is a concurrent removal, not corruption: it returns false,
+    // which #openStored maps to onAbsent (RefNotFound for a sidecar) so a reader
+    // racing a reap sees the entry as gone, not damaged. No handle is ever served
+    // either way, so the swap defense (a real mismatch stays IntegrityError) holds.
+    assert.equal(await verifyDescriptorAgainstName(openedStat, gone, "damaged"), false);
   });
 
   // A path under a regular file is ENOTDIR on POSIX but ENOENT on Windows
@@ -1164,6 +1168,22 @@ suite("disk: drop races the claim lifecycle (SPEC 4.2)", () => {
       assert.deepEqual(readdirSync(join(root, "blobs")), [], `round ${round}: no blob orphaned in blobs/`);
     }
   });
+
+  test("the 'expired' emit is exactly-once under a lazy-read / prune race, every round -- the in-process witness holds on Windows too", async () => {
+    // On Windows an unlink of a sidecar a concurrent reader holds open lingers the
+    // NAME (libuv opens FILE_SHARE_DELETE), so two removes can both witness fs
+    // success -> a double 'expired'. remove()'s in-process #reaped record is the
+    // authoritative single-writer witness instead. Sweep the race enough rounds to
+    // catch a ~15%-per-round flake deterministically.
+    for (let round = 0; round < 60; round += 1) {
+      const { stash } = freshStash();
+      const ref = await stash.push("racer", { ttl: 0 });
+      const seen = [];
+      stash.on("expired", (e) => seen.push(e.id));
+      await Promise.all([stash.show(ref).catch(() => {}), stash.prune()]);
+      assert.deepEqual(seen, [ref], `round ${round}: exactly one 'expired', never a double witness`);
+    }
+  });
 });
 
 suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
@@ -1372,6 +1392,34 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     assert.deepEqual(rep.repaired, [], "a claimed entry is NEVER condemned, even with a corrupt sidecar");
     assert.equal(existsSync(join(root, "claims", ref)), true, "the claimed blob survives repair");
     assert.equal(existsSync(mp(root, ref)), true, "the (corrupt) sidecar is left for recovery, not destroyed");
+  });
+
+  test("verify({repair}) does NOT condemn a blob that becomes CLAIMED between the blob-check and the condemn -- the condemn re-checks claim state LIVE, not a pre-hash flag (CWE-362)", async () => {
+    const root = freshRoot();
+    // A probe whose stat() links the blob into claims/ WITHOUT removing blobs/<id>
+    // (the crash-after-link-before-unlink duplicate-link state). verify's blob-lstat
+    // then finds it in blobs/ (would-be "unclaimed"), hashes it there, and finds the
+    // corruption -- but a claim now EXISTS. A pre-hash `claimed` flag would say
+    // false and destroy the now-claimed entry; the live re-check at the condemn does
+    // not. This is the "claim taken DURING the (unbounded) hash" race, made
+    // deterministic.
+    class ClaimDuringHash extends DiskBackend {
+      root; armId = null;
+      async stat(id) {
+        const e = await super.stat(id);
+        if (id === this.armId) { this.armId = null; linkSync(join(this.root, "blobs", id), join(this.root, "claims", id)); }
+        return e;
+      }
+    }
+    const probe = new ClaimDuringHash({ root }); probe.root = root;
+    const stash = new Stash({ backend: probe });
+    const ref = await stash.push("corrupt me");
+    const buf = readFileSync(bp(root, ref)); buf[0] ^= 0xff; writeFileSync(bp(root, ref), buf); // corrupt the blob in blobs/
+    probe.armId = ref; // verify's stat(ref) claims it (into claims/) while it stays in blobs/
+    const rep = await stash.verify({ repair: true });
+    assert.ok(rep.findings.some((f) => f.kind === "digest-mismatch" && f.id === ref), "the corruption is still reported");
+    assert.deepEqual(rep.repaired, [], "a now-claimed entry is NOT condemned -- the condemn re-checked claims/ LIVE");
+    assert.equal(existsSync(mp(root, ref)), true, "the sidecar survives -- never destroyed out from under the reader");
   });
 
   test("verify() on a fresh store's FIRST op does NOT run crash recovery: a stale claim is reported, never restored (a dry run stays read-only, SPEC.md 6)", async () => {

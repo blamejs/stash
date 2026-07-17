@@ -28,6 +28,12 @@ const MAX_SIDECAR_BYTES = 64 * C.BYTES.KIB;
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 
+// remove()'s in-process exactly-once witness (#reaped) holds at most this many
+// recently-removed ids. Far above any real concurrent-reap window (the racers of
+// one entry are microseconds apart); the oldest is evicted past that window, where
+// a re-remove of a long-gone id -- its Windows delete long finalized -- reads ENOENT.
+const REAP_MEMO = 4096;
+
 // A stored file is read through its own descriptor: open once, verify the
 // descriptor, then read or stream from that same handle. The check and the
 // use share one fd, so nothing re-resolves the path between them -- a blob
@@ -128,28 +134,31 @@ export function descriptorMatchesName(opened, named) {
     named.dev === opened.dev && named.ino === opened.ino;
 }
 
-// verifyDescriptorAgainstName(openedStat, path, damaged) -- the fallback swap
-// guard for platforms without O_NOFOLLOW (Windows), where the open cannot
-// refuse a symlink itself. A no-follow lstat of the name is cross-checked
-// against the open descriptor's fstat via descriptorMatchesName: a symlink
-// traversed at open, or a name swapped after it, is refused as corruption. A
-// name that vanished after the open no longer vouches for the descriptor, so
-// its absence becomes IntegrityError; any other lstat fault propagates. Lifted
-// out of the read path -- as descriptorMatchesName was -- so its branches are
-// pinned directly on every platform, not only where O_NOFOLLOW is absent.
+// verifyDescriptorAgainstName(openedStat, path, damaged) -> boolean. The fallback
+// swap guard for platforms without O_NOFOLLOW (Windows), where the open cannot
+// refuse a symlink itself. A no-follow lstat of the name is cross-checked against
+// the open descriptor's fstat via descriptorMatchesName: a symlink traversed at
+// open, or a name SWAPPED for a different object after it, is refused as corruption
+// (IntegrityError). A name that VANISHED after the open (ENOENT) is a concurrent
+// REMOVAL, not a swap -- it reports absence (false), which #openStored maps to the
+// caller's onAbsent (a sidecar reads back RefNotFound, tolerated by list()/prune()
+// mid-reap). Either verdict is served the SAME way: #openStored closes the handle
+// unread, so no traversed descriptor is ever returned -- the swap defense is intact,
+// only a legitimate concurrent removal stops being misreported as corruption. Any
+// other lstat fault propagates. Lifted out of the read path -- as
+// descriptorMatchesName was -- so its branches are pinned on every platform.
 export async function verifyDescriptorAgainstName(openedStat, path, damaged) {
   let named;
   try {
     named = await lstat(path);
   } catch (err) {
-    // The name vanished or became unreadable after the open -- it no longer
-    // vouches for the descriptor, so refuse rather than serve an unverifiable
-    // handle.
-    throw _absent(err) ? new IntegrityError(damaged) : err;
+    if (_absent(err)) return false; // vanished after open -- absence (a concurrent removal), never a served handle
+    throw err; // any other lstat fault propagates
   }
   if (!descriptorMatchesName(openedStat, named)) {
     throw new IntegrityError(damaged);
   }
+  return true; // the name still vouches for the descriptor
 }
 
 /**
@@ -189,6 +198,7 @@ export class DiskBackend {
   #root;
   #realRoot = null;
   #initPromise = null;
+  #reaped = new Set(); // ids this instance has removed -- the exactly-once witness the fs cannot give on Windows
 
   constructor(opts) {
     options(opts, "new DiskBackend", { allowed: ["root"] });
@@ -281,8 +291,8 @@ export class DiskBackend {
     try {
       const opened = await fh.stat();
       if (!opened.isFile()) throw new IntegrityError(damaged);
-      if (SYMLINK_GUARD_NEEDED) {
-        await verifyDescriptorAgainstName(opened, path, damaged);
+      if (SYMLINK_GUARD_NEEDED && !(await verifyDescriptorAgainstName(opened, path, damaged))) {
+        throw onAbsent(); // the name vanished after open (a concurrent removal) -- absence, never a served descriptor
       }
     } catch (err) {
       await fh.close();
@@ -418,31 +428,39 @@ export class DiskBackend {
     }
   }
 
-  // remove(id) -> boolean. Sidecar first (the entry stops existing), then
-  // the blob. Absent is a fact, not a failure. The sidecar delete is `unlink`,
-  // NOT `rm`: unlink is one atomic syscall, so the boolean is a true "I removed
-  // it" witness -- exactly one of two concurrent removes (a lazy read racing the
-  // sweeper) gets true, which is what makes the 'expired'/'dropped' emit fire
-  // exactly once. `rm` lstat-then-unlinks and swallows a mid-op ENOENT, so both
-  // racers would report success. unlink never follows a final-component symlink,
-  // so the sidecar's existence and its deletion are one operation, not a
-  // check-then-use: a swap cannot redirect it to another file.
+  // remove(id) -> boolean. Sidecar first (the entry stops existing), then the
+  // blob. Absent is a fact, not a failure. The boolean is the single-writer WITNESS
+  // the 'expired'/'dropped' exactly-once emit depends on: true for EXACTLY ONE of
+  // two removes racing the same entry (a lazy read vs the sweeper). The FILESYSTEM
+  // cannot supply that witness on Windows -- an unlink (or rename) of a sidecar a
+  // concurrent reader holds open (libuv opens FILE_SHARE_DELETE) marks it for
+  // deletion but the NAME LINGERS until that handle closes, so a second remove --
+  // even one running AFTER the first returned -- still sees the name and also
+  // reports success. So the witness is kept in-process: `#reaped` records the ids
+  // this instance has removed, CLAIMED synchronously before the first await (atomic
+  // against a concurrent remove), so exactly one caller ever witnesses true. Scoped
+  // to the instance -- SPEC.md 4.3's exactly-once is per Stash (its own lazy-read
+  // gate vs its own sweeper), never cross-process. Refs are never reused, so a
+  // claimed id never legitimately returns; the record is a bounded FIFO (evicting
+  // the oldest far past any concurrent-reap window) so it cannot grow without bound.
   async remove(id) {
     assertValid(id);
-    // Each directory is contained immediately before its own unlink, not
-    // both up front: a resolve-early/use-late gap is the same directory
-    // time-of-check/time-of-use window write() closes, so meta resolves
-    // right before the sidecar unlink and blobs right before the blob one.
+    if (this.#reaped.has(id)) return false; // this instance already removed it (the fs name may still linger)
+    this.#reaped.add(id); // claim BEFORE any await: atomic vs a concurrent remove of the same id
+    if (this.#reaped.size > REAP_MEMO) this.#reaped.delete(this.#reaped.values().next().value); // evict oldest
+    // Each directory is contained immediately before its own op, not both up front:
+    // a resolve-early/use-late gap is the same directory time-of-check/time-of-use
+    // window write() closes. unlink never follows a final-component symlink, so the
+    // sidecar's existence and its deletion are one op, not a check-then-use a swap
+    // could redirect (CWE-367).
     const metaDir = await this.#containedDir("meta");
     let had = true;
     try {
-      // _retryTransient absorbs a Windows EPERM against a lingering sidecar handle
-      // (a concurrent stat just read it); the winner's unlink lands, the loser's
-      // converges to ENOENT once the winner removes the name -- exactly one witness.
+      // _retryTransient absorbs a Windows EPERM against a lingering sidecar handle.
       await _retryTransient(() => unlink(join(metaDir, id + ".json")));
     } catch (err) {
-      if (_absent(err)) had = false; // already gone: a concurrent remove won the witness
-      else throw err;
+      if (_absent(err)) had = false; // already gone (an external / cross-process removal) -- not us
+      else { this.#reaped.delete(id); throw err; } // a real fault: un-claim so a retry can re-attempt
     }
     const blobDir = await this.#containedDir("blobs");
     await rm(join(blobDir, id), { force: true });
@@ -610,6 +628,20 @@ export class DiskBackend {
     repaired.push({ kind, id });
   }
 
+  // #condemnIfUnclaimed(id, kind, repaired) -- destroy a damaged entry ONLY if it
+  // is not claimed RIGHT NOW. Claim state is re-checked LIVE at the condemnation,
+  // never trusted from a snapshot taken earlier in the walk: the digest is verified
+  // by an UNBOUNDED hash, and a pop can claim the blob DURING that hash, so a flag
+  // read before it is already stale. A blob that became claimed while verify read
+  // it is a live mid-pop entry -- its damage is reported (the finding was already
+  // pushed) but it is NEVER condemned; the pop's drain-verify / recovery owns
+  // resolving it (CWE-362/367). The residual check->remove window is the same
+  // microsecond TOCTOU every store fs op holds (SPEC.md 2.1), not the whole hash.
+  async #condemnIfUnclaimed(id, kind, repaired) {
+    if (await this.#isPresent(join(await this.#containedDir("claims"), id))) return; // claimed now -- leave it for recovery
+    await this.#condemn(id, kind, repaired);
+  }
+
   // #discard(subdir, name, kind, repaired) -- unlink a NON-entry file (a foreign
   // name, a stale .tmp) directly, re-resolving its parent (#containedDir)
   // immediately before the unlink so a directory swap during the walk cannot
@@ -717,26 +749,21 @@ export class DiskBackend {
           findings.push({ kind: "corrupt-sidecar", id });
           // A corrupt sidecar may belong to a CLAIMED entry (a crash mid consumeRead
           // rewrite leaves the sidecar unparsable while the blob is live in claims/):
-          // report the damage, but NEVER condemn a claimed entry -- it is mid-pop and
-          // recovery / the pop owns resolving it, the same protection the size /
-          // digest findings get (CWE-362). Re-check claims/ LIVE.
-          if (opts.repair && !(await this.#isPresent(join(await this.#containedDir("claims"), id)))) {
-            await this.#condemn(id, "corrupt-sidecar", repaired);
-          }
+          // report the damage, but condemn only if it is not claimed right now.
+          if (opts.repair) await this.#condemnIfUnclaimed(id, "corrupt-sidecar", repaired);
           continue;
         }
         throw err; // an fs FAULT -- never a finding
       }
-      // Find the blob: normally blobs/<id>, but a pop/apply may have claimed it
-      // into claims/<id> after this walk began -- re-check claims/ LIVE, never a
-      // stale snapshot. A claimed blob is a live entry mid-read: it is STILL
-      // digest-checked (a read audits every blob's integrity without mutating), but
-      // any finding on it is REPORTED and NEVER condemned -- condemning a claimed
-      // entry would destroy it out from under the reader, and resolving it is the
-      // pop's drain-verify / recovery's job (CWE-362). Only a blob absent from BOTH
+      // Find the blob: normally blobs/<id>, but a pop/apply may have claimed it into
+      // claims/<id> after this walk began -- re-check claims/ LIVE, never a stale
+      // snapshot. A claimed blob is a live entry mid-read: it is STILL digest-checked
+      // (a read audits every blob's integrity without mutating), but every condemn
+      // routes through #condemnIfUnclaimed, which re-checks the claim state LIVE at
+      // the destruction -- a blob claimed DURING the (unbounded) hash is never
+      // destroyed out from under the reader (CWE-362). Only a blob absent from BOTH
       // blobs/ and claims/ is genuinely missing.
       let blobPath = join(blobDir, id);
-      let claimed = false;
       let blobStat;
       try {
         blobStat = await lstat(blobPath);
@@ -748,14 +775,13 @@ export class DiskBackend {
         } catch (err2) {
           _absent(err2); // absent from claims/ too -> genuinely missing
           findings.push({ kind: "missing-blob", id });
-          if (opts.repair) await this.#condemn(id, "missing-blob", repaired);
+          if (opts.repair) await this.#condemnIfUnclaimed(id, "missing-blob", repaired);
           continue;
         }
-        claimed = true;
       }
       if (blobStat.size !== entry.size) {
         findings.push({ kind: "size-mismatch", id });
-        if (opts.repair && !claimed) await this.#condemn(id, "size-mismatch", repaired);
+        if (opts.repair) await this.#condemnIfUnclaimed(id, "size-mismatch", repaired);
         continue;
       }
       let got;
@@ -765,14 +791,14 @@ export class DiskBackend {
         if (err instanceof RefNotFound) continue; // vanished mid-walk (a claim committed / a drop)
         if (err instanceof IntegrityError) { // a symlink / non-regular blob, refused
           findings.push({ kind: "digest-mismatch", id });
-          if (opts.repair && !claimed) await this.#condemn(id, "digest-mismatch", repaired);
+          if (opts.repair) await this.#condemnIfUnclaimed(id, "digest-mismatch", repaired);
           continue;
         }
         throw err;
       }
       if (!constantTimeEqual(got.digest, entry.digest)) {
         findings.push({ kind: "digest-mismatch", id });
-        if (opts.repair && !claimed) await this.#condemn(id, "digest-mismatch", repaired);
+        if (opts.repair) await this.#condemnIfUnclaimed(id, "digest-mismatch", repaired);
       }
     }
 
