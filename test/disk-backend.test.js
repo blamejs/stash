@@ -1096,6 +1096,31 @@ suite("disk: drop races the claim lifecycle (SPEC 4.2)", () => {
     assert.ok(s.bytes >= 5000, "the sidecar-less claim blob's bytes count against the store footprint");
   });
 
+  test("a claim whose sidecar was dropped after the blob moved cleans up, never orphans", async () => {
+    // The claim links+unlinks the blob into claims/ THEN stats the sidecar; a drop
+    // that removes the sidecar in that window makes stat RefNotFound. The claim
+    // must undo itself -- not strand the blob in claims/ where it blocks later
+    // reads and holds maxTotal until a future run's recovery.
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(100, 1)], skeleton(id, 2));
+    rmSync(join(root, "meta", id + ".json")); // the entry is dropped before the claim's stat
+    await assert.rejects(backend.claim(id), RefNotFound);
+    assert.deepEqual(readdirSync(join(root, "claims")), [], "the dropped entry's blob is not orphaned in claims/");
+  });
+
+  test("a claim that fails on a corrupt sidecar after the blob moved restores it, never orphans", async () => {
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(100, 1)], skeleton(id, 2));
+    writeFileSync(join(root, "meta", id + ".json"), "{ not valid json"); // stat throws IntegrityError post-move
+    await assert.rejects(backend.claim(id), IntegrityError);
+    assert.deepEqual(readdirSync(join(root, "claims")), [], "no orphan claim left behind");
+    assert.equal(existsSync(join(root, "blobs", id)), true, "the blob was restored to blobs/, its pre-claim state");
+  });
+
   test("a budgeted read racing a concurrent drop leaves no resurrection and no orphan half", async () => {
     // Sweep the finalize window many rounds: a drop removing the sidecar while a
     // reads:2 apply debits-and-restores must keep the entry destroyed -- never a

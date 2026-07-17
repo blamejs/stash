@@ -623,12 +623,24 @@ export class DiskBackend {
     // touch the target's timestamps OUTSIDE the store. lutimes stamps the link
     // itself; the #openStored below then rejects the symlinked claim (O_NOFOLLOW),
     // so the tamper never bends the store's no-follow discipline.
-    const claimedAt = Date.now();
-    await lutimes(claimPath, new Date(claimedAt), new Date(claimedAt));
-    const entry = await this.stat(id); // the winner reads the sidecar (present)
-    const damaged = "claimed blob storage shape is damaged";
-    const fh = await this.#openStored(claimPath, () => new IntegrityError(damaged), damaged);
-    return { entry, source: fh.createReadStream() };
+    // From here the blob lives ONLY at claims/<id>. If any step below fails before
+    // a source is handed back -- a drop removing the sidecar so stat RefNotFounds,
+    // a corrupt sidecar, a tampered claim blob -- #claimedRead never receives a
+    // source to run its restore/burn verdict, so the claim would orphan a blob
+    // that blocks later reads as claimed and holds maxTotal until a future run's
+    // recovery. Undo the claim best-effort (restore returns a live entry to
+    // blobs/, or cleans up a dropped one), then surface the original failure.
+    try {
+      const claimedAt = Date.now();
+      await lutimes(claimPath, new Date(claimedAt), new Date(claimedAt));
+      const entry = await this.stat(id); // the winner reads the sidecar (present)
+      const damaged = "claimed blob storage shape is damaged";
+      const fh = await this.#openStored(claimPath, () => new IntegrityError(damaged), damaged);
+      return { entry, source: fh.createReadStream() };
+    } catch (err) {
+      await this.restore(id).catch(() => {});
+      throw err;
+    }
   }
 
   // restore(id) -> void. Return a claimed blob claims/<id> -> blobs/<id>. POSIX
