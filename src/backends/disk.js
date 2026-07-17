@@ -346,8 +346,13 @@ export class DiskBackend {
   // time-of-check/time-of-use class (CWE-367) on the directory path.
   // Resolving #containedDir("meta") right before the sidecar write narrows
   // that window to the microseconds between the realpath and the open.
-  async write(id, source, entry, algo = DEFAULT_DIGEST) {
+  async write(id, source, entry) {
     assertValid(id);
+    // The algorithm rides IN the entry's self-describing digest (a fresh push's
+    // pending "<algo>:" marker, a replicated entry's full "<algo>:<hex>"), so the
+    // policy layer's selection reaches the backend through the documented argument,
+    // never an out-of-band one; a markerless entry defaults to sha256, unchanged.
+    const algo = algoOf(entry.digest) ?? DEFAULT_DIGEST;
     const blobDir = await this.#containedDir("blobs");
     const tmpPath = join(blobDir, id + ".tmp");
     const blobPath = join(blobDir, id);

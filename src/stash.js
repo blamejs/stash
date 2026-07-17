@@ -42,7 +42,7 @@ import { EventEmitter } from "node:events";
 import { Transform, pipeline } from "node:stream";
 
 import { C } from "./constants.js";
-import { DEFAULT_DIGEST, algoOf, assertDigestAlgo, digestHash, finalize } from "./digest.js";
+import { DEFAULT_DIGEST, algoOf, assertDigestAlgo, digestHash, digestMarker, finalize } from "./digest.js";
 import { parse } from "./duration.js";
 import { assertShape, isExpired, make, makeTombstone } from "./entry.js";
 import { IntegrityError, RefClaimed, RefNotFound, SizeExceeded, StashFull } from "./errors.js";
@@ -752,8 +752,14 @@ export class Stash extends EventEmitter {
         if (residual < 0) throw new StashFull();
       }
     }
+    // Self-describing selection: stamp the entry with the chosen algorithm's pending
+    // marker ("<algo>:") so it travels INSIDE the documented write(id, source, entry)
+    // contract -- the backend reads it back (algoOf) and computes that hash. Threading
+    // the algorithm as an out-of-band write() argument would let a custom backend built
+    // to the 3-arg contract silently drop the selection back to the default.
+    entry.digest = digestMarker(this.#digestAlgo);
     const bounded = _boundedSource(chunks, this.#maxSize, residual);
-    const stored = await this.#backend.write(id, bounded, entry, this.#digestAlgo);
+    const stored = await this.#backend.write(id, bounded, entry);
     this.#emit("pushed", stored); // after the write commits (SPEC.md 4.3)
     return stored.id;
   }
@@ -1007,9 +1013,10 @@ export class Stash extends EventEmitter {
     // throws before the backend's rename, leaving nothing on disk (SPEC.md 8). store is
     // silent -- no event on this write.
     const bounded = _verifiedInbound(_boundedSource(chunks, this.#maxSize, residual), entry);
-    // The replicated entry keeps its own algorithm: write re-hashes with the entry's
-    // stored algorithm (self-describing), so a sha3-512 entry lands as sha3-512.
-    await this.#backend.write(ref, bounded, entry, algoOf(entry.digest));
+    // The replicated entry already carries its full self-describing digest, so the
+    // backend re-hashes with the entry's own algorithm (algoOf) and a sha3-512 entry
+    // lands as sha3-512 -- the selection rides in the entry, never an extra argument.
+    await this.#backend.write(ref, bounded, entry);
     // TOCTOU (fragile area, CWE-367): a concurrent pop/drop could dig the grave
     // between the step-2 check and this write landing. The grave must ALWAYS win --
     // a store onto a tombstoned id would resurrect it -- so re-check AFTER the

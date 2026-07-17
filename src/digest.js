@@ -57,6 +57,16 @@ export function finalize(hash, algo) {
   return algo + ":" + hash.digest("hex");
 }
 
+// digestMarker(algo) -> the SELF-DESCRIBING pending digest `"<algo>:"` (the chosen
+// algorithm, hex not yet computed). The policy layer stamps a fresh push's entry
+// with this so the algorithm travels INSIDE the documented `write(id, source, entry)`
+// contract -- a custom backend reads it back with algoOf() and computes that hash,
+// rather than depending on an out-of-band argument it may not honor. Same colon
+// shape as finalize(), so algoOf() parses both a marker and a full stored digest.
+export function digestMarker(algo) {
+  return algo + ":";
+}
+
 // isValidDigest(value) -> boolean. A stored digest is `"<algo>:<hex>"` with a
 // registry algorithm and a hex length that matches its byte count exactly. This
 // is the read-side shape gate (entry.js composes it for the Entry schema) --
@@ -74,9 +84,10 @@ export function isValidDigest(value) {
 
 // algoOf(stored) -> the algorithm named by a stored digest's prefix, or null if
 // the prefix is not a registry algorithm. Drives the SELF-DESCRIBING read: the
-// verify/audit paths hash with the entry's OWN algorithm, never a global one.
-// Tolerates a hex-less `"<algo>:"` (write-side pending marker is not used, but a
-// bare prefix still resolves the algorithm).
+// verify/audit paths hash with the entry's OWN algorithm, never a global one, and
+// the write path reads the requested algorithm off the entry's digest. Resolves a
+// hex-less `"<algo>:"` (the digestMarker a fresh push carries) as well as a full
+// `"<algo>:<hex>"` -- only the prefix before the colon is consulted.
 export function algoOf(stored) {
   if (typeof stored !== "string") return null;
   const colon = stored.indexOf(":");

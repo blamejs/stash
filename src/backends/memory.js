@@ -69,14 +69,17 @@ export class MemoryBackend {
   // holds bytes and moves them between states the policy layer directs.
   #claims = new Map();
 
-  // write(id, source, entry, algo) -> Entry. Consumes the async-iterable source
-  // chunk by chunk, computing size and the `algo` digest as bytes pass (the policy
-  // layer chooses `algo`: the constructor option for push, the entry's own
-  // algorithm for store). Every retained chunk is an OWNED COPY: the store outlives
-  // the push, so a caller that reuses its chunk buffer after a yield (a scratch
-  // buffer, a pooled slab) must not be able to rewrite stored bytes out from under
-  // the recorded digest.
-  async write(id, source, entry, algo = DEFAULT_DIGEST) {
+  // write(id, source, entry) -> Entry. Consumes the async-iterable source chunk by
+  // chunk, computing size and the digest as bytes pass. The algorithm rides IN the
+  // entry -- its digest carries the self-describing algorithm (a fresh push's pending
+  // "<algo>:" marker, a replicated entry's full "<algo>:<hex>") -- so the policy
+  // layer's selection reaches the backend through the documented argument, not an
+  // out-of-band one; a markerless entry defaults to sha256, byte-identical to before.
+  // Every retained chunk is an OWNED COPY: the store outlives the push, so a caller
+  // that reuses its chunk buffer after a yield (a scratch buffer, a pooled slab) must
+  // not be able to rewrite stored bytes out from under the recorded digest.
+  async write(id, source, entry) {
+    const algo = algoOf(entry.digest) ?? DEFAULT_DIGEST;
     const hash = digestHash(algo);
     const chunks = [];
     let size = 0;

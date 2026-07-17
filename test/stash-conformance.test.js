@@ -1959,6 +1959,20 @@ for (const { name, create } of BACKENDS) {
       assert.throws(() => new Stash({ backend: create(), digest: 42 }), TypeError);
       for (const algo of DIGEST_ALGOS) assert.doesNotThrow(() => new Stash({ backend: create(), digest: algo }));
     });
+
+    test("a backend built to the DOCUMENTED write(id, source, entry) signature still honors the digest selection -- it rides in the entry, not an extra argument", async () => {
+      // A custom backend written to the SPEC.md 9 three-argument contract cannot see a
+      // positional arg beyond `entry`. If the chosen algorithm were threaded as a
+      // fourth write() argument, such a backend would silently drop it and hash with
+      // the default -- an operator asking for sha3-512 would get sha256 with no error.
+      // The selection must travel inside the entry the backend is already handed.
+      const inner = create();
+      const documented = wrapBackend(inner, { write: (id, source, entry) => inner.write(id, source, entry) });
+      const stash = new Stash({ backend: documented, digest: "sha3-512" });
+      const ref = await stash.push("bytes under a strictly-three-arg backend");
+      assert.ok((await stash.show(ref)).digest.startsWith("sha3-512:"), "the sha3-512 selection survived a three-argument backend");
+      assert.deepEqual(await drain(await stash.apply(ref)), Buffer.from("bytes under a strictly-three-arg backend"), "and the entry still verifies");
+    });
   });
 }
 

@@ -456,7 +456,7 @@ holds the bytes.
 
 ```js
 {
-  async write(id, readable, entry) {},  // → Entry (with size + digest computed)
+  async write(id, readable, entry) {},  // → Entry; computes size + digest, hashing with the algorithm named by entry.digest's "<algo>:" prefix (default sha256)
   async read(id) {},                    // → Readable
   async claim(id) {},                   // atomic; throws RefClaimed if already claimed
   async restore(id) {},                 // undo a claim
