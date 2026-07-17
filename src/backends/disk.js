@@ -66,24 +66,25 @@ function _absent(err) {
   throw err;
 }
 
-// A rename that replaces an existing name is atomic on every platform, but
-// Windows -- unlike POSIX, which swaps an open file freely -- refuses it with
-// EPERM/EACCES/EBUSY while a concurrent reader holds the destination open (a
-// sidecar stat during a claim storm reads the very file consumeRead rewrites).
-// The contention window is a few event-loop turns, so a bounded backoff clears
-// it; POSIX lands on the first attempt, leaving the retry inert there.
-const RENAME_RETRY_LIMIT = 50;
-const RENAME_RETRY_DELAY_MS = 4;
-async function _renameReplacing(from, to) {
+// A rename/link/unlink is a first-try success on POSIX, but Windows -- which
+// does not swap or drop an open file freely -- refuses it with EPERM/EACCES/
+// EBUSY while a handle on the file lingers: a concurrent reader holding a
+// sidecar or blob open during a claim storm, or the OS lazily releasing a
+// just-closed handle (antivirus, indexer). The contention window is a few
+// event-loop turns, so a bounded backoff clears it; POSIX lands on the first
+// attempt, leaving the retry inert. Only these transient codes retry -- the
+// callback's EEXIST (a name already present) and ENOENT (a name already gone)
+// surface immediately for the caller to interpret.
+const FS_RETRY_LIMIT = 50;
+const FS_RETRY_DELAY_MS = 4;
+const TRANSIENT_FS_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+async function _retryTransient(fn) {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      await rename(from, to);
-      return;
+      return await fn();
     } catch (err) {
-      const transient =
-        err && (err.code === "EPERM" || err.code === "EACCES" || err.code === "EBUSY");
-      if (!transient || attempt >= RENAME_RETRY_LIMIT) throw err;
-      await new Promise((resolve) => setTimeout(resolve, RENAME_RETRY_DELAY_MS));
+      if (!err || !TRANSIENT_FS_CODES.has(err.code) || attempt >= FS_RETRY_LIMIT) throw err;
+      await new Promise((resolve) => setTimeout(resolve, FS_RETRY_DELAY_MS));
     }
   }
 }
@@ -305,7 +306,7 @@ export class DiskBackend {
       } finally {
         await fh.close();
       }
-      await _renameReplacing(tmpPath, finalPath);
+      await _retryTransient(() => rename(tmpPath, finalPath));
     } catch (err) {
       await rm(tmpPath, { force: true });
       throw err;
@@ -526,6 +527,7 @@ export class DiskBackend {
     const claimsDir = await this.#containedDir("claims");
     let entries = 0;
     let bytes = 0;
+    const counted = new Set();
     for (const name of await readdir(metaDir)) {
       if (name.endsWith(".tmp")) continue;
       const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
@@ -539,6 +541,7 @@ export class DiskBackend {
       }
       entries += 1;
       bytes += sidecarSize;
+      counted.add(id); // this id's blob (in blobs/ or claims/) is accounted here
       try {
         bytes += (await lstat(join(blobDir, id))).size; // the blob
       } catch (err) {
@@ -552,7 +555,19 @@ export class DiskBackend {
     }
     let claimed = 0;
     for (const name of await readdir(claimsDir)) {
-      if (!name.endsWith(".tmp")) claimed += 1;
+      if (name.endsWith(".tmp")) continue;
+      if (!isValid(name)) throw new IntegrityError("store layout is damaged");
+      claimed += 1;
+      // A claim whose sidecar is gone (a drop during the claim) has no meta/ entry
+      // to count it, but its blob still occupies the store -- count those bytes
+      // against the footprint, or repeating pop+drop+abandon would hoard claim
+      // blobs that every bounded push sees as an empty store (a maxTotal bypass).
+      if (counted.has(name)) continue;
+      try {
+        bytes += (await lstat(join(claimsDir, name))).size;
+      } catch (err) {
+        _absent(err); // vanished mid-scan (a concurrent restore/commit) -- skip
+      }
     }
     return { entries, bytes, claimed };
   }
@@ -577,7 +592,10 @@ export class DiskBackend {
     // the winner's consumeRead sidecar rewrite -- renaming over an open file is
     // EPERM on Windows. Only the winner reads the sidecar, below.
     try {
-      await link(join(blobDir, id), claimPath);
+      // _retryTransient absorbs a Windows EPERM against the just-pushed blob's
+      // lingering handle; EEXIST (already claimed) and ENOENT (blob gone) pass
+      // straight through to the verdicts below.
+      await _retryTransient(() => link(join(blobDir, id), claimPath));
     } catch (err) {
       // EEXIST: another pop already claimed it. ENOENT: the blob left blobs/ (a
       // committed pop, or a drop) -- disambiguate (fragile area 1), never report
@@ -595,7 +613,7 @@ export class DiskBackend {
       throw err;
     }
     // Won the claim: drop the original name; the blob now lives only at claims/<id>.
-    await rm(join(blobDir, id), { force: true });
+    await _retryTransient(() => rm(join(blobDir, id), { force: true }));
     // link does not touch mtime, so stamp claimedAt explicitly -- otherwise every
     // claim on an older entry would look instantly stale to recovery (fragile
     // area 3). A crash in the window before this leaves the old mtime, which
@@ -615,9 +633,12 @@ export class DiskBackend {
 
   // restore(id) -> void. Return a claimed blob claims/<id> -> blobs/<id>. POSIX
   // rename overwrites silently, so an occupied blobs/<id> would resurrect
-  // destroyed data (monotone violation, SPEC.md 4.2) -- impossible for a
-  // unique-minted id, hence corruption, refused rather than overwritten
-  // (fragile area 7). A missing claim is RefNotFound.
+  // destroyed data (monotone violation, SPEC.md 4.2) -- refused UNLESS the
+  // occupant is the SAME inode as the claim, which is an interrupted claim (a
+  // crash after link() before the original name was removed left a duplicate
+  // link): the entry is already live, so the redundant claim name is dropped. A
+  // different inode is genuine corruption (fragile area 7). A missing claim is
+  // RefNotFound.
   async restore(id) {
     assertValid(id);
     const claimsDir = await this.#containedDir("claims");
@@ -639,15 +660,35 @@ export class DiskBackend {
     }
     const blobDir = await this.#containedDir("blobs");
     const blobPath = join(blobDir, id);
+    let occupant = null;
     try {
-      await lstat(blobPath);
-      throw new IntegrityError("restore target is occupied");
+      occupant = await lstat(blobPath);
     } catch (err) {
-      if (err instanceof IntegrityError) throw err;
-      _absent(err); // blobs/<id> is free -- proceed
+      _absent(err); // blobs/<id> is free -- proceed to the rename below
+    }
+    if (occupant) {
+      // blobs/<id> is occupied. If it is the SAME inode as the claim, the process
+      // died after link() but before removing the original name -- an interrupted
+      // claim leaves a duplicate link. The entry is already live at blobs/<id>, so
+      // complete the recovery by dropping the redundant claim name (never a
+      // rename onto itself). A DIFFERENT inode is a genuine occupied target -- two
+      // blobs for one unique id -- corruption, refused. A claim gone here is
+      // RefNotFound.
+      let claimed;
+      try {
+        claimed = await lstat(join(claimsDir, id));
+      } catch (err) {
+        _absent(err);
+        throw new RefNotFound();
+      }
+      if (occupant.ino === claimed.ino && occupant.dev === claimed.dev) {
+        await rm(join(claimsDir, id), { force: true });
+        return;
+      }
+      throw new IntegrityError("restore target is occupied");
     }
     try {
-      await rename(join(claimsDir, id), blobPath);
+      await _retryTransient(() => rename(join(claimsDir, id), blobPath));
     } catch (err) {
       if (_absent(err)) throw new RefNotFound();
       throw err;
@@ -678,7 +719,10 @@ export class DiskBackend {
     const metaDir = await this.#containedDir("meta");
     await rm(join(metaDir, id + ".json"), { force: true });
     const claimsDir = await this.#containedDir("claims");
-    await rm(join(claimsDir, id), { force: true });
+    // The claimed blob's read stream may have only just closed; on Windows its
+    // handle can linger, so absorb the transient EPERM rather than fail the
+    // commit (force already makes an already-gone blob a no-op -- idempotent).
+    await _retryTransient(() => rm(join(claimsDir, id), { force: true }));
   }
 
   // listClaims() -> { id, claimedAt }[]. The recovery scan's input. Same

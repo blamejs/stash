@@ -10,6 +10,7 @@ import {
   appendFileSync,
   constants,
   existsSync,
+  linkSync,
   lstatSync,
   lutimesSync,
   mkdirSync,
@@ -105,8 +106,25 @@ const CLAIM_STALE_MS = 20 * 60 * 1000;
 // to age the claim). A stale mtime is a prior run's abandoned pop; a fresh one
 // (ageMs: 0) is another live process's. The sidecar stays in meta/ unless
 // `dropSidecar` simulates a commit interrupted after the sidecar unlink.
+// renameSync of a just-written blob can EPERM briefly on Windows while the OS
+// still holds the closed handle (antivirus / indexer / lazy release); POSIX
+// renames on the first try. A bounded retry with a short synchronous pause
+// clears it. Test-only robustness -- the shipped backend has its own retry.
+function _renameSyncRetry(from, to) {
+  const spin = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(from, to);
+      return;
+    } catch (err) {
+      if (err.code !== "EPERM" || attempt >= 50) throw err;
+      Atomics.wait(spin, 0, 0, 4); // ~4ms synchronous pause before the next attempt
+    }
+  }
+}
+
 function plantClaim(root, ref, { ageMs = CLAIM_STALE_MS, dropSidecar = false } = {}) {
-  renameSync(join(root, "blobs", ref), join(root, "claims", ref));
+  _renameSyncRetry(join(root, "blobs", ref), join(root, "claims", ref));
   const when = new Date(Date.now() - ageMs);
   utimesSync(join(root, "claims", ref), when, when);
   if (dropSidecar) rmSync(join(root, "meta", ref + ".json"));
@@ -939,6 +957,24 @@ suite("disk: crash recovery (SPEC 6)", () => {
       "the already-recovered entry serves; a concurrent restore is completion, not failure",
     );
   });
+
+  test("recovery completes an interrupted claim (crash after link, before unlink) -- a duplicate link, not a brick", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("survivor");
+    // The crash window: the blob is hard-linked into claims/ but the original
+    // blobs/ name was never removed -- both names point at one blob. Stamp the
+    // claim stale so recovery acts.
+    linkSync(join(root, "blobs", ref), join(root, "claims", ref));
+    const when = new Date(Date.now() - CLAIM_STALE_MS);
+    lutimesSync(join(root, "claims", ref), when, when);
+    // restore must recognize blobs/<id> as the SAME inode (the interrupted claim),
+    // drop the redundant claim, and keep the entry live -- not brick every op with
+    // a "target occupied" IntegrityError recovery can never clear.
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    assert.deepEqual(await drain(await next.apply(ref)), Buffer.from("survivor"), "the interrupted-claim entry recovered and serves");
+    assert.equal(existsSync(join(root, "claims", ref)), false, "the redundant claim name was dropped");
+    assert.equal(existsSync(join(root, "blobs", ref)), true, "the entry stays live at blobs/");
+  });
 });
 
 suite("disk: drop races the claim lifecycle (SPEC 4.2)", () => {
@@ -1028,6 +1064,23 @@ suite("disk: drop races the claim lifecycle (SPEC 4.2)", () => {
     // a write that makes no progress is a fault, not an infinite loop
     const stuckFh = { write: async () => ({ bytesWritten: 0 }) };
     await assert.rejects(_writeAll(stuckFh, payload, 0), IntegrityError);
+  });
+
+  test("stats() counts a sidecar-less claim blob's bytes so a drop-during-claim cannot bypass maxTotal", async () => {
+    // pop/read + drop + abandon leaves a blob under claims/ with no sidecar in
+    // meta/. Those bytes still occupy the store, so stats() must count them --
+    // otherwise repeating the sequence hoards claim blobs that every bounded push
+    // sees as an empty store, a maxTotal bypass and a disk-fill.
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(5000, 1)], skeleton(id, 2));
+    (await backend.claim(id)).source.destroy(); // blob -> claims/, sidecar in meta/
+    rmSync(join(root, "meta", id + ".json")); // a drop removes the sidecar; the blob lingers in claims/
+    const s = await backend.stats();
+    assert.equal(s.entries, 0, "no live entry -- the sidecar is gone");
+    assert.equal(s.claimed, 1, "the claim is counted");
+    assert.ok(s.bytes >= 5000, "the sidecar-less claim blob's bytes count against the store footprint");
   });
 
   test("a budgeted read racing a concurrent drop leaves no resurrection and no orphan half", async () => {
