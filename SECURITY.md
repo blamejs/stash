@@ -68,7 +68,11 @@ exception, a hang -- is reported as a crash. The harness lives in
   ```
 
   Note that `--permission` does not gate the network on Node 24.x; StashJS
-  opens no sockets regardless.
+  opens no sockets regardless. This is a process-level filesystem allowlist, not
+  per-module isolation: it bounds what the whole process -- StashJS and every
+  dependency loaded in it -- can touch, so a compromised dependency cannot escape
+  to the wider filesystem, but code sharing the process can still read the stash
+  root. Run the store in its own process to isolate it from other in-process code.
 
 - **Let the store own its directory.** The disk backend creates its layout
   `0700`/`0600` and enforces realpath containment itself -- a symlink

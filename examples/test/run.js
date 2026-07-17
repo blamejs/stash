@@ -30,7 +30,7 @@ const ROOT = resolve(EXAMPLES_DIR, "..");
 const EXAMPLES = [
   { file: "lifecycle.js", marker: "lifecycle: every step asserted" },
   { file: "cold-standby.js", marker: "cold-standby: replicated, destroyed, converged" },
-  { file: "permission-flags.js", marker: "permission-flags: the grant is exactly the stash root" },
+  { file: "permission-flags.js", marker: "permission-flags: nothing in the process can touch the filesystem outside its grant" },
 ];
 
 let failures = 0;

@@ -48,7 +48,7 @@ function harvestErrors() {
   return rows;
 }
 
-function renderTable(rows) {
+function renderTable(rows, eol) {
   const lines = [
     BEGIN,
     "",
@@ -58,7 +58,10 @@ function renderTable(rows) {
     "",
     END,
   ];
-  return lines.join("\n");
+  // Join with the README's own line ending so a CRLF working copy (Windows) and
+  // an LF checkout (CI) both round-trip cleanly -- a fixed "\n" here would report
+  // the table as perpetually stale on one platform, the local-vs-CI trap.
+  return lines.join(eol);
 }
 
 function splice(readme, table) {
@@ -71,7 +74,8 @@ function splice(readme, table) {
 }
 
 const readme = readFileSync(README, "utf8");
-const next = splice(readme, renderTable(harvestErrors()));
+const eol = readme.includes("\r\n") ? "\r\n" : "\n";
+const next = splice(readme, renderTable(harvestErrors(), eol));
 const check = process.argv.includes("--check");
 
 if (check) {

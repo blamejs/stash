@@ -9,13 +9,22 @@
 // StashJS is designed to run with a filesystem grant no wider than its own
 // storage root: it never spawns a child, never starts a worker, never opens a
 // socket, and never accepts a file descriptor, so no broader capability is ever
-// needed. A compromised dependency elsewhere in your tree cannot read the
-// stash, and StashJS cannot read anything else.
+// needed.
 //
-// This example proves it, not just documents it. Launched without the flags, it
-// RE-EXECS itself with them (scoped to a throwaway stash root) and then, inside
-// the sandbox, shows two things: a stash write to the granted root SUCCEEDS, and
-// a write to a path OUTSIDE the grant is DENIED by the runtime. If the denial
+// The Node permission model is a PROCESS-LEVEL filesystem allowlist, not
+// per-module isolation. It confines the whole process -- StashJS and every
+// dependency loaded alongside it -- to the granted paths, so a compromised
+// dependency's blast radius is bounded to the stash root and the app's own
+// source, never the wider filesystem (your keys, other apps' data). Code sharing
+// the process CAN still read the stash root; to isolate the stash from other
+// in-process code, run it in its own process. What this example proves is the
+// process boundary: nothing in the process can touch the filesystem outside the
+// grant.
+//
+// It proves it, not just documents it. Launched without the flags, it RE-EXECS
+// itself with them (scoped to a throwaway stash root) and then, inside the
+// sandbox, shows two things: a stash write to the granted root SUCCEEDS, and a
+// write to a path OUTSIDE the grant is DENIED by the runtime. If the denial
 // ever stopped happening, this example would fail -- a fail-closed doc.
 
 import assert from "node:assert/strict";
@@ -55,7 +64,7 @@ if (typeof process.permission !== "undefined") {
   assert.equal(denied, true, "an out-of-scope write must be denied by the permission model");
   console.log("  [sandbox] write outside the grant: DENIED (ERR_ACCESS_DENIED)");
 
-  console.log("\npermission-flags: the grant is exactly the stash root -- nothing wider. OK");
+  console.log("\npermission-flags: nothing in the process can touch the filesystem outside its grant. OK");
 } else {
   // -------------------------------------------------------------------------
   // Top-level launch: no permission model yet. Re-exec self WITH the flags,

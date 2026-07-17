@@ -214,11 +214,15 @@ grants scoped to the store and nothing else:
 node --permission --allow-fs-read=./.stash/* --allow-fs-write=./.stash/* app.js
 ```
 
-A compromised dependency elsewhere in your tree cannot read the stash, and
-StashJS cannot read anything else. (On Node 24.x `--permission` does not gate
-the network; StashJS opens no sockets regardless.) The store never spawns
-child processes, never starts worker threads, and never accepts a file
-descriptor as input, so no wider grant is ever needed.
+The Node permission model is a process-level filesystem allowlist, not per-module
+isolation: it confines the whole process -- StashJS and every dependency loaded
+alongside it -- to the granted paths, so a compromised dependency cannot reach
+the wider filesystem (your keys, other apps' data), only the stash root and the
+app's own source. Code sharing the process can still read the stash root; run the
+stash in its own process to isolate it from other code in the tree. (On Node 24.x
+`--permission` does not gate the network; StashJS opens no sockets regardless.)
+The store never spawns child processes, never starts worker threads, and never
+accepts a file descriptor as input, so no wider grant is ever needed.
 
 ## Documentation
 
