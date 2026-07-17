@@ -1346,6 +1346,21 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual(await stash.list(), [], "not one hostile entry landed");
     });
 
+    test("store() rejects a meta that serializes to a scalar (Date / toJSON-scalar) -- no unreadable entry lands", async () => {
+      // A replicated meta that is not a plain JSON object -- a Date, or a plain object
+      // whose toJSON() returns a scalar -- would be stored (via JSON.stringify) as a
+      // SCALAR and then rejected by every later show()/list() read: a store() that
+      // "succeeds" into an unreadable entry. It is untrusted input, normalized to its
+      // stored form and refused as IntegrityError before anything lands.
+      for (const badMeta of [new Date(), { toJSON: () => 5 }, { toJSON: () => "scalar" }]) {
+        const stash = new Stash({ backend: create() });
+        const id = generate();
+        await assert.rejects(stash.store(makeStoredEntry(id, "bytes", { meta: badMeta }), "bytes"), IntegrityError);
+        assert.equal(await stash.has(id), false, "nothing lands");
+        assert.deepEqual(await stash.list(), [], "the store holds no unreadable entry -- list() does not choke");
+      }
+    });
+
     test("store() accepts the same source set as push (Buffer, string, Uint8Array, Readable, AsyncIterable); a non-source is a TypeError", async () => {
       const bytes = Buffer.from("source shapes");
       for (const src of [bytes, "source shapes", new Uint8Array(bytes), () => Readable.from([bytes]), () => (async function* () { yield bytes; })()]) {

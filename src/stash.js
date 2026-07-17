@@ -927,13 +927,23 @@ export class Stash extends EventEmitter {
   // honor maxSize/maxEntries/maxTotal), then the verified, bounded write.
   async #storeOne(rawEntry, chunks, ref) {
     await this.#recover();
-    // Full shape of the replicated entry (id re-checked plus every other field).
-    assertShape(rawEntry, IntegrityError);
+    // Normalize meta to its STORED form BEFORE validating: the backend persists the entry
+    // via JSON.stringify, so a meta that is not a plain JSON object -- a Date, or a plain
+    // object whose toJSON() returns a scalar -- would serialize to a scalar and then be
+    // rejected by every later show()/list() read: a store() that "succeeds" into an
+    // unreadable entry. Validate the round-tripped value (what actually lands), exactly as
+    // push does; a meta that does not survive the round-trip as a plain object is an
+    // IntegrityError (untrusted replicated input), never a bad write.
+    const metaJson = JSON.stringify(rawEntry.meta);
+    const entry = { ...rawEntry, meta: metaJson === undefined ? undefined : JSON.parse(metaJson) };
+    // Full shape of the replicated entry (id re-checked plus every other field, meta in
+    // its stored form).
+    assertShape(entry, IntegrityError);
 
     // Step 2: a tombstoned id never comes back.
     if (await this.#backend.hasTombstone(ref)) return false;
     // Step 3: an entry already past its deadline is dead on arrival -- no-op, no grave.
-    if (isExpired(rawEntry, Date.now())) return false;
+    if (isExpired(entry, Date.now())) return false;
     // Steps 4/5: reconcile against an existing entry. The stat probe swallows ONLY
     // RefNotFound (absent); corruption or an fs fault propagates, never a false.
     let existing = null;
@@ -943,7 +953,7 @@ export class Stash extends EventEmitter {
       if (!(err instanceof RefNotFound)) throw err;
     }
     if (existing !== null) {
-      if (constantTimeEqual(existing.digest, rawEntry.digest)) return false; // step 4: identical -> idempotent
+      if (constantTimeEqual(existing.digest, entry.digest)) return false; // step 4: identical -> idempotent
       throw new IntegrityError(); // step 5: same id, different digest -> corruption, not a merge
     }
 
@@ -960,9 +970,9 @@ export class Stash extends EventEmitter {
       const stats = await this.#backend.stats();
       if (this.#maxEntries !== null && stats.entries >= this.#maxEntries) throw new StashFull();
       if (this.#maxTotal !== null) {
-        // The replicated sidecar is the caller's entry verbatim (write re-derives the
+        // The replicated sidecar is the entry in its stored form (write re-derives the
         // same size/digest the stream verifies), so its serialized footprint is exact.
-        const sidecarBytes = Buffer.byteLength(JSON.stringify(rawEntry));
+        const sidecarBytes = Buffer.byteLength(JSON.stringify(entry));
         residual = this.#maxTotal - stats.bytes - sidecarBytes;
         if (residual < 0) throw new StashFull();
       }
@@ -974,8 +984,8 @@ export class Stash extends EventEmitter {
     // would otherwise self-certify whatever arrives). An over-bound abort or a mismatch
     // throws before the backend's rename, leaving nothing on disk (SPEC.md 8). store is
     // silent -- no event on this write.
-    const bounded = _verifiedInbound(_boundedSource(chunks, this.#maxSize, residual), rawEntry);
-    await this.#backend.write(ref, bounded, rawEntry);
+    const bounded = _verifiedInbound(_boundedSource(chunks, this.#maxSize, residual), entry);
+    await this.#backend.write(ref, bounded, entry);
     // TOCTOU (fragile area, CWE-367): a concurrent pop/drop could dig the grave
     // between the step-2 check and this write landing. The grave must ALWAYS win --
     // a store onto a tombstoned id would resurrect it -- so re-check AFTER the
