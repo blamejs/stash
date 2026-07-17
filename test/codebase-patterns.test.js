@@ -1132,6 +1132,55 @@ test("wiki port agrees across the Dockerfile, composes, Caddyfile, and release-c
   _report("wiki port agrees across examples/wiki/Dockerfile + composes + Caddyfile + release-container.yml", filtered);
 });
 
+test("every workflow action is github-owned or in the allow-list mirror (else the workflow silently startup_fails)", () => {
+  // class: workflow-action-not-allowlisted
+  // reason: the repository's GitHub Actions policy is `selected` -- an action a
+  // workflow `uses:` that is NOT permitted by the repo's
+  // actions/permissions/selected-actions setting is rejected BEFORE the workflow
+  // can start, producing a `startup_failure` with no job logs. A gate that never
+  // runs is worse than a failing one: it looks absent, not broken, and can lapse
+  // for months unnoticed (the fuzz + release-container workflows did exactly that).
+  // ALLOW mirrors that repo setting: github-owned actions (actions/*, github/*) are
+  // always permitted; every OTHER `uses:` must match a pattern here AND the repo
+  // setting -- keep the two in sync. Adding an action to a workflow means adding it
+  // here and to the repo Actions allow-list, or CI silently stops running it.
+  const ALLOW = [
+    /^ossf\/scorecard-action(\/|@)/,
+    /^google\/clusterfuzzlite\/actions\//,
+    /^docker\//,
+    /^aquasecurity\/trivy-action(\/|@)/,
+    /^sigstore\/cosign-installer(\/|@)/,
+    /^hadolint\/hadolint-action(\/|@)/,
+    /^ludeeus\/action-shellcheck(\/|@)/,
+  ];
+  const dir = path.join(REPO_ROOT, ".github", "workflows");
+  let files;
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml")); }
+  catch (_e) { return; } // no workflows dir: nothing to check
+  const bad = [];
+  for (const f of files) {
+    const lines = _lines(_read(path.join(dir, f)));
+    for (let i = 0; i < lines.length; i++) {
+      const m = /^\s*(?:-\s*)?uses:\s*(['"]?)([^\s'"@]+(?:@[^\s#'"]+)?)/.exec(lines[i]);
+      if (m === null) continue;
+      const ref = m[2];
+      // Only a real GitHub Action reference is owner/repo[/path]@ref -- it always
+      // contains a slash. A bare `uses:` value (a CodeQL query-suite like
+      // `security-extended`) is not an action and the Actions policy never gates it.
+      if (!ref.includes("/")) continue;
+      if (/^\.\//.test(ref)) continue; // a local composite action in this repo
+      if (/^(?:actions|github)\//.test(ref)) continue; // github-owned: always allowed
+      if (ALLOW.some((re) => re.test(ref))) continue;
+      bad.push({
+        file: ".github/workflows/" + f,
+        line: i + 1,
+        content: "action not in the allow-list mirror (would startup_fail under the repo Actions policy): " + ref,
+      });
+    }
+  }
+  _report("every workflow action is github-owned or allow-listed (mirror the repo Actions allow-list setting)", bad);
+});
+
 test("every repo-root file the wiki reads at runtime is COPYed by the wiki Dockerfile", () => {
   // class: wiki-runtime-file-uncopied
   // reason: the container is built from examples/wiki/Dockerfile, which
