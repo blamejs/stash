@@ -549,10 +549,12 @@ export class DiskBackend {
   // stats() -> { entries, bytes, claimed }. The stash-wide limit pre-check reads
   // this aggregate rather than parsing every sidecar: `entries` is the sidecar
   // count (`.tmp` excluded), `bytes` the stored footprint -- each entry's blob
-  // size PLUS its sidecar file size, so a limit sees the real cost and a caller
-  // can't slip past `maxTotal` with tiny blobs and huge `meta`. `claimed` is the
-  // count in claims/ (0 until the claim machinery lands, M5). Loud, not lossy: a
-  // foreign name in meta/ fails the same way list() does. The sidecar is stat'd
+  // size PLUS its sidecar file size, PLUS any sidecar-less claim or orphan blob
+  // still occupying the shelf, so a limit sees the real cost and a caller can't
+  // slip past `maxTotal` with tiny blobs and huge `meta`, nor by hoarding crashed
+  // removes' orphans. `claimed` is the count in claims/ (0 until the claim machinery
+  // lands, M5). Loud, not lossy: a foreign name in ANY layout dir fails the same way
+  // list() does. The sidecar is stat'd
   // BEFORE the entry is counted, so a sidecar that vanished between the readdir
   // and its lstat (a concurrent sweep or drop) is skipped entirely -- not counted
   // as an entry with zero bytes -- keeping `entries` in step with what list()
@@ -600,10 +602,27 @@ export class DiskBackend {
       // against the footprint, or repeating pop+drop+abandon would hoard claim
       // blobs that every bounded push sees as an empty store (a maxTotal bypass).
       if (counted.has(name)) continue;
+      counted.add(name); // account this claim's blob so the blobs/ walk cannot double-count a duplicate-link
       try {
         bytes += (await lstat(join(claimsDir, name))).size;
       } catch (err) {
         _absent(err); // vanished mid-scan (a concurrent restore/commit) -- skip
+      }
+    }
+    // blobs/: an ORPHAN blob -- a valid ref name with no sidecar and no claim (a
+    // crashed remove deletes the sidecar first, leaving the blob) -- still occupies
+    // the store. Count it, or repeated crashed removes hoard orphans every bounded
+    // push sees as free space: the same maxTotal bypass the sidecar-less claim above
+    // closes. A foreign name is loud (like meta/ and claims/); a .tmp is an
+    // in-flight push's partial, skipped.
+    for (const name of await readdir(blobDir)) {
+      if (name.endsWith(".tmp")) continue;
+      if (!isValid(name)) throw new IntegrityError("store layout is damaged");
+      if (counted.has(name)) continue; // already counted via its sidecar or its claim
+      try {
+        bytes += (await lstat(join(blobDir, name))).size;
+      } catch (err) {
+        _absent(err); // vanished mid-scan (a concurrent verify/drop) -- skip
       }
     }
     return { entries, bytes, claimed };

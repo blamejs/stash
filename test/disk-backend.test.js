@@ -1519,6 +1519,23 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     await assert.rejects(stash.stats(), IntegrityError);
   });
 
+  test("stats is loud on a FOREIGN file in blobs/ too, not only meta/", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("ok");
+    writeFileSync(join(root, "blobs", "not-a-ref-name"), "x");
+    await assert.rejects(stash.stats(), IntegrityError);
+  });
+
+  test("stats counts an ORPHANED blob (a crashed remove left it), closing the maxTotal bypass", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("keep"); // a live entry
+    const before = await stash.stats();
+    const orphan = generate(); writeFileSync(bp(root, orphan), Buffer.alloc(1000)); // a valid-ref blob with no sidecar
+    const after = await stash.stats();
+    assert.equal(after.bytes, before.bytes + 1000, "the orphan blob's 1000 bytes are counted in the footprint");
+    assert.equal(after.entries, before.entries, "an orphan blob has no sidecar -- entries unchanged");
+  });
+
   test("has over a corrupt sidecar throws IntegrityError, never answering false (CWE-703)", async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("v");
