@@ -1372,7 +1372,7 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
   });
 
   test("an expired-but-unswept entry is counted by stats until prune reaps it", async () => {
-    const { root, stash } = freshStash();
+    const { stash } = freshStash();
     await stash.push("live");
     await stash.push("dead", { ttl: 0 }); // expired, unswept
     assert.equal((await stash.stats()).entries, 2, "the expired entry still counts physically");

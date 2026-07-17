@@ -416,9 +416,14 @@ export class Stash extends EventEmitter {
     // on Node -- the exact outcome SPEC.md 4.3 exists to prevent): surface it as
     // 'sweepError', NEVER 'error' (an unhandled 'error' crashes the process; a
     // janitor must not be able to take the app down). With zero listeners this is
-    // a no-op -- only 'error' is fatal. The failure routes through `.catch`, so
-    // the in-flight flag always clears -- no try/finally to misread as fail-open.
-    await work.catch((err) => this.emit("sweepError", err));
+    // a no-op -- only 'error' is fatal. A 'sweepError' listener that ITSELF throws
+    // is contained by the trailing `.catch`, so its throw can neither escape as an
+    // unhandledRejection nor leave the guard below unreached -- a stuck guard would
+    // silently disable the janitor for the process's life (every later tick a
+    // no-op). The chain therefore always fulfils, so the flag always clears -- no
+    // try/finally to misread as a fail-open swallow. A throwing sweepError handler
+    // is dropped here (drift-rule-8 tier-3 sink -- the one sanctioned silent drop).
+    await work.catch((err) => this.emit("sweepError", err)).catch(() => {});
     this.#sweepInFlight = null;
   }
 
@@ -970,16 +975,22 @@ export class Stash extends EventEmitter {
     await this.#recover();
     const entries = await this.#backend.list();
     const now = Date.now();
+    // Destroy EVERYTHING first, recording each removal and its cause, and emit only
+    // once the whole clear has committed: a lifecycle listener that throws must not
+    // abort the loop and strand the un-visited entries (an event observes a
+    // completed state change, it never interrupts one -- SPEC.md 4.3). A live entry
+    // is 'dropped' and counts; an expired one is 'expired' and does not (it was
+    // already nonexistent, SPEC.md 4.3, 7).
+    const reaped = [];
     let destroyed = 0;
     for (const entry of entries) {
       const expired = isExpired(entry, now);
       if (await this.#backend.remove(entry.id)) {
-        // per-entry cause: a live entry is 'dropped' and counts; an expired one is
-        // 'expired' and does not (it was already nonexistent, SPEC.md 4.3, 7).
-        this.#emit(expired ? "expired" : "dropped", entry);
+        reaped.push([expired ? "expired" : "dropped", entry]);
         if (!expired) destroyed += 1;
       }
     }
+    for (const [event, entry] of reaped) this.#emit(event, entry);
     return destroyed;
   }
 
@@ -1012,14 +1023,17 @@ export class Stash extends EventEmitter {
     await this.#recover();
     const entries = await this.#backend.list();
     const now = Date.now();
-    let destroyed = 0;
+    // Reap every expired entry FIRST, emit only after: a throwing 'expired'
+    // listener must not abort the reap and strand the rest (this runs on the sweep
+    // timer, where a stranded expired entry would linger until a lazy read finds
+    // it). An entry a concurrent drop removed first fails the remove-witness and is
+    // never double-counted (SPEC.md 4.3).
+    const reaped = [];
     for (const entry of entries) {
-      if (isExpired(entry, now) && await this.#backend.remove(entry.id)) {
-        this.#emit("expired", entry);
-        destroyed += 1;
-      }
+      if (isExpired(entry, now) && await this.#backend.remove(entry.id)) reaped.push(entry);
     }
-    return destroyed;
+    for (const entry of reaped) this.#emit("expired", entry);
+    return reaped.length;
   }
 
   /**

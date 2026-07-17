@@ -1102,6 +1102,22 @@ for (const { name, create } of BACKENDS) {
       }
     });
 
+    test("clear() destroys EVERY entry before emitting -- a throwing listener cannot leave the store half-cleared", async () => {
+      const stash = new Stash({ backend: create() });
+      await stash.push("a"); await stash.push("b"); await stash.push("c");
+      stash.on("dropped", () => { throw new Error("listener boom"); }); // throws on the first emit
+      await assert.rejects(stash.clear(), /listener boom/);
+      assert.deepEqual(await stash.list(), [], "the whole store is cleared despite the throwing listener -- removes finish before events");
+    });
+
+    test("prune() reaps EVERY expired entry before emitting -- a throwing listener cannot strand one", async () => {
+      const stash = new Stash({ backend: create() });
+      await stash.push("x", { ttl: 0 }); await stash.push("y", { ttl: 0 });
+      stash.on("expired", () => { throw new Error("listener boom"); });
+      await assert.rejects(stash.prune(), /listener boom/);
+      assert.deepEqual(await stash.list({ includeExpired: true }), [], "all expired entries reaped despite the throwing listener");
+    });
+
     test("budget exhaustion emits 'dropped' not 'popped'; a pop emits 'popped' exactly once", async () => {
       const stash = new Stash({ backend: create() });
       const budgeted = await stash.push(Buffer.from("bud"), { reads: 1 });
@@ -1130,6 +1146,24 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual(errors, [], "a background failure is 'sweepError', never the fatal 'error'");
       await stash.push("survivor"); // the janitor survived; a later op works
       assert.equal(await stash.prune(), 0);
+      await stash.close();
+    });
+
+    test("a THROWING 'sweepError' listener cannot brick the janitor: the in-flight guard clears and later ticks still sweep", { timeout: 8000 }, async () => {
+      // A sweepError handler that itself throws must not (a) crash the process via
+      // an unhandledRejection, nor (b) leave #sweepInFlight stuck so every later
+      // tick no-ops -- silently disabling the janitor for the process's life. Every
+      // sweep fails and every handler throws; seeing multiple sweepErrors proves the
+      // guard cleared after the first throwing handler and the timer kept sweeping.
+      const inner = create();
+      const backend = wrapBackend(inner, { list: () => { throw new Error("sweep boom"); } });
+      const stash = new Stash({ backend, sweepInterval: 15 });
+      let sweepErrors = 0;
+      const fatal = [];
+      stash.on("error", () => fatal.push("error")); // an unhandled 'error' would crash the process
+      stash.on("sweepError", () => { sweepErrors += 1; throw new Error("handler boom"); });
+      await pollUntil(() => sweepErrors >= 2, { timeout: 6000 }); // >= 2 => the guard cleared and a later tick ran
+      assert.deepEqual(fatal, [], "a throwing sweepError handler never escalates to the fatal 'error'");
       await stash.close();
     });
 
