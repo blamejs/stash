@@ -909,6 +909,36 @@ suite("disk: crash recovery (SPEC 6)", () => {
     const next = new Stash({ backend: new DiskBackend({ root }), claimTimeout: 1 });
     assert.deepEqual(await drain(await next.apply(ref)), Buffer.alloc(65536, 3), "the killed pop's entry recovered and served");
   });
+
+  test("recovery tolerates a claim another instance's start already resolved -- no spurious failure", async () => {
+    // Two Stash instances over one root can list the same stale claim before
+    // either resolves it. A one-shot side effect on stat plays the racing
+    // instance here: it restores the claim in the window between this recovery's
+    // listClaims and its own restore, so the loser's restore finds blobs/<id>
+    // already occupied (IntegrityError) with the claim gone. Recovery must read
+    // that as concurrent COMPLETION -- no stale claim remains -- and let the
+    // now-live entry serve, never abort the loser's first operation.
+    const { root, stash } = freshStash();
+    const ref = await stash.push("survivor");
+    plantClaim(root, ref); // stale claim, sidecar intact
+    const inner = new DiskBackend({ root });
+    let raced = false;
+    const backend = {};
+    for (const m of ["write", "read", "remove", "stat", "list", "stats", "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed"]) {
+      backend[m] = (...a) => inner[m](...a);
+    }
+    backend.stat = async (id) => {
+      const entry = await inner.stat(id);
+      if (!raced) { raced = true; await inner.restore(id); } // the racing instance restores it first
+      return entry;
+    };
+    const loser = new Stash({ backend });
+    assert.deepEqual(
+      await drain(await loser.apply(ref)),
+      Buffer.from("survivor"),
+      "the already-recovered entry serves; a concurrent restore is completion, not failure",
+    );
+  });
 });
 
 suite("disk: drop races the claim lifecycle (SPEC 4.2)", () => {

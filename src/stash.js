@@ -451,10 +451,23 @@ export class Stash {
             if (err instanceof RefNotFound) hasSidecar = false;
             else throw err;
           }
-          if (!hasSidecar || this.#onPopFailure === "burn") {
-            await this.#backend.commit(id);
-          } else {
-            await this.#backend.restore(id);
+          // Resolve the stale claim, tolerating one that ANOTHER process's
+          // recovery over the same root already resolved between our listClaims
+          // and here: two simultaneous starts can list the same stale claim, and
+          // the loser's restore then finds it gone (RefNotFound) or its target
+          // already restored (IntegrityError). Recovery's contract is only that
+          // no stale claim REMAINS, so the verdict is the claim's presence: if it
+          // is gone the work is done -- swallow the fault; a claim still standing
+          // after a failed restore/commit is a real fault, propagated to clear
+          // the memo for a retry.
+          try {
+            if (!hasSidecar || this.#onPopFailure === "burn") {
+              await this.#backend.commit(id);
+            } else {
+              await this.#backend.restore(id);
+            }
+          } catch (err) {
+            if (await this.#backend.isClaimed(id)) throw err;
           }
         }
       })().catch((err) => {
