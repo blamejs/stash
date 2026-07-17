@@ -6,6 +6,7 @@
 // by adding a factory to BACKENDS.
 import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { Readable } from "node:stream";
 
@@ -45,6 +46,35 @@ async function drain(readable) {
   return Buffer.concat(chunks);
 }
 
+// makeStoredEntry(id, bytes, overrides) -- a complete, self-consistent replicated
+// Entry (the shape store() validates): size and digest computed over `bytes` so a
+// clean store lands, with per-test overrides for the reconciliation/hostile cases.
+function makeStoredEntry(id, bytes, overrides = {}) {
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  return {
+    id,
+    size: buf.length,
+    digest: "sha256:" + createHash("sha256").update(buf).digest("hex"),
+    createdAt: 1000,
+    expiresAt: null,
+    reads: null,
+    readsLeft: null,
+    meta: {},
+    ...overrides,
+  };
+}
+
+// syncOnce(from, to, bytesOf) -- the SPEC.md 12 done-when artifact: one direction
+// of a full-scan anti-entropy pass, ~drop-graves-then-store-live, no transport (the
+// topology belongs to the consumer, SPEC.md 3). `bytesOf(id)` yields the payload a
+// live entry replicates (the harness cannot re-read a budgeted entry via apply --
+// that would spend a credit, fragile area -- so the caller supplies the bytes it
+// pushed). Graves first so a store can never re-file an id the other side buried.
+async function syncOnce(from, to, bytesOf) {
+  for (const grave of await from.tombstones()) await to.drop(grave.id);
+  for (const entry of await from.list()) await to.store(entry, bytesOf(entry.id));
+}
+
 // The full backend method set. A probe/corrupting mock wraps a real backend and
 // must implement all of it, or the Stash constructor rejects it (or #recover's
 // listClaims call throws); this array keeps every mock in step with
@@ -52,6 +82,7 @@ async function drain(readable) {
 const BACKEND_METHODS = [
   "write", "read", "remove", "stat", "list", "stats", "verify",
   "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
+  "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone",
 ];
 
 // wrapBackend(inner, overrides) -- a complete backend delegating every method to
@@ -1211,6 +1242,346 @@ for (const { name, create } of BACKENDS) {
       for await (const e of stash) ids.push(e.id);
       assert.deepEqual(ids.sort(), [a, b].sort());
     });
+
+    // -- M7 Replication: store(), tombstones(), the SPEC.md 4.4 order of checks --
+
+    test("store() files a fresh entry verbatim (step 6): identity preserved, show() returns the caller's fields", async () => {
+      const stash = new Stash({ backend: create() });
+      const id = generate();
+      const entry = makeStoredEntry(id, "replicated bytes", { createdAt: 500, expiresAt: null, reads: 3, readsLeft: 2, meta: { k: { nested: 1 } } });
+      assert.equal(await stash.store(entry, "replicated bytes"), true, "a fresh store returns true");
+      const shown = await stash.show(id);
+      assert.equal(shown.createdAt, 500, "createdAt is the caller's, not minted");
+      assert.equal(shown.reads, 3);
+      assert.equal(shown.readsLeft, 2, "a replica honors the REMAINING budget, never resets it");
+      assert.deepEqual(shown.meta, { k: { nested: 1 } });
+      assert.deepEqual(await drain(await stash.apply(id)), Buffer.from("replicated bytes"), "and the bytes round-trip");
+    });
+
+    test("store() refuses a tombstoned id -> false, writes nothing (step 2)", async () => {
+      const stash = new Stash({ backend: create() });
+      const id = await stash.push("live"); // then destroy it -> a grave
+      await stash.drop(id);
+      const entry = makeStoredEntry(id, "resurrect me");
+      assert.equal(await stash.store(entry, "resurrect me"), false, "a tombstoned id never comes back");
+      assert.equal(await stash.has(id), false, "nothing was written");
+    });
+
+    test("store() no-ops an entry already past its expiresAt -> false, no grave (step 3)", async () => {
+      const stash = new Stash({ backend: create() });
+      const id = generate();
+      const entry = makeStoredEntry(id, "dead on arrival", { expiresAt: 1 }); // long past
+      assert.equal(await stash.store(entry, "dead on arrival"), false);
+      assert.equal(await stash.has(id), false, "the dead travel as dead -- nothing stored");
+      assert.deepEqual(await stash.tombstones(), [], "and they get no grave");
+    });
+
+    test("store() is idempotent for an identical live entry (step 4): retry-based sync is free", async () => {
+      const stash = new Stash({ backend: create() });
+      const id = generate();
+      const entry = makeStoredEntry(id, "same bytes");
+      assert.equal(await stash.store(entry, "same bytes"), true, "first store lands");
+      assert.equal(await stash.store(entry, "same bytes"), false, "identical retry is a no-op");
+      assert.equal((await stash.list()).length, 1, "exactly one entry -- no duplicate");
+    });
+
+    test("store() throws IntegrityError on a digest conflict (step 5): the original is untouched", async () => {
+      const stash = new Stash({ backend: create() });
+      const id = generate();
+      await stash.store(makeStoredEntry(id, "original"), "original");
+      const conflicting = makeStoredEntry(id, "different"); // same id, different bytes+digest
+      await assert.rejects(stash.store(conflicting, "different"), (e) => e instanceof IntegrityError && e.code === "EINTEGRITY");
+      assert.deepEqual(await drain(await stash.apply(id)), Buffer.from("original"), "the existing entry still applies to the original bytes");
+    });
+
+    test("store() order is normative: step 2 (tombstoned) beats step 5 (digest conflict) -> false, not IntegrityError", async () => {
+      const stash = new Stash({ backend: create() });
+      const id = await stash.push("held"); await stash.drop(id); // grave for id
+      const conflicting = makeStoredEntry(id, "conflicting bytes");
+      assert.equal(await stash.store(conflicting, "conflicting bytes"), false, "the grave wins over the conflict verdict");
+    });
+
+    test("store() malformed id is InvalidRef before any backend access (step 1)", async () => {
+      const stash = new Stash({ backend: create() });
+      for (const bad of ["../../etc/passwd", "v1_..", "not-a-ref", ""]) {
+        const entry = makeStoredEntry("v1_placeholderplaceholderplaceholderplaceholder", "x");
+        entry.id = bad;
+        await assert.rejects(stash.store(entry, "x"), (e) => e instanceof InvalidRef && e.code === "EBADREF");
+      }
+    });
+
+    test("store() catches transfer corruption: a digest lie and a size lie both IntegrityError, nothing lands", async () => {
+      const stash = new Stash({ backend: create() });
+      const idA = generate();
+      const digestLie = makeStoredEntry(idA, "the real bytes");
+      await assert.rejects(stash.store(digestLie, "DIFFERENT bytes"), IntegrityError); // digest disagrees with the stream
+      assert.equal(await stash.has(idA), false, "a digest mismatch leaves nothing");
+      const idB = generate();
+      const sizeLie = makeStoredEntry(idB, "exact"); sizeLie.size += 1; // digest right, size off by one
+      await assert.rejects(stash.store(sizeLie, "exact"), IntegrityError);
+      assert.equal(await stash.has(idB), false, "a size mismatch leaves nothing");
+    });
+
+    test("store() is SILENT -- zero emissions across the whole event set (echo-suppression, SPEC.md 4.4)", async () => {
+      const stash = new Stash({ backend: create() });
+      const seen = [];
+      for (const ev of ["pushed", "popped", "dropped", "expired"]) stash.on(ev, () => seen.push(ev));
+      await stash.store(makeStoredEntry(generate(), "quiet"), "quiet");
+      assert.deepEqual(seen, [], "a sync daemon must not hear its own writes");
+    });
+
+    test("store() rejects a hostile entry through the shipped path -- shape violations are IntegrityError, nothing written", async () => {
+      const stash = new Stash({ backend: create() });
+      const good = makeStoredEntry(generate(), "x");
+      const hostiles = [
+        { ...good, extra: 1 },                       // extra field
+        (() => { const e = { ...good }; delete e.digest; return e; })(), // missing field
+        { ...good, digest: "sha256:nothex" },        // digest not sha256-hex
+        { ...good, size: -1 },                       // negative size
+        { ...good, reads: 2, readsLeft: null },      // budget incoherence
+        { ...good, reads: 1, readsLeft: 5 },         // readsLeft > reads
+        { ...good, meta: [1, 2] },                   // non-plain meta
+      ];
+      for (const h of hostiles) await assert.rejects(stash.store(h, "x"), IntegrityError);
+      assert.deepEqual(await stash.list(), [], "not one hostile entry landed");
+    });
+
+    test("store() rejects a meta that serializes to a scalar (Date / toJSON-scalar) -- no unreadable entry lands", async () => {
+      // A replicated meta that is not a plain JSON object -- a Date, or a plain object
+      // whose toJSON() returns a scalar -- would be stored (via JSON.stringify) as a
+      // SCALAR and then rejected by every later show()/list() read: a store() that
+      // "succeeds" into an unreadable entry. It is untrusted input, normalized to its
+      // stored form and refused as IntegrityError before anything lands.
+      for (const badMeta of [new Date(), { toJSON: () => 5 }, { toJSON: () => "scalar" }]) {
+        const stash = new Stash({ backend: create() });
+        const id = generate();
+        await assert.rejects(stash.store(makeStoredEntry(id, "bytes", { meta: badMeta }), "bytes"), IntegrityError);
+        assert.equal(await stash.has(id), false, "nothing lands");
+        assert.deepEqual(await stash.list(), [], "the store holds no unreadable entry -- list() does not choke");
+      }
+    });
+
+    test("store() accepts the same source set as push (Buffer, string, Uint8Array, Readable, AsyncIterable); a non-source is a TypeError", async () => {
+      const bytes = Buffer.from("source shapes");
+      for (const src of [bytes, "source shapes", new Uint8Array(bytes), () => Readable.from([bytes]), () => (async function* () { yield bytes; })()]) {
+        const stash = new Stash({ backend: create() });
+        const id = generate();
+        const entry = makeStoredEntry(id, bytes);
+        const source = typeof src === "function" ? src() : src;
+        assert.equal(await stash.store(entry, source), true);
+        assert.deepEqual(await drain(await stash.apply(id)), bytes);
+      }
+      const stash = new Stash({ backend: create() });
+      for (const bad of [42, null, {}, [bytes]]) {
+        await assert.rejects(stash.store(makeStoredEntry(generate(), bytes), bad), TypeError);
+      }
+    });
+
+    test("store() honors the stash limits like push: over maxSize -> SizeExceeded, past maxEntries/maxTotal -> StashFull, nothing lands", async () => {
+      // A replicated entry is untrusted -- it must not slip the configured capacity.
+      { // maxSize: a replica whose bytes exceed the per-entry cap aborts mid-stream.
+        const stash = new Stash({ backend: create(), maxSize: 8 });
+        const id = generate();
+        await assert.rejects(stash.store(makeStoredEntry(id, "waaaay too many bytes"), "waaaay too many bytes"), SizeExceeded);
+        assert.equal(await stash.has(id), false, "an oversized replica leaves nothing behind");
+      }
+      { // maxEntries: the first fills the cap; the replica past it is StashFull.
+        const stash = new Stash({ backend: create(), maxEntries: 1 });
+        assert.equal(await stash.store(makeStoredEntry(generate(), "one"), "one"), true);
+        const id2 = generate();
+        await assert.rejects(stash.store(makeStoredEntry(id2, "two"), "two"), StashFull);
+        assert.equal(await stash.has(id2), false, "the over-cap replica leaves nothing");
+      }
+      { // maxTotal: the blob+sidecar footprint is charged; a big blob past headroom is StashFull.
+        const big = Buffer.alloc(1000, 65);
+        const stash = new Stash({ backend: create(), maxTotal: 1500 });
+        assert.equal(await stash.store(makeStoredEntry(generate(), big), big), true);
+        const id2 = generate();
+        await assert.rejects(stash.store(makeStoredEntry(id2, big), big), StashFull);
+        assert.equal(await stash.has(id2), false);
+      }
+    });
+
+    test("concurrent same-id store()s do not both land: conflicting replicas reconcile, no raw error, ONE consistent entry", async () => {
+      // Two sync workers filing conflicting replicas of one id must not both pass the
+      // reconcile and race the write (memory would last-writer-win; disk would raw-EEXIST
+      // on the shared blob tmp). The insert is serialized per id: exactly one lands, the
+      // rest reconcile (idempotent-false or IntegrityError), and the stored entry is
+      // internally consistent -- never a torn mix of two replicas.
+      { // conflicting digests -> exactly one lands, losers are typed, no raw fs error
+        const stash = new Stash({ backend: create() });
+        const id = generate();
+        const racers = ["alpha", "bravo", "charlie", "delta"].map((b) => stash.store(makeStoredEntry(id, b), b));
+        const settled = await Promise.allSettled(racers);
+        for (const r of settled) {
+          if (r.status === "rejected") {
+            assert.ok(r.reason instanceof IntegrityError, "a losing conflict is IntegrityError, never a raw fs error: " + (r.reason && r.reason.stack));
+          }
+        }
+        assert.equal(settled.filter((r) => r.status === "fulfilled" && r.value === true).length, 1, "exactly one replica lands");
+        const bytes = await drain(await stash.apply(id));
+        const stored = await stash.show(id);
+        assert.equal("sha256:" + createHash("sha256").update(bytes).digest("hex"), stored.digest, "the landed entry is not a torn mix of the racers");
+      }
+      { // identical replicas -> idempotent, exactly one entry, both settle cleanly
+        const stash = new Stash({ backend: create() });
+        const id = generate();
+        const e = makeStoredEntry(id, "same");
+        const settled = await Promise.allSettled([stash.store(e, "same"), stash.store(e, "same"), stash.store(e, "same")]);
+        for (const r of settled) assert.equal(r.status, "fulfilled", "identical concurrent stores settle cleanly");
+        assert.equal(settled.filter((r) => r.value === true).length, 1, "one lands");
+        assert.ok(settled.filter((r) => r.value === false).length >= 1, "the rest are idempotent no-ops");
+        assert.equal((await stash.list()).length, 1, "exactly one entry");
+        assert.deepEqual(await drain(await stash.apply(id)), Buffer.from("same"));
+      }
+    });
+
+    test("two stores converge (the done-when): a pop on A never resurrects after syncing B back", async () => {
+      const A = new Stash({ backend: create() });
+      const B = new Stash({ backend: create() });
+      const payload = Buffer.from("bytes to replicate");
+      const id = await A.push(payload);
+      const bytesOf = () => Buffer.from(payload); // the harness replays the pushed payload (never re-reads a budgeted entry)
+      await syncOnce(A, B, bytesOf);                       // B now holds the copy
+      assert.deepEqual(await drain(await B.apply(id)), payload, "B replicated it");
+      await drain(await A.pop(id));                         // A pops it -> a 'pop' grave on A
+      await syncOnce(B, A, bytesOf);                        // B tries to re-file its copy onto A
+      assert.deepEqual(await A.list(), [], "A stays empty -- the grave refused the re-file");
+      await assert.rejects(A.show(id), RefNotFound);
+      const graves = await A.tombstones();
+      assert.equal(graves.length, 1);
+      assert.equal(graves[0].id, id);
+      assert.equal(graves[0].cause, "pop", "the grave records how it died");
+      await syncOnce(A, B, bytesOf);                        // and A's grave propagates to B
+      assert.deepEqual(await B.list(), [], "both stores converge to empty");
+    });
+
+    test("a grave propagates through an EMPTY replica: a node that never held the id adopts the grave, refusing a later resurrection", async () => {
+      // Reconciliation propagates graves by drop()-ing each of the other node's grave ids
+      // (SPEC.md 4.4). A node that never held the id must still ADOPT the grave, or a later
+      // sync from a stale node resurrects the entry the destruction removed.
+      const A = new Stash({ backend: create() });
+      const B = new Stash({ backend: create() }); // empty -- never holds the id
+      const C = new Stash({ backend: create() }); // stale -- still has a live copy
+      const payload = Buffer.from("burned on A");
+      const id = await A.push(payload);
+      assert.equal(await C.store(makeStoredEntry(id, payload), payload), true, "C holds a live copy");
+      await drain(await A.pop(id)); // A pops it -> a grave on A
+      // Sync A -> B: propagate A's grave to the EMPTY B (the done-when's drop loop).
+      for (const g of await A.tombstones()) assert.equal(await B.drop(g.id), false, "nothing live on B, but the grave is adopted");
+      assert.equal((await B.tombstones()).length, 1, "B adopted the grave though it never held the id");
+      // A stale C now tries to re-file its live copy onto B -- the propagated grave refuses it.
+      assert.equal(await B.store(makeStoredEntry(id, payload), payload), false, "the propagated grave refuses the resurrection");
+      await assert.rejects(B.show(id), RefNotFound);
+    });
+
+    test("expiry writes NO grave (lazy read path AND sweeper); clear writes one per live entry; drop of an absent id STILL writes a grave (propagation)", async () => {
+      const s1 = new Stash({ backend: create() });
+      const dead = await s1.push("dead", { ttl: 0 });
+      await s1.show(dead).catch(() => {}); // lazy read reaps the expired entry
+      assert.deepEqual(await s1.tombstones(), [], "an expired entry leaves no grave -- its terms travel with it");
+
+      const s2 = new Stash({ backend: create() });
+      await s2.push("a"); await s2.push("b");
+      assert.equal(await s2.clear(), 2);
+      const graves = await s2.tombstones();
+      assert.equal(graves.length, 2, "clear writes one grave per live entry");
+      assert.ok(graves.every((g) => g.cause === "clear"));
+
+      const s3 = new Stash({ backend: create() });
+      const absent = generate();
+      assert.equal(await s3.drop(absent), false, "no LIVE entry was destroyed");
+      const g3 = await s3.tombstones();
+      assert.equal(g3.length, 1, "but the id is tombstoned -- a grave propagates through a node that never held it");
+      assert.equal(g3[0].id, absent);
+      assert.equal(g3[0].cause, "drop");
+    });
+
+    test("concurrent same-id destroyers converge to ONE grave with a clean verdict -- no raw fs error escapes", async () => {
+      // drop and clear take no claim, so drop||drop and drop||pop bury one id at once
+      // (the claim only serializes pop-vs-pop). The grave write must be first-write-wins
+      // WITHOUT a shared-tmp collision surfacing a raw, path-bearing fs error out of the
+      // public verb, and WITHOUT clobbering the first grave's cause. Fan several racers
+      // at one id to force the overlap window: every settle is clean, exactly one grave
+      // stands, and the entry is gone. (On disk pre-fix, a loser threw a raw EEXIST.)
+      const popDrain = async (s, id) => {
+        try { await drain(await s.pop(id)); }
+        catch (e) { if (!(e instanceof RefClaimed) && !(e instanceof RefNotFound)) throw e; }
+      };
+      const scenarios = [
+        (s, id) => [s.drop(id), s.drop(id), s.drop(id), s.drop(id)],
+        (s, id) => [popDrain(s, id), s.drop(id), s.drop(id)],
+      ];
+      for (const racers of scenarios) {
+        const stash = new Stash({ backend: create() });
+        const id = await stash.push("bytes to bury once");
+        const settled = await Promise.allSettled(racers(stash, id));
+        for (const r of settled) {
+          if (r.status === "rejected") {
+            assert.ok(r.reason instanceof StashError, "a losing racer rejects TYPED, never a raw fs error: " + (r.reason && r.reason.stack));
+          }
+        }
+        assert.equal(await stash.has(id), false, "the entry is destroyed exactly once");
+        const graves = await stash.tombstones();
+        assert.equal(graves.length, 1, "exactly one grave stands (first-write-wins, no clobber)");
+        assert.equal(graves[0].id, id);
+        assert.ok(["pop", "drop", "clear", "spent"].includes(graves[0].cause), "the grave records a valid cause");
+      }
+    });
+
+    test("a budgeted entry replicated to both stores is eventually-once: each serves one drain, both bury it 'spent'", async () => {
+      const A = new Stash({ backend: create() });
+      const B = new Stash({ backend: create() });
+      const payload = Buffer.from("read once per replica");
+      const id = generate();
+      const entry = makeStoredEntry(id, payload, { reads: 1, readsLeft: 1 });
+      assert.equal(await A.store(entry, payload), true);
+      assert.equal(await B.store(entry, payload), true); // the SAME budgeted entry on both
+      assert.deepEqual(await drain(await A.apply(id)), payload, "A serves its one read");
+      assert.deepEqual(await drain(await B.apply(id)), payload, "B serves its one read too (eventually-once)");
+      for (const s of [A, B]) {
+        const graves = await s.tombstones();
+        assert.equal(graves.length, 1);
+        assert.equal(graves[0].cause, "spent", "a spent budget buries the entry 'spent'");
+      }
+    });
+
+    test("tombstones survive prune() until tombstoneTtl, then are pruned; after pruning store() of that id succeeds (the floor-rule consequence)", async () => {
+      const stash = new Stash({ backend: create(), tombstoneTtl: 40 });
+      const id = await stash.push("bury me");
+      await stash.drop(id); // a grave
+      await stash.prune();
+      assert.equal((await stash.tombstones()).length, 1, "a fresh grave survives prune()");
+      await pollUntil(async () => { await stash.prune(); return (await stash.tombstones()).length === 0; }, { timeout: 3000 });
+      assert.equal(await stash.store(makeStoredEntry(id, "reborn"), "reborn"), true, "past the ttl, the id can be stored again -- the documented floor rule");
+    });
+
+    test("tombstoneTtl: null never prunes -- a grave survives arbitrarily many prune() calls", async () => {
+      const stash = new Stash({ backend: create(), tombstoneTtl: null });
+      const id = await stash.push("permanent grave");
+      await stash.drop(id);
+      for (let i = 0; i < 5; i += 1) await stash.prune();
+      assert.equal((await stash.tombstones()).length, 1, "null tombstoneTtl keeps the grave forever");
+    });
+
+    test("the backend tombstone contract: first-write-wins, and absent/traversal answers on the subpath surface", async () => {
+      const backend = create();
+      const id = generate();
+      await backend.writeTombstone(id, { id, destroyedAt: 1000, cause: "drop" });
+      await backend.writeTombstone(id, { id, destroyedAt: 9999, cause: "pop" }); // a newer write must NOT overwrite
+      const [g] = await backend.listTombstones();
+      assert.equal(g.destroyedAt, 1000, "first-write-wins -- the original destroyedAt stands");
+      assert.equal(g.cause, "drop");
+      assert.equal(await backend.hasTombstone(generate()), false, "an absent id has no grave");
+      assert.deepEqual(await backend.listTombstones().then((l) => l.filter((t) => t.id !== id)), []);
+      assert.equal(await backend.removeTombstone(generate()), false, "removing an absent grave is false");
+      assert.equal(await backend.removeTombstone(id), true, "removing a held grave is true");
+      for (const bad of ["../escape", "v1_..", "not-a-ref"]) {
+        await assert.rejects(backend.hasTombstone(bad), InvalidRef);
+        await assert.rejects(backend.writeTombstone(bad, { id: bad, destroyedAt: 1, cause: "drop" }), InvalidRef);
+        await assert.rejects(backend.removeTombstone(bad), InvalidRef);
+      }
+    });
   });
 }
 
@@ -1522,6 +1893,11 @@ suite("ref validation precedes storage access", () => {
       await assert.rejects(stash.apply(hostile), InvalidRef);
       await assert.rejects(stash.show(hostile), InvalidRef);
       await assert.rejects(stash.drop(hostile), InvalidRef);
+      // store()'s replicated entry is ref-shaped input too: its id must clear the
+      // whitelist BEFORE #recover() (which lists claims and can restore/burn stale
+      // ones -- mutating backend I/O) ever runs. store is the one ref-consuming verb
+      // that used to invert this, scanning the backend before validating the id.
+      await assert.rejects(stash.store({ id: hostile }, "bytes"), InvalidRef);
     }
     assert.deepEqual(calls, []);
   });
@@ -1570,12 +1946,12 @@ suite("config-time failures", () => {
     assert.throws(() => new Stash({ backend: { write() {} } }), TypeError);
   });
 
-  test("spec options whose milestone has not shipped throw, never sit unenforced", () => {
-    const backend = new MemoryBackend();
-    for (const key of ["tombstoneTtl"]) {
-      assert.throws(() => new Stash({ backend, [key]: "1h" }), TypeError);
-    }
+  test("an unknown constructor option is a config-time TypeError (every spec'd option now ships)", () => {
+    // tombstoneTtl -- the last spec'd-but-unimplemented option -- landed with M7, so
+    // the reject-unimplemented mechanism retired; the option surface is complete.
     assert.throws(() => new Stash({ backend: new MemoryBackend(), unknownKnob: 1 }), TypeError);
+    // tombstoneTtl is now ACCEPTED (its enforcement vectors live in the M7 suite).
+    assert.doesNotThrow(() => new Stash({ backend: new MemoryBackend(), tombstoneTtl: "1h" }));
   });
 
   test("pop options are validated at construction: onPopFailure enum, claimTimeout duration, reads a positive integer", async () => {

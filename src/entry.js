@@ -131,6 +131,52 @@ export function make(id, meta, ttlMs = null, reads = null) {
   };
 }
 
+// The tombstone schema -- a grave's canonical shape (SPEC.md 4.4), defined ONCE
+// alongside the Entry it outlives, so the disk sidecar reader and tombstones()
+// validate through one home. A tombstone says only "never accept this id again":
+// id + when + how, and NOTHING that describes the body -- no digest, no size, no
+// meta -- because recording what the entry was would leak the content the
+// destruction removed. `CAUSES` is the frozen set of early-destruction paths
+// (SPEC.md 4.4); expiry writes no grave, so it is not among them.
+export const TOMBSTONE_FIELDS = Object.freeze(["id", "destroyedAt", "cause"]);
+export const CAUSES = Object.freeze(["pop", "drop", "clear", "spent"]);
+
+// makeTombstone(id, cause) -> a fresh tombstone. `destroyedAt` is stamped from
+// the one clock read at the single construction site (the Entry.make precedent),
+// so a grave's timestamp is never assembled from two reads. The write direction
+// of the tombstone shape; the milestone module never hand-rolls a `{ id,
+// destroyedAt, cause }` literal (the field-literal shape is detector-enforced).
+// @enforced-by guard-shape-reinlined
+// @guard-shape destroyedAt\s*:
+export function makeTombstone(id, cause) {
+  return { id, destroyedAt: Date.now(), cause };
+}
+
+// assertTombstoneShape(value, ErrorClass) -> value | throws. The read direction:
+// a STORED grave (a disk tombstone sidecar) is untrusted bytes -- exactly the
+// TOMBSTONE_FIELDS set, an id that passes the ref whitelist, a `destroyedAt` safe
+// non-negative integer, and a `cause` in the frozen set. Extra keys, missing
+// keys, a type drift, or an unknown cause are the caller's verdict class. Messages
+// name the failing FIELD, never a value: field names are contract, values (the id
+// especially) are capabilities.
+// @enforced-by behavioral -- the hostile-tombstone battery drives every rejection
+//   branch through the shipped tombstones()/store() path; the shape has no
+//   rename-proof code signature apart from makeTombstone's, which the guard owns.
+export function assertTombstoneShape(value, ErrorClass) {
+  if (!_isPlainObject(value)) throw new ErrorClass("stored tombstone rejected: not an object");
+  const keys = Object.keys(value);
+  if (keys.length !== TOMBSTONE_FIELDS.length) throw new ErrorClass("stored tombstone rejected: field set");
+  for (const field of TOMBSTONE_FIELDS) {
+    if (!(field in value)) throw new ErrorClass("stored tombstone rejected: field set");
+  }
+  if (!isValid(value.id)) throw new ErrorClass("stored tombstone rejected: id");
+  if (!_isCount(value.destroyedAt)) throw new ErrorClass("stored tombstone rejected: destroyedAt");
+  if (typeof value.cause !== "string" || !CAUSES.includes(value.cause)) {
+    throw new ErrorClass("stored tombstone rejected: cause");
+  }
+  return value;
+}
+
 // spend(entry) -> a COPY with `readsLeft` decremented by one. The monotone
 // read-budget debit (SPEC.md 4.1, 4.2), owned by the schema home so no backend
 // hand-rolls `readsLeft` arithmetic -- the guard-shape tripwire keeps the field

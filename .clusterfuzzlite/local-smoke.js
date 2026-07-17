@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { C } from "../src/constants.js";
 import { fuzz as fuzzRef } from "./fuzz_ref.js";
 import { fuzz as fuzzSidecar, ROOT as SIDECAR_ROOT } from "./fuzz_sidecar.js";
+import { fuzz as fuzzTombstone, ROOT as TOMBSTONE_ROOT } from "./fuzz_tombstone.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -53,6 +54,21 @@ const EXPECTED = {
     "type-drift.json": "EINTEGRITY",
     "negative-size.json": "EINTEGRITY",
     "budget-incoherent.json": "EINTEGRITY",
+    "proto-field.json": "EINTEGRITY",
+    "huge-field.json": "EINTEGRITY",
+  },
+  fuzz_tombstone: {
+    "valid.json": "listed",
+    "truncated.json": "EINTEGRITY",
+    "null.json": "EINTEGRITY",
+    "nested.json": "EINTEGRITY",
+    "wrong-id.json": "EINTEGRITY",
+    "extra-field.json": "EINTEGRITY",
+    "missing-field.json": "EINTEGRITY",
+    "type-drift.json": "EINTEGRITY",
+    "negative-destroyedAt.json": "EINTEGRITY",
+    "bad-cause.json": "EINTEGRITY",
+    "traversal-id.json": "EINTEGRITY",
     "proto-field.json": "EINTEGRITY",
     "huge-field.json": "EINTEGRITY",
   },
@@ -135,18 +151,32 @@ async function runGenerated() {
     await verdictOf(fuzzSidecar, "fuzz_sidecar/<generated 64KiB+1>", Buffer.alloc(64 * C.BYTES.KIB + 1, 0x7b)),
     "EINTEGRITY",
   );
+  // A grave of noise is not JSON.
+  check(
+    "fuzz_tombstone/<generated 256B noise>",
+    await verdictOf(fuzzTombstone, "fuzz_tombstone/<generated 256B noise>", prngBytes(256, 3)),
+    "EINTEGRITY",
+  );
+  // One byte over the 1 KiB grave bound: refused unread regardless of content.
+  check(
+    "fuzz_tombstone/<generated 1KiB+1>",
+    await verdictOf(fuzzTombstone, "fuzz_tombstone/<generated 1KiB+1>", Buffer.alloc(C.BYTES.KIB + 1, 0x7b)),
+    "EINTEGRITY",
+  );
 }
 
 async function main() {
   await runSeeds("fuzz_ref", fuzzRef);
   await runSeeds("fuzz_sidecar", fuzzSidecar);
+  await runSeeds("fuzz_tombstone", fuzzTombstone);
   await runGenerated();
   rmSync(SIDECAR_ROOT, { recursive: true, force: true });
+  rmSync(TOMBSTONE_ROOT, { recursive: true, force: true });
   if (failures > 0) {
     console.error("fuzz-target smoke: " + failures + " of " + checks + " checks failed");
     process.exit(1);
   }
-  console.log("fuzz-target smoke: " + checks + " checks ok (both targets load and discriminate)");
+  console.log("fuzz-target smoke: " + checks + " checks ok (all targets load and discriminate)");
 }
 
 main().catch((err) => {

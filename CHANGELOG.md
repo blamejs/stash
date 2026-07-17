@@ -2,6 +2,86 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 0.1.9 — 2026-07-17
+
+store(entry, source) is the replication-grade insert. The caller supplies the
+complete Entry -- id, createdAt, expiresAt, reads, readsLeft, digest, meta --
+and it lands verbatim, with the bytes verified against the supplied digest
+and size as they stream so transfer corruption is caught on the way in and
+nothing lands. It proceeds in a fixed order: a malformed id is InvalidRef, a
+tombstoned id returns false and writes nothing, an already-expired entry is a
+no-op, an identical live entry is an idempotent no-op (retrying a sync is
+free), a same-id-different-digest is an IntegrityError, and otherwise it
+writes. store() emits no event, so a sync daemon never echoes its own writes.
+Every early destruction -- pop, drop, clear, a spent read budget -- now
+writes a tombstone of { id, destroyedAt, cause } and nothing that describes
+the body; expiry writes none, because an entry's terms travel with it.
+tombstones() returns the graves for reconciliation: feed each id to a
+replica's drop() and two stores converge with no resurrection. tombstoneTtl
+(default '30d', null never prunes) reaps a grave once older than the window,
+riding the existing sweep -- with the floor rule the deployment owns: keep it
+comfortably above the longest gap between reconciliations.
+
+### Added
+
+- `store(entry, source)` -- the replication-grade insert (a git `stash
+  store`). It preserves an existing identity where `push` mints a new one:
+  the caller supplies the complete `Entry` and it lands verbatim, honoring
+  the REMAINING read budget rather than resetting it. The bytes are verified
+  against the supplied `digest` AND `size` as they stream (in-stream, never
+  write-then-check), so a transfer that corrupted the bytes throws
+  `IntegrityError` and leaves nothing behind. Six checks, in a normative
+  order: `1` malformed id -> `InvalidRef` (before any storage access); `2`
+  tombstoned id -> `false`, writes nothing; `3` already-expired -> `false`;
+  `4` identical live entry (same id, same digest) -> `false` (a retry-based
+  sync is free); `5` same id, different digest -> `IntegrityError`
+  (corruption, not a merge; the existing entry is untouched); `6` otherwise
+  write. The replicated entry is untrusted input -- a shape violation, a
+  non-hex digest, an incoherent read budget, or a non-plain `meta` is a typed
+  `IntegrityError`, never a partial write. `store` emits NO event, so a sync
+  daemon never hears its own writes back.
+- Tombstones: every early destruction -- `pop`, `drop`, `clear`, or a read
+  that spends the last of a budget -- writes a grave of `{ id, destroyedAt,
+  cause }` (cause is `'pop'` / `'drop'` / `'clear'` / `'spent'`) and nothing
+  that describes the destroyed entry -- no digest, size, or meta -- so a
+  grave can never leak the content the destruction removed. A destroyed id
+  never comes back within the tombstone window: `store()` refuses a
+  tombstoned id, and two replicas converge because their graves propagate.
+  EXPIRY writes no tombstone -- an entry's terms travel with it, and every
+  replica reaches the same deadline on its own clock.
+- `tombstones()` -> `{ id, destroyedAt, cause }[]` -- the graves, for
+  reconciliation. A query: it inspects the shelf, never moves bytes, and is
+  loud over a corrupt grave. The done-when it enables: for each grave on one
+  store, `drop()` the id on the other; then `store()` each live entry across;
+  the two stores converge -- pops don't resurrect, read budgets converge, and
+  a repeated `store` is a no-op.
+- `tombstoneTtl` constructor option (default `'30d'`; a duration string, a
+  number of ms, or `null` to never prune) -- a grave is pruned once older
+  than this, riding the existing `prune()` / `sweepInterval` sweep, no second
+  timer. The one setting a deployment must get right: it must comfortably
+  exceed the longest gap between reconciliations, or a forgotten tombstone
+  lets an id come back. StashJS cannot know the sync schedule, so it
+  documents this floor rather than enforcing it.
+- The `backends/*` storage contract gains `writeTombstone` (first-write-wins
+  -- an existing grave is never overwritten, even under concurrent
+  destruction of one id), `hasTombstone`, `listTombstones`, and
+  `removeTombstone`; both shipped backends implement them, and all four are
+  now required backend methods. On disk a grave is one `tombstones/<id>.json`
+  sidecar -- atomic, `0600`, realpath-contained, size-bounded before parse,
+  and refused if a symlink is planted where it belongs.
+- `verify()` now audits grave CONTENTS, not just names: a corrupt tombstone
+  (bit rot, tampering, an id that mismatches its filename) is a
+  `corrupt-tombstone` finding, and `verify({ repair: true })` removes it --
+  so a rotten grave that would otherwise wedge `tombstones()` and `prune()`
+  has a recovery path, the same one a corrupt entry sidecar already had.
+
+### Changed
+
+- The `tombstoneTtl` constructor option -- the last spec'd option a shipped
+  milestone had not yet implemented -- is now enforced rather than refused.
+  Every option `SPEC.md` defines is now accepted and applied; an unknown
+  option is still a config-time `TypeError`.
+
 ## 0.1.8 — 2026-07-17
 
 verify() walks the store and reports physical damage -- a bit-flipped blob, a

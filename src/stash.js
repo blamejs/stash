@@ -44,29 +44,30 @@ import { Transform, pipeline } from "node:stream";
 
 import { C } from "./constants.js";
 import { parse } from "./duration.js";
-import { isExpired, make } from "./entry.js";
+import { assertShape, isExpired, make, makeTombstone } from "./entry.js";
 import { IntegrityError, RefClaimed, RefNotFound, SizeExceeded, StashFull } from "./errors.js";
 import { assertValid, constantTimeEqual, generate } from "./ref.js";
 import { parse as parseSize } from "./size.js";
 import { oneOf, options, plainObject } from "./validate.js";
 
-// Constructor options the spec defines but a shipped milestone does not yet
-// implement. Accepting one silently would fail open (an operator who set
-// maxSize believes it is enforced), so each throws at config time until its
-// milestone lands (validate.options enforces it). SPEC.md 12 is the
-// delivery plan; the policy layer names the lists, validate owns the
-// mechanism.
-const UNIMPLEMENTED_OPTIONS = [
-  "tombstoneTtl",
-];
-
+// No push option is spec'd-but-unimplemented; the constructor's last such option
+// (tombstoneTtl) landed with M7, so the reject-unimplemented mechanism retires --
+// every spec'd option is now enforced (SPEC.md 12's delivery plan is complete for
+// the config surface). A future breaking option would re-introduce a list here.
 const UNIMPLEMENTED_PUSH_OPTIONS = [];
+
+// tombstoneTtl default: a grave is pruned after this window (SPEC.md 4.4). It must
+// comfortably exceed the longest gap between reconciliations, or a forgotten
+// tombstone lets an id come back -- the floor rule the deployment owns (documented,
+// not enforceable: StashJS cannot know the sync schedule). `null` never prunes.
+const DEFAULT_TOMBSTONE_TTL = "30d";
 
 // The backend surface Stash drives today. Validated at construction so a
 // misassembled backend fails at boot, not at first push.
 const REQUIRED_BACKEND_METHODS = [
   "write", "read", "remove", "stat", "list", "stats", "verify",
   "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
+  "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone",
 ];
 
 // onPopFailure resolves a pop (or a budgeted read) that fails to fully drain
@@ -149,6 +150,31 @@ function _verifiedStream(entry, source, verdict) {
     }
   });
   return verify;
+}
+
+// _verifiedInbound(source, entry) -- store()'s write-side digest+size gate. The
+// backend recomputes the digest and OVERWRITES stored.digest with it, so an
+// unverified store would self-certify whatever bytes arrive (transfer corruption
+// recorded as truth -- fail-open, CWE-345). This wraps the replicated source so the
+// digest and byte count are checked against the SUPPLIED entry as the bytes stream:
+// the throw lands AFTER the last chunk but BEFORE the backend's post-loop
+// rename/sidecar, so a mismatch leaves nothing on disk (the failed-push discipline,
+// SPEC.md 8). In-stream, never write-then-check -- a post-hoc check would leave the
+// corrupt entry live and listed in the window between the write and the check.
+async function* _verifiedInbound(source, entry) {
+  const hash = createHash("sha256");
+  let size = 0;
+  for await (const chunk of source) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    hash.update(buf);
+    size += buf.length;
+    yield buf;
+  }
+  // Size FIRST: a lying `size` with a matching digest would diverge the sidecars
+  // across replicas even though the bytes are identical. Both are IntegrityError --
+  // untrusted replicated bytes that disagree with their own manifest.
+  if (size !== entry.size) throw new IntegrityError();
+  if (!constantTimeEqual("sha256:" + hash.digest("hex"), entry.digest)) throw new IntegrityError();
 }
 
 // Run a claim-resolution hook, swallowing its own failure: a restore/burn that
@@ -324,6 +350,7 @@ export class Stash extends EventEmitter {
   #maxEntries = null;
   #onPopFailure = "restore";
   #claimTimeoutMs = 0;
+  #tombstoneTtlMs = null;
   // The lazy crash-recovery scan, memoized: resolved on the first public verb
   // (never in the constructor -- constructors do no I/O), mirroring the disk
   // backend's #init retry-on-failure memo. The memo is re-run once a claim it
@@ -331,12 +358,17 @@ export class Stash extends EventEmitter {
   // is the earliest such deadline (Infinity when the scan resolved everything).
   #recovered = null;
   #nextRecoverAt = 0;
+  // In-flight store() chains, keyed by id: store() serializes concurrent inserts
+  // of the SAME id so two replicas cannot both pass the reconcile and race the
+  // write (SPEC.md 4.4 write-once). The store is single-writer-per-root, so this
+  // in-process gate is the whole concurrency domain; a key is dropped once nothing
+  // further is chained behind it, so the map is bounded by live same-id races.
+  #storeChains = new Map();
 
   constructor(opts) {
     super();
     options(opts, "new Stash", {
-      allowed: ["backend", "ttl", "sweepInterval", "maxSize", "maxEntries", "maxTotal", "onPopFailure", "claimTimeout"],
-      unimplemented: UNIMPLEMENTED_OPTIONS,
+      allowed: ["backend", "ttl", "sweepInterval", "maxSize", "maxEntries", "maxTotal", "onPopFailure", "claimTimeout", "tombstoneTtl"],
     });
     const backend = opts.backend;
     if (backend === null || typeof backend !== "object") {
@@ -384,6 +416,11 @@ export class Stash extends EventEmitter {
     if (this.#claimTimeoutMs === null || this.#claimTimeoutMs <= 0) {
       throw new TypeError("new Stash: claimTimeout must be a positive duration");
     }
+    // Tombstone lifetime: a grave is pruned once older than this (SPEC.md 4.4),
+    // riding the same prune()/sweeper as expiry -- no second timer. An explicit
+    // null never prunes (graves live forever); an absent option inherits '30d'.
+    const tombstoneTtl = opts.tombstoneTtl === undefined ? DEFAULT_TOMBSTONE_TTL : opts.tombstoneTtl;
+    this.#tombstoneTtlMs = parse(tombstoneTtl, "tombstoneTtl");
     const sweepMs = parse(opts.sweepInterval, "sweepInterval");
     if (sweepMs !== null) {
       if (sweepMs <= 0 || sweepMs > C.TIME.MAX_TIMER_MS) {
@@ -519,6 +556,13 @@ export class Stash extends EventEmitter {
           if (err instanceof RefNotFound) hasSidecar = false;
           else throw err;
         }
+        // A grave already standing for this id means a TERMINAL #destroy (a pop or a
+        // spent budget) wrote it and then crashed BEFORE its commit: the destruction
+        // was decided, so recovery FINISHES it (commit) and never restores -- a restore
+        // would resurrect an entry a grave says is gone (SPEC.md 4.2, 4.4). A
+        // sidecar-less claim is the same interrupted commit to finish. A fault reading
+        // the grave is a real fault -- it propagates to clear the memo for a retry.
+        const graved = await this.#backend.hasTombstone(id);
         // Resolve the stale claim, tolerating one that ANOTHER process's recovery
         // over the same root already resolved between our listClaims and here: two
         // simultaneous starts can list the same stale claim, and the loser's
@@ -528,7 +572,17 @@ export class Stash extends EventEmitter {
         // swallow the fault; a claim still standing after a failed restore/commit is
         // a real fault, propagated to clear the memo for a retry.
         try {
-          if (!hasSidecar || this.#onPopFailure === "burn") {
+          if (graved || !hasSidecar) {
+            await this.#backend.commit(id); // finish a decided/interrupted destruction
+          } else if (this.#onPopFailure === "burn") {
+            // A stale read-claim burned by policy is a FRESH destruction -- it must leave
+            // a grave (SPEC.md 4.4) or a replica could store() the id back, resurrecting
+            // content the burn intended to remove. Grave BEFORE commit (the #destroy
+            // ordering). Recovery reconciles a PRIOR process's residue -- an entry this
+            // process's listeners never observed -- so it writes the durable grave but
+            // emits no event (unlike the live burn). The claim cannot say whether it was
+            // a pop or a budgeted read, so the grave records the generic read cause.
+            await this.#backend.writeTombstone(id, makeTombstone(id, "pop"));
             await this.#backend.commit(id);
           } else {
             await this.#backend.restore(id);
@@ -556,25 +610,37 @@ export class Stash extends EventEmitter {
   // error, premature destroy) restores the claim, or burns it under
   // onPopFailure: 'burn'. pop and budgeted apply differ only in onCommit, so the
   // destruction/restore machinery has exactly one home.
-  async #claimedRead(ref, onCommit, destroyedEvent) {
+  async #claimedRead(ref, onCommit, destruction) {
     const { entry, source } = await this.#backend.claim(ref);
     if (isExpired(entry, Date.now())) {
       _dispose(source);
       await this.#backend.restore(ref);
-      if (await this.#backend.remove(ref)) this.#emit("expired", entry); // lazy-drop, witnessed
+      if (await this.#backend.remove(ref)) this.#emit("expired", entry); // lazy-drop, witnessed; expiry writes NO grave
       throw new RefNotFound();
     }
     return _verifiedStream(entry, source, {
       onCommit: () => onCommit(entry),
-      // 'burn' destroys the entry the read could not consume: the delete lands the
-      // SAME as a successful terminal, so it emits the same destruction event
-      // ('popped' for pop, 'dropped' for a budgeted apply) AFTER the commit -- a
-      // burned entry is never destroyed silently (SPEC.md 4.3). 'restore' returns
-      // the entry, which survives, so it emits nothing.
+      // 'burn' destroys the entry the read could not consume: it runs the SAME
+      // grave-then-commit-then-emit terminal a successful drain runs (a burned
+      // entry leaves a grave, SPEC.md 4.4, and is never destroyed silently,
+      // SPEC.md 4.3). 'restore' returns the entry, which survives, so it writes no
+      // grave and emits nothing.
       onFail: () => (this.#onPopFailure === "burn"
-        ? this.#backend.commit(ref).then(() => this.#emit(destroyedEvent, entry))
+        ? this.#destroy(ref, entry, destruction.cause, destruction.event)
         : this.#backend.restore(ref)),
     });
+  }
+
+  // #destroy(ref, entry, cause, event) -- the shared terminal destruction of a
+  // claimed read (pop, a budget-exhausting apply, or either one burned): write the
+  // grave FIRST (SPEC.md 4.4), then commit the deletion, then emit. Grave-before-
+  // commit is the crash-safe order -- a crash between them leaves a tombstoned-but-
+  // present entry, which store() already refuses; the reverse order would resurrect
+  // (CWE-459). pop and a spent budget differ only in cause/event.
+  async #destroy(ref, entry, cause, event) {
+    await this.#backend.writeTombstone(ref, makeTombstone(ref, cause));
+    await this.#backend.commit(ref);
+    this.#emit(event, entry);
   }
 
   /**
@@ -711,13 +777,12 @@ export class Stash extends EventEmitter {
     if (entry.reads !== null) {
       return this.#claimedRead(ref, async (claimed) => {
         if (claimed.readsLeft === 1) {
-          await this.#backend.commit(ref); // the last credit: destroy through the commit path
-          this.#emit("dropped", claimed); // budget-exhaust is a 'dropped', NOT a 'popped' (SPEC.md 4.3)
+          await this.#destroy(ref, claimed, "spent", "dropped"); // the last credit: grave + commit + 'dropped'
         } else {
           await this.#backend.consumeRead(ref); // persist the debit BEFORE restoring (fragile area 5)
-          await this.#backend.restore(ref); // a non-terminal read destroys nothing -- no event
+          await this.#backend.restore(ref); // a non-terminal read destroys nothing -- no grave, no event
         }
-      }, "dropped"); // a burned budgeted read destroys the entry -> 'dropped'
+      }, { cause: "spent", event: "dropped" }); // a burned budgeted read destroys the entry -> 'dropped'
     }
     const source = await this.#backend.read(ref);
     // The gate above and this open are two awaits apart, so a short TTL can
@@ -768,10 +833,168 @@ export class Stash extends EventEmitter {
     await this.#recover();
     await this.#rejectIfClaimed(ref); // a concurrent pop's loser bails before the advisory stat
     await this.#statLive(ref); // advisory: reject an expired entry with zero claim taken
-    return this.#claimedRead(ref, async (entry) => {
-      await this.#backend.commit(ref);
-      this.#emit("popped", entry); // a pop's terminal delete committed (SPEC.md 4.3)
-    }, "popped"); // a burned pop's delete also lands -> 'popped'
+    return this.#claimedRead(ref,
+      (entry) => this.#destroy(ref, entry, "pop", "popped"), // grave + commit + 'popped'
+      { cause: "pop", event: "popped" }); // a burned pop's delete also lands -> a 'pop' grave, 'popped'
+  }
+
+  /**
+   * @primitive  stash.store
+   * @signature  stash.store(entry, source) -> Promise<boolean>
+   * @since      0.1.9
+   * @status     experimental
+   * @spec       SPEC.md 4, SPEC.md 4.4, FIPS 180-4, RFC 8259
+   * @defends    CWE-345, CWE-354, CWE-20
+   * @related    stash.push, stash.tombstones, stash.drop
+   *
+   * The replication-grade insert (SPEC.md 4.4): file an already-created entry,
+   * preserving its identity where `push` mints a new one. The caller supplies the
+   * COMPLETE `Entry` -- `id`, `createdAt`, `expiresAt`, `reads`, `readsLeft`,
+   * `digest`, `meta` -- and it lands verbatim; the bytes are verified against the
+   * supplied `digest` and `size` as they stream, so transfer corruption is caught
+   * on the way in and nothing lands. It proceeds in a normative order:
+   *
+   *   1. a malformed id is `InvalidRef`, before any storage access;
+   *   2. a tombstoned id returns `false`, writing nothing -- a destroyed id never
+   *      comes back;
+   *   3. an entry already past its `expiresAt` is a no-op `false` (the dead travel
+   *      as dead, and get no grave);
+   *   4. an identical live entry (same id, same digest) is an idempotent no-op
+   *      `false`, so a retry-based sync is free;
+   *   5. same id, different digest is an `IntegrityError` -- corruption, not a
+   *      merge; the existing entry is untouched;
+   *   6. otherwise it writes exactly like `push`, every field the caller's, and
+   *      returns `true`.
+   *
+   * A genuinely new entry (past step 5) is charged against the stash bounds exactly
+   * as a `push` is: a replica larger than `maxSize` aborts `SizeExceeded`, and one
+   * past `maxEntries` / `maxTotal` is refused `StashFull` -- replication input does
+   * not get to slip the configured capacity. Concurrent stores of the SAME id are
+   * serialized so two conflicting replicas cannot both land (the loser sees the
+   * winner and reconciles: idempotent-`false` or an `IntegrityError`).
+   *
+   * `store` emits NO event: a sync daemon that heard its own writes would echo them
+   * back forever, so the silence removes that bug class here rather than in every
+   * caller. The replicated entry is untrusted input -- a shape violation, a digest
+   * that is not sha256-hex, an incoherent read budget, or a non-plain `meta` is an
+   * `IntegrityError`, never a partial write.
+   *
+   * A read budget is enforced per store, so two replicas of a `reads: 1` entry can
+   * each serve one full read before their tombstones converge -- exactly-once
+   * becomes eventually-once. Serve reads from a single node (cold standby) unless
+   * that weaker guarantee is a deliberate choice.
+   *
+   * @example
+   *   for (const e of await primary.list()) await replica.store(e, bytesFor(e.id));
+   */
+  async store(rawEntry, source) {
+    // The replicated entry and its bytes are BOTH untrusted. The argument being a
+    // plain object and the source being an accepted type are config-time
+    // TypeErrors; every verdict on the entry's CONTENT past that is a typed
+    // IntegrityError -- replicated bytes are stored input, not a caller argument.
+    plainObject(rawEntry, "store: entry");
+    // Step 1: a malformed id dies at the whitelist BEFORE any backend access -- the
+    // ref-validation-precedes-storage invariant every verb holds (hard rule 4). This
+    // MUST precede the store chain / #recover(), which touch the backend.
+    assertValid(rawEntry.id);
+    const chunks = _toChunkSource(source);
+    const ref = rawEntry.id;
+    // Serialize concurrent store()s of the SAME id: two sync workers filing
+    // conflicting replicas of one id must not both pass the reconcile and race the
+    // write -- memory would last-writer-win and disk would raw-EEXIST on the shared
+    // blob tmp, neither honoring write-once / the digest-conflict verdict (SPEC.md
+    // 4.4). Chain onto any in-flight store for this id so the loser runs AFTER the
+    // winner lands and reconciles against it (idempotent-false, or an IntegrityError
+    // on a different digest). The store is single-writer-per-root, so this in-process
+    // gate spans the whole supported concurrency domain.
+    const prior = this.#storeChains.get(ref);
+    const mine = (async () => {
+      if (prior) await prior; // await my turn; prior is the never-rejecting chain tail
+      return this.#storeOne(rawEntry, chunks, ref);
+    })();
+    const tail = mine.catch(() => {}); // the tail never rejects, so a failed store still releases the next in line
+    this.#storeChains.set(ref, tail);
+    try {
+      return await mine;
+    } finally {
+      if (this.#storeChains.get(ref) === tail) this.#storeChains.delete(ref); // last in line -- bound the map
+    }
+  }
+
+  // #storeOne(rawEntry, chunks, ref) -- store()'s serialized body: the SPEC.md 4.4
+  // reconcile order (tombstoned -> expired -> identical -> digest-conflict), then the
+  // same capacity gate push() applies (a replicated entry is untrusted -- it must
+  // honor maxSize/maxEntries/maxTotal), then the verified, bounded write.
+  async #storeOne(rawEntry, chunks, ref) {
+    await this.#recover();
+    // Normalize meta to its STORED form BEFORE validating: the backend persists the entry
+    // via JSON.stringify, so a meta that is not a plain JSON object -- a Date, or a plain
+    // object whose toJSON() returns a scalar -- would serialize to a scalar and then be
+    // rejected by every later show()/list() read: a store() that "succeeds" into an
+    // unreadable entry. Validate the round-tripped value (what actually lands), exactly as
+    // push does; a meta that does not survive the round-trip as a plain object is an
+    // IntegrityError (untrusted replicated input), never a bad write.
+    const metaJson = JSON.stringify(rawEntry.meta);
+    const entry = { ...rawEntry, meta: metaJson === undefined ? undefined : JSON.parse(metaJson) };
+    // Full shape of the replicated entry (id re-checked plus every other field, meta in
+    // its stored form).
+    assertShape(entry, IntegrityError);
+
+    // Step 2: a tombstoned id never comes back.
+    if (await this.#backend.hasTombstone(ref)) return false;
+    // Step 3: an entry already past its deadline is dead on arrival -- no-op, no grave.
+    if (isExpired(entry, Date.now())) return false;
+    // Steps 4/5: reconcile against an existing entry. The stat probe swallows ONLY
+    // RefNotFound (absent); corruption or an fs fault propagates, never a false.
+    let existing = null;
+    try {
+      existing = await this.#backend.stat(ref);
+    } catch (err) {
+      if (!(err instanceof RefNotFound)) throw err;
+    }
+    if (existing !== null) {
+      if (constantTimeEqual(existing.digest, entry.digest)) return false; // step 4: identical -> idempotent
+      throw new IntegrityError(); // step 5: same id, different digest -> corruption, not a merge
+    }
+
+    // Capacity gate: a genuinely new entry (existing === null) is charged against the
+    // stash bounds exactly as a push is -- otherwise a replica larger than maxSize, or
+    // any replica past maxEntries/maxTotal, slips the configured safeguards (replication
+    // input is untrusted). Expired entries are reaped first so a dead-but-unswept entry
+    // never rejects a live replica (the push discipline). Across DIFFERENT ids the stats
+    // read and the write are not atomic (concurrent inserts overshoot by the in-flight
+    // count, as push documents); the per-id chain makes the SAME id exact.
+    let residual = null;
+    if (this.#maxEntries !== null || this.#maxTotal !== null) {
+      await this.prune();
+      const stats = await this.#backend.stats();
+      if (this.#maxEntries !== null && stats.entries >= this.#maxEntries) throw new StashFull();
+      if (this.#maxTotal !== null) {
+        // The replicated sidecar is the entry in its stored form (write re-derives the
+        // same size/digest the stream verifies), so its serialized footprint is exact.
+        const sidecarBytes = Buffer.byteLength(JSON.stringify(entry));
+        residual = this.#maxTotal - stats.bytes - sidecarBytes;
+        if (residual < 0) throw new StashFull();
+      }
+    }
+
+    // Step 6: write like push, but every field is the caller's. The bytes are bounded
+    // by maxSize and the maxTotal residual mid-stream (_boundedSource) AND verified
+    // in-stream against the supplied digest AND size (_verifiedInbound -- the backend
+    // would otherwise self-certify whatever arrives). An over-bound abort or a mismatch
+    // throws before the backend's rename, leaving nothing on disk (SPEC.md 8). store is
+    // silent -- no event on this write.
+    const bounded = _verifiedInbound(_boundedSource(chunks, this.#maxSize, residual), entry);
+    await this.#backend.write(ref, bounded, entry);
+    // TOCTOU (fragile area, CWE-367): a concurrent pop/drop could dig the grave
+    // between the step-2 check and this write landing. The grave must ALWAYS win --
+    // a store onto a tombstoned id would resurrect it -- so re-check AFTER the
+    // write; if a grave appeared, remove what was just stored and refuse.
+    if (await this.#backend.hasTombstone(ref)) {
+      await this.#backend.remove(ref);
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -853,6 +1076,30 @@ export class Stash extends EventEmitter {
   }
 
   /**
+   * @primitive  stash.tombstones
+   * @signature  stash.tombstones() -> Promise<Tombstone[]>
+   * @since      0.1.9
+   * @status     experimental
+   * @spec       SPEC.md 4, SPEC.md 4.4
+   * @related    stash.store, stash.drop
+   *
+   * The graves, for reconciliation: `{ id, destroyedAt, cause }[]` -- an id that
+   * was destroyed, when (ms since the epoch), and how (`'pop'` / `'drop'` /
+   * `'clear'` / `'spent'`), and NOTHING that describes the body (no digest, size,
+   * or meta -- recording those would leak the content the destruction removed).
+   * Expiry leaves no grave (terms travel with the entry). A query: it inspects the
+   * shelf, never moves bytes, and is loud over a corrupt grave, the same as
+   * `list()`. Feed each id to a replica's `drop()` to converge the two stores.
+   *
+   * @example
+   *   for (const grave of await primary.tombstones()) await replica.drop(grave.id);
+   */
+  async tombstones() {
+    await this.#recover();
+    return this.#backend.listTombstones();
+  }
+
+  /**
    * @primitive  stash.verify
    * @signature  stash.verify(opts?) -> Promise<Report>
    * @since      0.1.8
@@ -863,18 +1110,19 @@ export class Stash extends EventEmitter {
    * Audit the store's physical integrity. Dry-run by default: it digest-checks
    * every blob (streamed, never a full-blob read) and reports damage --
    * `digest-mismatch`, `size-mismatch`, `corrupt-sidecar`, `missing-blob`,
-   * `orphan-blob`, `orphan-tmp`, `foreign-file`, `stale-claim` -- without touching
-   * anything. `{ repair: true }` removes ONLY what it condemns (a damaged entry's
-   * blob and sidecar together); healthy entries survive byte-identical, a fresh
-   * push's in-flight `.tmp` is spared, and a stale claim is reported but never
-   * deleted (resolving it is crash recovery's job -- deleting a restorable claim
-   * would be data loss). The Report is `{ scanned, findings: [{ kind, id }],
-   * repaired: [{ kind, id }] }`; `id` is the ref for ref-shaped damage (the store
-   * is the embedder's) and `null` for a foreign name -- verify never echoes an
-   * on-disk path. Damage is a FINDING; an I/O fault (a permission denial, a
-   * vanished layout dir) THROWS -- a walk error absorbed into a clean report would
-   * be fail-open. Repair is local until replication (a condemnation writes no
-   * tombstone yet -- M7).
+   * `orphan-blob`, `orphan-tmp`, `foreign-file`, `stale-claim`, `corrupt-tombstone`
+   * -- without touching anything. `{ repair: true }` removes ONLY what it condemns (a
+   * damaged entry's blob and sidecar together, or a corrupt grave whose contents fail
+   * the parser); healthy entries survive byte-identical, a fresh push's in-flight
+   * `.tmp` is spared, and a stale claim is reported but never deleted (resolving it is
+   * crash recovery's job -- deleting a restorable claim would be data loss). The Report
+   * is `{ scanned, findings: [{ kind, id }], repaired: [{ kind, id }] }`; `id` is the
+   * ref for ref-shaped damage (the store is the embedder's) and `null` for a foreign
+   * name -- verify never echoes an on-disk path. Damage is a FINDING; an I/O fault (a
+   * permission denial, a vanished layout dir) THROWS -- a walk error absorbed into a
+   * clean report would be fail-open. A condemnation is physical cleanup of already-
+   * broken data, not a lifecycle destruction, so it writes no grave (the SPEC.md 4.4
+   * causes are pop/drop/clear/spent); a corrupt grave is simply removed.
    *
    * @example
    *   const report = await stash.verify();      // dry run: report only
@@ -946,13 +1194,18 @@ export class Stash extends EventEmitter {
    * @spec       SPEC.md 4
    * @related    stash.clear, stash.list
    *
-   * Delete an entry without reading it. Resolves `false` when the ref names
-   * nothing -- an absent entry is a fact, not a failure. A malformed ref
-   * still throws `InvalidRef`; replication input and typos both die at the
-   * whitelist. A corrupt entry is still removed -- drop deletes without reading,
-   * so a sidecar too damaged to parse never blocks cleanup; it carries no
-   * lifecycle event (there is no whole Entry to hand a listener). `verify` is the
-   * audit path that classifies the damage.
+   * Delete an entry without reading it, and tombstone the id. Resolves `false`
+   * when the ref names nothing LIVE -- an absent entry is a fact, not a failure --
+   * and `true` when a live entry was destroyed. A malformed ref still throws
+   * `InvalidRef`; replication input and typos both die at the whitelist. A corrupt
+   * entry is still removed -- drop deletes without reading, so a sidecar too
+   * damaged to parse never blocks cleanup; it carries no lifecycle event (there is
+   * no whole Entry to hand a listener). `verify` is the audit path that classifies
+   * the damage. Dropping an id the store never held still leaves a grave: that is
+   * how a tombstone propagates across replicas (SPEC.md 4.4) -- reconciliation
+   * `drop`s each of the other node's grave ids, so a destroyed id is refused even
+   * on a node that never held it. Expiry is the one exception that leaves no grave
+   * (its terms travel with the entry, and every replica reaches the same deadline).
    *
    * @example
    *   await stash.drop(ref); // true -- gone
@@ -969,21 +1222,35 @@ export class Stash extends EventEmitter {
       entry = await this.#backend.stat(ref);
     } catch (err) {
       if (err instanceof RefNotFound) {
-        // The ref names no live entry -- but a crash mid-remove (sidecar first, then
-        // blob) can strand an orphaned blob under this id. drop deletes without
-        // reading, so it still removes to clean that orphan (as it did before it
-        // stat'd for the event payload); the ref named nothing live, so -> false.
+        // The ref names no live entry here, but drop STILL writes a grave: this is how a
+        // tombstone PROPAGATES across replicas (SPEC.md 4.4 -- reconciliation drop()s each
+        // of the other node's grave ids). A node that never held the id must adopt the
+        // grave, or a later sync from a stale node resurrects the entry the destruction
+        // removed -- the resurrection an empty or intermediate replica would otherwise
+        // permit. Grave BEFORE the remove (the #destroy ordering); remove() also cleans an
+        // orphaned blob a crash mid-remove (sidecar first, then blob) may have stranded.
+        // Returns false -- no LIVE entry was destroyed -- but the id is now tombstoned.
+        await this.#backend.writeTombstone(ref, makeTombstone(ref, "drop"));
         await this.#backend.remove(ref);
         return false;
       }
       // A sidecar too corrupt to parse must not make the entry un-droppable: drop
-      // deletes without reading (unlike show/has, which surface the corruption).
-      // Destroy it and report the removal; there is no whole Entry to carry, so no
+      // deletes without reading (unlike show/has, which surface the corruption). A
+      // corrupt entry existed and is destroyed, so it leaves a grave (its bytes are
+      // unreadable but its id is known); there is no whole Entry to carry, so no
       // event fires -- verify({ repair: true }) is the richer audit path.
-      if (err instanceof IntegrityError) return this.#backend.remove(ref);
+      if (err instanceof IntegrityError) {
+        await this.#backend.writeTombstone(ref, makeTombstone(ref, "drop"));
+        return this.#backend.remove(ref);
+      }
       throw err;
     }
     const expired = isExpired(entry, Date.now());
+    // A live drop leaves a grave (SPEC.md 4.4), written BEFORE the remove; an
+    // expired entry is already dead -- its terms travel with it, so expiry writes
+    // no grave. A grave already standing (a concurrent pop won the race) is kept
+    // (first-write-wins), so its cause is not clobbered.
+    if (!expired) await this.#backend.writeTombstone(ref, makeTombstone(ref, "drop"));
     if (!(await this.#backend.remove(ref))) return false; // vanished between stat and remove
     this.#emit(expired ? "expired" : "dropped", entry);
     return !expired;
@@ -1016,6 +1283,10 @@ export class Stash extends EventEmitter {
     let destroyed = 0;
     for (const entry of entries) {
       const expired = isExpired(entry, now);
+      // A grave per LIVE entry destroyed (cause 'clear'), written before its remove;
+      // an expired entry writes none (expiry travels with the entry). clear does not
+      // remove existing tombstones -- destruction is monotone across replicas.
+      if (!expired) await this.#backend.writeTombstone(entry.id, makeTombstone(entry.id, "clear"));
       if (await this.#backend.remove(entry.id)) {
         reaped.push([expired ? "expired" : "dropped", entry]);
         if (!expired) destroyed += 1;
@@ -1064,6 +1335,15 @@ export class Stash extends EventEmitter {
       if (isExpired(entry, now) && await this.#backend.remove(entry.id)) reaped.push(entry);
     }
     for (const entry of reaped) this.#emit("expired", entry);
+    // Prune stale graves (SPEC.md 4.4): a tombstone older than tombstoneTtl is
+    // reaped, riding THIS sweep -- no second timer (fragile area: one janitor). A
+    // null tombstoneTtl never prunes. listTombstones is loud over a corrupt grave,
+    // the same prune-is-loud-over-corruption discipline the entry scan holds.
+    if (this.#tombstoneTtlMs !== null) {
+      for (const grave of await this.#backend.listTombstones()) {
+        if (now - grave.destroyedAt >= this.#tombstoneTtlMs) await this.#backend.removeTombstone(grave.id);
+      }
+    }
     return reaped.length;
   }
 

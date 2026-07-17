@@ -23,6 +23,18 @@
     "reviewedAt": "0.1.7",
     "reviewBy": "0.2.0"
   },
+  "stash.store": {
+    "decision": "keep-experimental",
+    "reason": "Ships at M7. The replication insert with the SPEC.md 4.4 six-check order, in-stream digest+size verification, and silent-by-contract emission is new this release; its convergence guarantees (eventually-once, no-resurrection) rest on the tombstone surface that lands alongside it. Pre-1.0 experimental until the option/error surface freezes for 1.0.",
+    "reviewedAt": "0.1.9",
+    "reviewBy": "0.2.0"
+  },
+  "stash.tombstones": {
+    "decision": "keep-experimental",
+    "reason": "Ships at M7. The grave shape ({ id, destroyedAt, cause }) and the four early-destruction causes are new this release; verify()'s tombstone-awareness and any stats() grave count are deliberate follow-ups, so the reconciliation surface is not frozen. Pre-1.0 experimental.",
+    "reviewedAt": "0.1.9",
+    "reviewBy": "0.2.0"
+  },
   "stash.show": {
     "decision": "keep-experimental",
     "reason": "Metadata-only contract is settled and lazy expiry (M3) now returns an expired entry as RefNotFound. Pre-1.0 the whole surface stays experimental until the option set and error surface are frozen for 1.0.",

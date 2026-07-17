@@ -1,8 +1,9 @@
 # ClusterFuzzLite PR fuzzing: build the jazzer.js targets under
 # .clusterfuzzlite/ and fuzz the code a pull request changes for a short
 # burst. The targets hold the store's fail-closed contract on its
-# untrusted-input surfaces -- hostile ref strings and hostile sidecar
-# bytes -- so a crash here is a typed-verdict escape, never test noise.
+# untrusted-input surfaces -- hostile ref strings, hostile entry-sidecar
+# bytes, and hostile tombstone-grave bytes -- so a crash here is a
+# typed-verdict escape, never test noise.
 #
 # The fuzzing engine exists only inside the fuzz container; the library
 # keeps zero dependencies, dev included, and nothing under

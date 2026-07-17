@@ -7,13 +7,13 @@
  * memory backend; this file's primitives render on the same page.)
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants as FS } from "node:fs";
 import { link, lstat, lutimes, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { C } from "../constants.js";
-import { assertShape, spend } from "../entry.js";
+import { assertShape, assertTombstoneShape, spend } from "../entry.js";
 import { IntegrityError, InvalidRef, RefClaimed, RefNotFound } from "../errors.js";
 import { assertValid, constantTimeEqual, isValid } from "../ref.js";
 import { options } from "../validate.js";
@@ -24,6 +24,10 @@ const SUBDIRS = ["blobs", "meta", "claims", "tombstones"];
 // any legitimate sidecar, far below a parser-DoS payload -- a sidecar
 // larger than this is rejected unread.
 const MAX_SIDECAR_BYTES = 64 * C.BYTES.KIB;
+
+// A tombstone is { id, destroyedAt, cause } -- tens of bytes. 1 KiB is generous
+// and refuses a parser-DoS payload unread (CWE-770/400), the sidecar-cap precedent.
+const MAX_TOMBSTONE_BYTES = C.BYTES.KIB;
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -634,8 +638,11 @@ export class DiskBackend {
     // but the aggregate stays loud on a foreign name here as in every layout dir.
     for (const name of await readdir(await this.#containedDir("tombstones"))) {
       if (name.endsWith(".tmp")) continue;
-      if (!isValid(name)) throw new IntegrityError("store layout is damaged");
-      // a valid ref name is an M7 tombstone -- its bytes are M7's to count
+      const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
+      if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
+      // a grave (<id>.json) is tiny and not yet part of the footprint count (SPEC.md
+      // 4 fixes Stats at { entries, bytes, claimed }); counting graves is a future
+      // amendment. This walk stays loud on a FOREIGN name here, like every layout dir.
     }
     return { entries, bytes, claimed };
   }
@@ -888,22 +895,142 @@ export class DiskBackend {
       if (now - claimStat.mtimeMs >= opts.claimTimeoutMs) findings.push({ kind: "stale-claim", id: name });
     }
 
-    // tombstones/: M7's replication records live here; M6 writes none. verify still
-    // audits the dir for layout damage -- a foreign name is loud (like every layout
-    // dir), an aged .tmp is an orphan -- but leaves any valid-ref-name file for M7 to
-    // own, never condemning a tombstone whose lifecycle this milestone does not yet
-    // define.
+    // tombstones/: replication's graves. verify audits the dir for layout damage --
+    // a foreign name is loud, an aged .tmp is an orphan -- AND audits each grave's
+    // CONTENTS through the same parser tombstones()/prune() use.
     const tombstonesDir = await this.#containedDir("tombstones");
     for (const name of await readdir(tombstonesDir)) {
       if (await this.#auditOrphanTmp("tombstones", tombstonesDir, name, now, opts, findings, repaired)) continue;
-      if (!isValid(name)) {
+      const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
+      if (id === null || !isValid(id)) {
         findings.push({ kind: "foreign-file", id: null });
         if (opts.repair) await this.#discard("tombstones", name, "foreign-file", repaired);
+        continue;
       }
-      // a valid ref name is an M7 tombstone -- left untouched
+      // A valid-ref-named grave whose CONTENTS fail the parser (bit rot, tampering, an
+      // id that mismatches its filename) makes both tombstones() and prune() loud with
+      // no other repair path -- so verify owns its recovery, condemning it under repair.
+      // A grave holds no restorable bytes (unlike a stale claim), so removing a corrupt
+      // one is pure cleanup, never data loss. An I/O fault is loud, not a finding.
+      try {
+        await this.#readTombstone(join(tombstonesDir, name), id);
+      } catch (err) {
+        if (err instanceof RefNotFound) continue; // vanished mid-scan (a concurrent prune)
+        if (!(err instanceof IntegrityError)) throw err;
+        findings.push({ kind: "corrupt-tombstone", id });
+        if (opts.repair) {
+          await this.removeTombstone(id);
+          repaired.push({ kind: "corrupt-tombstone", id });
+        }
+      }
     }
 
     return { scanned: scanned.size, findings, repaired };
+  }
+
+  // writeTombstone(id, tombstone) -> void. FIRST-WRITE-WINS, race-safe. Two
+  // destroyers of ONE id run concurrently in a single process with NO claim mutex
+  // between them -- drop takes no claim, so drop||drop, drop||pop, and clear||pop all
+  // reach here at once (the claim only serializes pop-vs-pop). So the commit cannot be
+  // #writeAtomic's shared `<id>.json.tmp`+rename: two writers collide on that tmp under
+  // O_EXCL (the loser throws a raw, path-bearing EEXIST out of drop/pop), and rename
+  // silently REPLACES on Windows (verified) -- clobbering the first grave's destroyedAt,
+  // a resurrection of the grave (SPEC.md 4.2, 4.4). Instead: write to a UNIQUE tmp, then
+  // `link` it to the grave name -- the claim path's exclusivity primitive. link NEVER
+  // overwrites, so a racer's EEXIST IS the first write winning (swallowed, not an error)
+  // and no destroyedAt is ever clobbered. The random tmp suffix means two writers never
+  // collide on the tmp, and a crashed writer's tmp is a harmless orphan (verify reaps
+  // it), never a wedge. FILE_MODE; contained.
+  async writeTombstone(id, tombstone) {
+    assertValid(id);
+    const dir = await this.#containedDir("tombstones");
+    const finalPath = join(dir, id + ".json");
+    if (await this.#isPresent(finalPath)) return; // a grave already stands -- first-write-wins
+    // The policy layer hands a makeTombstone() object -- exactly { id, destroyedAt,
+    // cause } -- so serialize it whole; a malformed shape would be caught on read.
+    const bytes = Buffer.from(JSON.stringify(tombstone), "utf8");
+    const tmpPath = join(dir, id + ".json." + randomBytes(8).toString("hex") + ".tmp");
+    const fh = await open(tmpPath, "wx", FILE_MODE);
+    try {
+      try {
+        await _writeAll(fh, bytes, 0);
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+      // link, not rename: a concurrent destroyer's grave is NEVER overwritten, so its
+      // EEXIST is first-write-wins (a no-op here), not a raw error escaping drop/pop.
+      await _retryTransient(() => link(tmpPath, finalPath));
+    } catch (err) {
+      if (!(err && err.code === "EEXIST")) throw err; // a real fs fault -- the tmp is reaped below
+    } finally {
+      await rm(tmpPath, { force: true }); // our unique tmp is transient whether we won or lost
+    }
+  }
+
+  // hasTombstone(id) -> boolean. Presence ONLY (lstat, no-follow): a grave -- even
+  // a corrupt or symlinked one -- refuses resurrection, so store()'s step-2 need
+  // not parse it (fail-closed in the safe direction; a corrupt grave still blocks).
+  async hasTombstone(id) {
+    assertValid(id);
+    return this.#isPresent(join(await this.#containedDir("tombstones"), id + ".json"));
+  }
+
+  // listTombstones() -> Tombstone[]. Loud, not lossy (the list() discipline): a
+  // foreign name in tombstones/ or a corrupt grave FAILS the listing. Each grave
+  // is read through the contained, symlink-refused open, bounded before parse,
+  // shape- and id-checked. A grave that vanished between the readdir and its read
+  // (a concurrent prune) is simply no longer listed, exactly as list() tolerates.
+  async listTombstones() {
+    const dir = await this.#containedDir("tombstones");
+    const out = [];
+    for (const name of await readdir(dir)) {
+      if (name.endsWith(".tmp")) continue; // an in-flight grave write
+      const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
+      if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
+      try {
+        out.push(await this.#readTombstone(join(dir, name), id));
+      } catch (err) {
+        if (err instanceof RefNotFound) continue; // vanished mid-scan -- no longer a grave
+        throw err;
+      }
+    }
+    return out;
+  }
+
+  // removeTombstone(id) -> boolean (was one held). ttl pruning. force AND recursive
+  // so a tampered directory-shaped grave is reaped too; rm removes a
+  // final-component symlink itself, never following it (CWE-59). The presence is
+  // read BEFORE the removal for the boolean (rm's force would swallow the ENOENT).
+  async removeTombstone(id) {
+    assertValid(id);
+    const path = join(await this.#containedDir("tombstones"), id + ".json");
+    const had = await this.#isPresent(path);
+    await _retryTransient(() => rm(path, { force: true, recursive: true }));
+    return had;
+  }
+
+  // #readTombstone(path, id) -> Tombstone. Read and strictly validate a grave from
+  // its OWN descriptor: no-follow open, bounded read BEFORE parse, JSON.parse under
+  // a corruption verdict, exact shape + id match through the schema home -- the
+  // hostile-sidecar discipline, retargeted to the smaller grave. onAbsent is
+  // RefNotFound so listTombstones can tolerate a grave pruned mid-scan.
+  async #readTombstone(path, id) {
+    const fh = await this.#openStored(path, () => new RefNotFound(), "tombstone storage shape is damaged");
+    try {
+      if ((await fh.stat()).size > MAX_TOMBSTONE_BYTES) throw new IntegrityError("tombstone exceeds its size bound");
+      let parsed;
+      try {
+        parsed = JSON.parse(await fh.readFile("utf8"));
+      } catch {
+        throw new IntegrityError("tombstone is not valid JSON");
+      }
+      assertTombstoneShape(parsed, IntegrityError);
+      if (!constantTimeEqual(parsed.id, id)) throw new IntegrityError("tombstone identity mismatch");
+      return parsed;
+    } finally {
+      await fh.close();
+    }
   }
 
   // claim(id) -> { entry, source }. Atomically claim the blob into claims/<id>

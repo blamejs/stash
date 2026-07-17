@@ -32,7 +32,7 @@ import { Readable } from "node:stream";
 
 import { spend } from "../entry.js";
 import { IntegrityError, RefClaimed, RefNotFound } from "../errors.js";
-import { constantTimeEqual } from "../ref.js";
+import { assertValid, constantTimeEqual } from "../ref.js";
 
 /**
  * @primitive  stash.backends.MemoryBackend
@@ -55,6 +55,11 @@ import { constantTimeEqual } from "../ref.js";
  */
 export class MemoryBackend {
   #entries = new Map();
+  // Tombstones: id -> { destroyedAt, cause }. A grave (SPEC.md 4.4) outlives the
+  // entry it records so a destroyed id never comes back within the ttl. First-
+  // write-wins -- an existing grave is never overwritten, since rewriting its
+  // destroyedAt would extend the grave's own life.
+  #tombstones = new Map();
   // Claimed entries: id -> { entry, chunks, claimedAt }. A claim moves an entry
   // OUT of #entries into #claims, mirroring the disk backend's blobs/ -> claims/
   // rename. The move is synchronous within one method body -- no await between
@@ -256,5 +261,38 @@ export class MemoryBackend {
       if (now - held.claimedAt >= opts.claimTimeoutMs) findings.push({ kind: "stale-claim", id });
     }
     return { scanned, findings, repaired };
+  }
+
+  // writeTombstone(id, tombstone) -> void. FIRST-WRITE-WINS: an existing grave is
+  // never overwritten -- rewriting its destroyedAt would extend the grave's ttl
+  // life, a resurrection of the grave itself (SPEC.md 4.2, 4.4). The id is
+  // revalidated at the boundary (a ref becomes a key here, a filename on disk).
+  async writeTombstone(id, tombstone) {
+    assertValid(id);
+    if (this.#tombstones.has(id)) return;
+    this.#tombstones.set(id, structuredClone(tombstone)); // a copy -- the grave outlives the caller's object
+  }
+
+  // hasTombstone(id) -> boolean. Whether this id has a grave (store()'s step-2
+  // refusal reads it).
+  async hasTombstone(id) {
+    assertValid(id);
+    return this.#tombstones.has(id);
+  }
+
+  // listTombstones() -> Tombstone[]. The graves, for reconciliation. Each is a
+  // fresh object (never a reference into the store, mirroring the entry copies),
+  // so a caller mutating a returned grave cannot reach the next reader.
+  async listTombstones() {
+    const out = [];
+    for (const t of this.#tombstones.values()) out.push(structuredClone(t)); // defensive copies, never a live reference
+    return out;
+  }
+
+  // removeTombstone(id) -> boolean. Delete a grave (ttl pruning). true if one was
+  // held. SPEC.md 9 gains this row alongside the write/has/list methods.
+  async removeTombstone(id) {
+    assertValid(id);
+    return this.#tombstones.delete(id);
   }
 }

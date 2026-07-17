@@ -6,6 +6,7 @@
 // stash-conformance.test.js and runs against this backend unmodified.
 import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   appendFileSync,
   chmodSync,
@@ -823,15 +824,44 @@ suite("disk: crash recovery (SPEC 6)", () => {
     assert.equal(existsSync(join(root, "blobs", ref)), true, "the blob is live under blobs/ again");
   });
 
-  test("an abandoned claim burns under onPopFailure:'burn', leaving no residue", async () => {
+  test("an abandoned claim burns under onPopFailure:'burn', leaving a GRAVE and no live residue (no resurrection)", async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("condemned");
     plantClaim(root, ref);
     const next = new Stash({ backend: new DiskBackend({ root }), onPopFailure: "burn" });
     await assert.rejects(next.apply(ref), RefNotFound);
     for (const dir of ["blobs", "meta", "claims"]) {
-      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ holds no residue`);
+      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ holds no live residue`);
     }
+    // A burn IS a destruction: it must leave a grave, or a replica could store() the id
+    // back and resurrect content the burn policy removed (SPEC.md 4.4).
+    const graves = await next.tombstones();
+    assert.equal(graves.length, 1, "the recovery burn left a grave");
+    assert.equal(graves[0].id, ref);
+    assert.ok(["pop", "spent"].includes(graves[0].cause), "the grave records a read-claim destruction");
+    const digest = "sha256:" + require$hash("reborn");
+    assert.equal(
+      await next.store({ id: ref, size: 6, digest, createdAt: 1, expiresAt: null, reads: null, readsLeft: null, meta: {} }, "reborn"),
+      false,
+      "the grave refuses resurrection via store()",
+    );
+  });
+
+  test("recovery FINISHES a decided destruction: a stale claim whose grave already stands is committed, never restored", async () => {
+    // A terminal #destroy (pop / spent budget) writes the grave, then the process crashes
+    // BEFORE its commit -- the sidecar and claim survive AND a grave stands. Recovery, even
+    // under the DEFAULT restore policy, must FINISH the deletion, never hand the entry back:
+    // a restore would resurrect an entry a grave says is gone (SPEC.md 4.2, 4.4).
+    const { root, stash } = freshStash();
+    const ref = await stash.push("decided");
+    plantClaim(root, ref); // stale claim, sidecar intact
+    writeFileSync(join(root, "tombstones", ref + ".json"), JSON.stringify({ id: ref, destroyedAt: 1000, cause: "pop" }));
+    const next = new Stash({ backend: new DiskBackend({ root }) }); // DEFAULT (restore) policy
+    await assert.rejects(next.apply(ref), RefNotFound, "the decided destruction was finished, not restored");
+    for (const dir of ["blobs", "meta", "claims"]) {
+      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ emptied -- recovery finished the deletion`);
+    }
+    assert.equal((await next.tombstones()).length, 1, "the grave still stands");
   });
 
   test("a FRESH claim is left alone -- another process's live pop is not resolved out from under it", async () => {
@@ -952,7 +982,7 @@ suite("disk: crash recovery (SPEC 6)", () => {
     const inner = new DiskBackend({ root });
     let raced = false;
     const backend = {};
-    for (const m of ["write", "read", "remove", "stat", "list", "stats", "verify", "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed"]) {
+    for (const m of ["write", "read", "remove", "stat", "list", "stats", "verify", "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed", "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone"]) {
       backend[m] = (...a) => inner[m](...a);
     }
     backend.stat = async (id) => {
@@ -1586,3 +1616,152 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     assert.equal((await stash.stats()).entries, 1, "reaped -> no longer counted");
   });
 });
+
+suite("disk: hostile tombstones + replication persistence (SPEC.md 4.4, 9)", () => {
+  const tp = (root, id) => join(root, "tombstones", id + ".json");
+
+  // Plant a real grave via drop, then rewrite its sidecar bytes to a hostile shape.
+  async function corruptedGrave(mutate) {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("victim");
+    await stash.drop(ref); // writes tombstones/<ref>.json { id, destroyedAt, cause: "drop" }
+    const original = JSON.parse(readFileSync(tp(root, ref), "utf8"));
+    writeFileSync(tp(root, ref), mutate(original, ref));
+    return { root, stash, ref };
+  }
+
+  const GRAVE_MUTATIONS = [
+    ["not JSON at all", () => "{ not json"],
+    ["truncated JSON", (o) => JSON.stringify(o).slice(0, 12)],
+    ["an array", () => "[]"],
+    ["empty object", () => "{}"],
+    ["null", () => "null"],
+    ["id of a different entry", (o) => JSON.stringify({ ...o, id: generate() })],
+    ["id not ref-shaped", (o) => JSON.stringify({ ...o, id: "not-a-ref" })],
+    ["missing cause", (o) => { const c = { ...o }; delete c.cause; return JSON.stringify(c); }],
+    ["cause outside the whitelist", (o) => JSON.stringify({ ...o, cause: "detonated" })],
+    ["extra field", (o) => JSON.stringify({ ...o, digest: "leak" })],
+    ["destroyedAt negative", (o) => JSON.stringify({ ...o, destroyedAt: -1 })],
+    ["destroyedAt a float", (o) => JSON.stringify({ ...o, destroyedAt: 1.5 })],
+    ["destroyedAt a string", (o) => JSON.stringify({ ...o, destroyedAt: "yesterday" })],
+    ["oversized grave", (o) => JSON.stringify({ ...o, cause: "drop", pad: "x".repeat(4096) })],
+  ];
+
+  for (const [name, mutate] of GRAVE_MUTATIONS) {
+    test("a corrupt grave is a typed verdict AND still refuses resurrection: " + name, async () => {
+      const { stash, ref } = await corruptedGrave(mutate);
+      // tombstones() is loud over the corruption (fail-loud on a rotten grave)...
+      await assert.rejects(stash.tombstones(), (err) => err instanceof IntegrityError && err.code === "EINTEGRITY");
+      // ...but store() of that id STILL refuses -- a corrupt grave blocks the id
+      // (hasTombstone is presence-only, fail-closed in the safe direction).
+      const digest = "sha256:" + require$hash("reborn");
+      assert.equal(await stash.store({ id: ref, size: 6, digest, createdAt: 1, expiresAt: null, reads: null, readsLeft: null, meta: {} }, "reborn"), false);
+    });
+  }
+
+  test("verify audits grave CONTENTS: a corrupt grave is a corrupt-tombstone finding, and repair removes it -- un-wedging tombstones()/prune()", async () => {
+    // A grave with a valid-ref NAME but rotten CONTENTS wedges tombstones() AND prune()
+    // (both loud over it) with no other repair path -- drop removes the entry, not its
+    // grave, and removeTombstone is not on the public surface. A name-only verify walk
+    // would report the store clean (fail-open on availability), so verify opens each
+    // grave and condemns a corrupt one under repair, the corrupt-sidecar counterpart.
+    const { root, stash, ref } = await corruptedGrave((o) => JSON.stringify({ ...o, cause: "detonated" }));
+    await assert.rejects(stash.tombstones(), (e) => e instanceof IntegrityError && e.code === "EINTEGRITY");
+    await assert.rejects(stash.prune(), IntegrityError);
+    // A dry-run verify SEES the corruption (not a clean report) and names the id.
+    const dry = await stash.verify();
+    assert.ok(dry.findings.some((f) => f.kind === "corrupt-tombstone" && f.id === ref), "the corrupt grave is a finding");
+    assert.equal(existsSync(tp(root, ref)), true, "a dry run removes nothing");
+    // Repair removes the corrupt grave; tombstones()/prune() are un-wedged.
+    const rep = await stash.verify({ repair: true });
+    assert.ok(rep.repaired.some((r) => r.kind === "corrupt-tombstone" && r.id === ref), "repair records the removal");
+    assert.equal(existsSync(tp(root, ref)), false, "the corrupt grave is gone");
+    assert.deepEqual(await stash.tombstones(), [], "tombstones() runs clean again");
+    assert.equal(await stash.prune(), 0, "prune() runs clean again");
+  });
+
+  test("verify spares a HEALTHY grave: a valid grave is neither a finding nor removed by repair", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("live then buried");
+    await stash.drop(ref); // a clean 'drop' grave
+    const dry = await stash.verify();
+    assert.equal(dry.findings.some((f) => f.kind === "corrupt-tombstone"), false, "a healthy grave is not flagged");
+    await stash.verify({ repair: true });
+    assert.equal(existsSync(tp(root, ref)), true, "repair leaves a healthy grave standing");
+    assert.equal((await stash.tombstones()).length, 1, "the grave still refuses resurrection");
+  });
+
+  test("a tombstone sidecar is exactly { id, destroyedAt, cause } -- no digest/size/meta leaks the body", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("secret", { meta: { leak: "me" } });
+    await stash.drop(ref);
+    const grave = JSON.parse(readFileSync(tp(root, ref), "utf8"));
+    assert.deepEqual(Object.keys(grave).sort(), ["cause", "destroyedAt", "id"]);
+    assert.equal(grave.cause, "drop");
+    assert.equal(grave.id, ref);
+    const [returned] = await stash.tombstones();
+    assert.deepEqual(Object.keys(returned).sort(), ["cause", "destroyedAt", "id"], "tombstones() returns the same field set, no more");
+    assert.equal(readFileSync(tp(root, ref), "utf8").includes("leak"), false, "the entry's meta never reaches the grave");
+  });
+
+  test("writeTombstone is first-write-wins on disk: a second write does not overwrite an existing grave", async () => {
+    const root = freshRoot();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.writeTombstone(id, { id, destroyedAt: 1000, cause: "drop" });
+    await backend.writeTombstone(id, { id, destroyedAt: 9999, cause: "pop" });
+    const [g] = await backend.listTombstones();
+    assert.equal(g.destroyedAt, 1000, "the original grave stands");
+    assert.equal(g.cause, "drop");
+  });
+
+  test("a symlink where a tombstone belongs is refused, its target never read", { skip: !FILE_SYMLINKS }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("live");
+    await stash.drop(ref);
+    const outside = freshRoot(); mkdirSync(outside, { recursive: true });
+    const secret = join(outside, "secret"); writeFileSync(secret, "attacker");
+    rmSync(tp(root, ref)); symlinkSync(secret, tp(root, ref), "file");
+    await assert.rejects(stash.tombstones(), IntegrityError);
+    assert.equal(readFileSync(secret, "utf8"), "attacker", "the symlink target was never opened");
+  });
+
+  test("tombstone files are 0600 and tombstones/ is 0700", { skip: process.platform === "win32" }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("x");
+    await stash.drop(ref);
+    assert.equal(statSync(tp(root, ref)).mode & 0o777, 0o600);
+    assert.equal(statSync(join(root, "tombstones")).mode & 0o777, 0o700);
+  });
+
+  test("graves persist across backend re-instantiation: a reopened store still refuses the buried id", async () => {
+    const root = freshRoot();
+    const ref = await new Stash({ backend: new DiskBackend({ root }) }).push("bury");
+    const first = new Stash({ backend: new DiskBackend({ root }) });
+    await first.drop(ref);
+    const reopened = new Stash({ backend: new DiskBackend({ root }) });
+    const digest = "sha256:" + require$hash("reborn");
+    assert.equal(await reopened.store({ id: ref, size: 6, digest, createdAt: 1, expiresAt: null, reads: null, readsLeft: null, meta: {} }, "reborn"), false, "the grave survived the reopen");
+    assert.equal((await reopened.tombstones()).length, 1);
+  });
+
+  test("the grave is written BEFORE the entry is removed on the drop path (ordering: never resurrect on a crash)", async () => {
+    const root = freshRoot();
+    const calls = [];
+    class OrderProbe extends DiskBackend {
+      async writeTombstone(id, t) { calls.push("writeTombstone"); return super.writeTombstone(id, t); }
+      async remove(id) { calls.push("remove"); return super.remove(id); }
+    }
+    const stash = new Stash({ backend: new OrderProbe({ root }) });
+    const ref = await stash.push("ordered");
+    calls.length = 0;
+    await stash.drop(ref);
+    assert.deepEqual(calls, ["writeTombstone", "remove"], "grave first, then the delete");
+  });
+});
+
+// require$hash -- a tiny sha256-hex helper for the store() vectors above (the
+// suite does not import node:crypto elsewhere).
+function require$hash(bytes) {
+  return createHash("sha256").update(Buffer.from(bytes)).digest("hex");
+}
