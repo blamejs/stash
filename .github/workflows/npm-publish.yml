@@ -137,6 +137,9 @@ jobs:
       - name: Changelog regen check
         run: node scripts/regen-changelog.js --check
 
+      - name: README error-code table check
+        run: node scripts/regen-readme.js --check
+
       - name: Pack gate
         run: node scripts/check-pack-against-gitignore.js
 
@@ -174,6 +177,9 @@ jobs:
 
       - name: Wiki e2e
         run: node examples/wiki/test/e2e.js
+
+      - name: Runnable examples
+        run: node examples/test/run.js
 
       - name: Generate CycloneDX SBOM (npm-tree)
         # `npm sbom` is built in to npm 10+ and reads the committed
