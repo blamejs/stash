@@ -358,6 +358,12 @@ export class Stash extends EventEmitter {
   // is the earliest such deadline (Infinity when the scan resolved everything).
   #recovered = null;
   #nextRecoverAt = 0;
+  // In-flight store() chains, keyed by id: store() serializes concurrent inserts
+  // of the SAME id so two replicas cannot both pass the reconcile and race the
+  // write (SPEC.md 4.4 write-once). The store is single-writer-per-root, so this
+  // in-process gate is the whole concurrency domain; a key is dropped once nothing
+  // further is chained behind it, so the map is bounded by live same-id races.
+  #storeChains = new Map();
 
   constructor(opts) {
     super();
@@ -843,6 +849,13 @@ export class Stash extends EventEmitter {
    *   6. otherwise it writes exactly like `push`, every field the caller's, and
    *      returns `true`.
    *
+   * A genuinely new entry (past step 5) is charged against the stash bounds exactly
+   * as a `push` is: a replica larger than `maxSize` aborts `SizeExceeded`, and one
+   * past `maxEntries` / `maxTotal` is refused `StashFull` -- replication input does
+   * not get to slip the configured capacity. Concurrent stores of the SAME id are
+   * serialized so two conflicting replicas cannot both land (the loser sees the
+   * winner and reconciles: idempotent-`false` or an `IntegrityError`).
+   *
    * `store` emits NO event: a sync daemon that heard its own writes would echo them
    * back forever, so the silence removes that bug class here rather than in every
    * caller. The replicated entry is untrusted input -- a shape violation, a digest
@@ -865,16 +878,40 @@ export class Stash extends EventEmitter {
     plainObject(rawEntry, "store: entry");
     // Step 1: a malformed id dies at the whitelist BEFORE any backend access -- the
     // ref-validation-precedes-storage invariant every verb holds (hard rule 4). This
-    // MUST precede #recover(), whose first run scans and can restore/burn stale claims
-    // (real, mutating backend I/O); recover is id-agnostic, but the invariant is that
-    // NO backend call runs on a request whose ref has not passed the whitelist.
+    // MUST precede the store chain / #recover(), which touch the backend.
     assertValid(rawEntry.id);
     const chunks = _toChunkSource(source);
-    await this.#recover();
+    const ref = rawEntry.id;
+    // Serialize concurrent store()s of the SAME id: two sync workers filing
+    // conflicting replicas of one id must not both pass the reconcile and race the
+    // write -- memory would last-writer-win and disk would raw-EEXIST on the shared
+    // blob tmp, neither honoring write-once / the digest-conflict verdict (SPEC.md
+    // 4.4). Chain onto any in-flight store for this id so the loser runs AFTER the
+    // winner lands and reconciles against it (idempotent-false, or an IntegrityError
+    // on a different digest). The store is single-writer-per-root, so this in-process
+    // gate spans the whole supported concurrency domain.
+    const prior = this.#storeChains.get(ref);
+    const mine = (async () => {
+      if (prior) await prior; // await my turn; prior is the never-rejecting chain tail
+      return this.#storeOne(rawEntry, chunks, ref);
+    })();
+    const tail = mine.catch(() => {}); // the tail never rejects, so a failed store still releases the next in line
+    this.#storeChains.set(ref, tail);
+    try {
+      return await mine;
+    } finally {
+      if (this.#storeChains.get(ref) === tail) this.#storeChains.delete(ref); // last in line -- bound the map
+    }
+  }
 
+  // #storeOne(rawEntry, chunks, ref) -- store()'s serialized body: the SPEC.md 4.4
+  // reconcile order (tombstoned -> expired -> identical -> digest-conflict), then the
+  // same capacity gate push() applies (a replicated entry is untrusted -- it must
+  // honor maxSize/maxEntries/maxTotal), then the verified, bounded write.
+  async #storeOne(rawEntry, chunks, ref) {
+    await this.#recover();
     // Full shape of the replicated entry (id re-checked plus every other field).
     assertShape(rawEntry, IntegrityError);
-    const ref = rawEntry.id;
 
     // Step 2: a tombstoned id never comes back.
     if (await this.#backend.hasTombstone(ref)) return false;
@@ -893,12 +930,35 @@ export class Stash extends EventEmitter {
       throw new IntegrityError(); // step 5: same id, different digest -> corruption, not a merge
     }
 
-    // Step 6: write like push, but every field is the caller's, and the bytes are
-    // verified IN-STREAM against the supplied digest AND size -- the backend would
-    // otherwise self-certify whatever arrives (it overwrites stored.digest with the
-    // computed hash). A mismatch throws before the backend's rename, leaving nothing
-    // on disk (SPEC.md 8). store is silent -- no event on this write.
-    await this.#backend.write(ref, _verifiedInbound(chunks, rawEntry), rawEntry);
+    // Capacity gate: a genuinely new entry (existing === null) is charged against the
+    // stash bounds exactly as a push is -- otherwise a replica larger than maxSize, or
+    // any replica past maxEntries/maxTotal, slips the configured safeguards (replication
+    // input is untrusted). Expired entries are reaped first so a dead-but-unswept entry
+    // never rejects a live replica (the push discipline). Across DIFFERENT ids the stats
+    // read and the write are not atomic (concurrent inserts overshoot by the in-flight
+    // count, as push documents); the per-id chain makes the SAME id exact.
+    let residual = null;
+    if (this.#maxEntries !== null || this.#maxTotal !== null) {
+      await this.prune();
+      const stats = await this.#backend.stats();
+      if (this.#maxEntries !== null && stats.entries >= this.#maxEntries) throw new StashFull();
+      if (this.#maxTotal !== null) {
+        // The replicated sidecar is the caller's entry verbatim (write re-derives the
+        // same size/digest the stream verifies), so its serialized footprint is exact.
+        const sidecarBytes = Buffer.byteLength(JSON.stringify(rawEntry));
+        residual = this.#maxTotal - stats.bytes - sidecarBytes;
+        if (residual < 0) throw new StashFull();
+      }
+    }
+
+    // Step 6: write like push, but every field is the caller's. The bytes are bounded
+    // by maxSize and the maxTotal residual mid-stream (_boundedSource) AND verified
+    // in-stream against the supplied digest AND size (_verifiedInbound -- the backend
+    // would otherwise self-certify whatever arrives). An over-bound abort or a mismatch
+    // throws before the backend's rename, leaving nothing on disk (SPEC.md 8). store is
+    // silent -- no event on this write.
+    const bounded = _verifiedInbound(_boundedSource(chunks, this.#maxSize, residual), rawEntry);
+    await this.#backend.write(ref, bounded, rawEntry);
     // TOCTOU (fragile area, CWE-367): a concurrent pop/drop could dig the grave
     // between the step-2 check and this write landing. The grave must ALWAYS win --
     // a store onto a tombstoned id would resurrect it -- so re-check AFTER the

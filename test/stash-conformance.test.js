@@ -1362,6 +1362,65 @@ for (const { name, create } of BACKENDS) {
       }
     });
 
+    test("store() honors the stash limits like push: over maxSize -> SizeExceeded, past maxEntries/maxTotal -> StashFull, nothing lands", async () => {
+      // A replicated entry is untrusted -- it must not slip the configured capacity.
+      { // maxSize: a replica whose bytes exceed the per-entry cap aborts mid-stream.
+        const stash = new Stash({ backend: create(), maxSize: 8 });
+        const id = generate();
+        await assert.rejects(stash.store(makeStoredEntry(id, "waaaay too many bytes"), "waaaay too many bytes"), SizeExceeded);
+        assert.equal(await stash.has(id), false, "an oversized replica leaves nothing behind");
+      }
+      { // maxEntries: the first fills the cap; the replica past it is StashFull.
+        const stash = new Stash({ backend: create(), maxEntries: 1 });
+        assert.equal(await stash.store(makeStoredEntry(generate(), "one"), "one"), true);
+        const id2 = generate();
+        await assert.rejects(stash.store(makeStoredEntry(id2, "two"), "two"), StashFull);
+        assert.equal(await stash.has(id2), false, "the over-cap replica leaves nothing");
+      }
+      { // maxTotal: the blob+sidecar footprint is charged; a big blob past headroom is StashFull.
+        const big = Buffer.alloc(1000, 65);
+        const stash = new Stash({ backend: create(), maxTotal: 1500 });
+        assert.equal(await stash.store(makeStoredEntry(generate(), big), big), true);
+        const id2 = generate();
+        await assert.rejects(stash.store(makeStoredEntry(id2, big), big), StashFull);
+        assert.equal(await stash.has(id2), false);
+      }
+    });
+
+    test("concurrent same-id store()s do not both land: conflicting replicas reconcile, no raw error, ONE consistent entry", async () => {
+      // Two sync workers filing conflicting replicas of one id must not both pass the
+      // reconcile and race the write (memory would last-writer-win; disk would raw-EEXIST
+      // on the shared blob tmp). The insert is serialized per id: exactly one lands, the
+      // rest reconcile (idempotent-false or IntegrityError), and the stored entry is
+      // internally consistent -- never a torn mix of two replicas.
+      { // conflicting digests -> exactly one lands, losers are typed, no raw fs error
+        const stash = new Stash({ backend: create() });
+        const id = generate();
+        const racers = ["alpha", "bravo", "charlie", "delta"].map((b) => stash.store(makeStoredEntry(id, b), b));
+        const settled = await Promise.allSettled(racers);
+        for (const r of settled) {
+          if (r.status === "rejected") {
+            assert.ok(r.reason instanceof IntegrityError, "a losing conflict is IntegrityError, never a raw fs error: " + (r.reason && r.reason.stack));
+          }
+        }
+        assert.equal(settled.filter((r) => r.status === "fulfilled" && r.value === true).length, 1, "exactly one replica lands");
+        const bytes = await drain(await stash.apply(id));
+        const stored = await stash.show(id);
+        assert.equal("sha256:" + createHash("sha256").update(bytes).digest("hex"), stored.digest, "the landed entry is not a torn mix of the racers");
+      }
+      { // identical replicas -> idempotent, exactly one entry, both settle cleanly
+        const stash = new Stash({ backend: create() });
+        const id = generate();
+        const e = makeStoredEntry(id, "same");
+        const settled = await Promise.allSettled([stash.store(e, "same"), stash.store(e, "same"), stash.store(e, "same")]);
+        for (const r of settled) assert.equal(r.status, "fulfilled", "identical concurrent stores settle cleanly");
+        assert.equal(settled.filter((r) => r.value === true).length, 1, "one lands");
+        assert.ok(settled.filter((r) => r.value === false).length >= 1, "the rest are idempotent no-ops");
+        assert.equal((await stash.list()).length, 1, "exactly one entry");
+        assert.deepEqual(await drain(await stash.apply(id)), Buffer.from("same"));
+      }
+    });
+
     test("two stores converge (the done-when): a pop on A never resurrects after syncing B back", async () => {
       const A = new Stash({ backend: create() });
       const B = new Stash({ backend: create() });

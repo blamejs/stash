@@ -134,7 +134,10 @@ The M1 + M2 + M3 + M4 + M5 + M6 + M7 surface (see `SPEC.md` section 12 for the f
   the bytes verified against the supplied digest and size as they stream so
   transfer corruption is caught on the way in. A malformed id, a tombstoned id, an
   already-expired entry, or a digest conflict is refused before anything lands; an
-  identical entry is an idempotent no-op, so retrying a sync is free. `store` emits
+  identical entry is an idempotent no-op, so retrying a sync is free. A replicated
+  entry honors the stash limits like a push -- one larger than `maxSize`, or past
+  `maxEntries` / `maxTotal`, is refused rather than slipping the capacity -- and two
+  concurrent stores of the same id are serialized so conflicting replicas can't both land. `store` emits
   no event, so a sync daemon never echoes its own writes. Every early destruction --
   `pop`, `drop`, `clear`, a spent read budget -- leaves a tombstone of
   `{ id, destroyedAt, cause }` (expiry leaves none); `tombstones()` returns them for
