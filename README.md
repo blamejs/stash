@@ -176,9 +176,12 @@ queries and janitorial work. Every verb runs against either backend, unmodified.
 
 ## Error codes
 
-Every failure is a typed `StashError` with a frozen `.code` -- branch on the code,
-never the message (messages improve between patches; codes do not, `SPEC.md`
-section 10). No message ever contains a ref, a `meta` value, or a path.
+Every OPERATIONAL failure -- a bad ref, a missing entry, a corrupt blob, a full
+store -- is a typed `StashError` with a frozen `.code`: branch on the code, never
+the message (messages improve between patches; codes do not, `SPEC.md` section 10),
+and no message ever contains a ref, a `meta` value, or a path. Configuration
+mistakes are separate: an unknown option or a source that isn't a supported type
+throws a native `TypeError` at the call, before any storage is touched.
 
 <!-- BEGIN error-codes (generated from src/errors.js by scripts/regen-readme.js) -->
 

@@ -44,7 +44,7 @@
     "gates": "node test/codebase-patterns.test.js && node scripts/validate-source-comment-blocks.js && node scripts/check-api-snapshot.js && node scripts/check-status-lifecycle.js",
     "coverage": "node --test --experimental-test-coverage",
     "wiki:e2e": "node examples/wiki/test/e2e.js",
-    "examples": "node examples/test/run.js",
+    "examples": "node scripts/run-examples.js",
     "smoke": "node scripts/smoke.js",
     "release": "node scripts/release.js",
     "prepack": "node scripts/check-pack-against-gitignore.js"

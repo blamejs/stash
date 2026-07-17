@@ -104,4 +104,4 @@ jobs:
         run: node examples/wiki/test/e2e.js
 
       - name: Runnable examples
-        run: node examples/test/run.js
+        run: node scripts/run-examples.js

@@ -6,12 +6,13 @@
 // this runs in CI (npm run examples), and drift rule 16 / the no-MVP rule make
 // a broken example a failing build.
 //
-// It lives OUTSIDE the test/*.test.js glob on purpose: the examples spawn a
-// child (the permission-flags demo re-execs itself under --permission), which
-// the sandboxed suite denies -- exactly as the wiki e2e is excluded for binding
-// a socket. Run it directly:
+// It lives in scripts/, NOT under a test/ directory, on purpose: `node --test`
+// auto-discovers any .js beneath a test/ dir, so a harness there would run inside
+// the suite (and the sandboxed suite, which denies the spawn the permission-flags
+// demo needs) and again in the dedicated examples step. Keeping it here means
+// examples run only through `npm run examples`. Run it directly:
 //
-//   node examples/test/run.js
+//   node scripts/run-examples.js
 //
 // Exit 0: every example passed. Exit 1: an example exited non-zero or its
 // success marker was missing -- the same signal CI reports.
@@ -20,9 +21,8 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const EXAMPLES_DIR = resolve(HERE, "..");
-const ROOT = resolve(EXAMPLES_DIR, "..");
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const EXAMPLES_DIR = join(ROOT, "examples");
 
 // Each example must exit 0 and print its final marker line, so a script that
 // silently short-circuits before its asserts (an early return, a swallowed

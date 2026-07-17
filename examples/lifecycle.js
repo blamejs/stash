@@ -38,12 +38,16 @@ log("show   ->", { size: entry.size, meta: entry.meta });
 // --- apply: a digest-verified read that does NOT destroy ----------------------
 // apply streams the bytes and verifies the sha256 as it drains; the entry
 // survives, so you can apply again.
-const readTwice = async () => {
+const readOnce = async () => {
   const chunks = [];
   for await (const chunk of await stash.apply(ref)) chunks.push(chunk);
   return Buffer.concat(chunks).toString("utf8");
 };
-assert.equal(await readTwice(), "the ciphertext your layer above produced");
+// Read it TWICE, asserting each drain -- an unbudgeted entry survives every read,
+// so the second apply must return the same bytes (a regression that destroyed it
+// on a later read would fail here, not slip past a single unchecked read).
+assert.equal(await readOnce(), "the ciphertext your layer above produced");
+assert.equal(await readOnce(), "the ciphertext your layer above produced", "apply is repeatable -- the entry survives a read");
 assert.equal(await stash.has(ref), true, "apply does not destroy");
 log("applied twice, entry still present");
 
