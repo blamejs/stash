@@ -48,11 +48,11 @@ Pre-1.0, only the latest published `0.x.y` receives fixes. See
 
 ## Continuous fuzzing
 
-The store's untrusted-input surfaces -- hostile ref strings and the disk
-backend's sidecar bytes -- are fuzzed continuously with ClusterFuzzLite
-(jazzer.js): pull requests that touch `src/` get a short fuzzing burst
-against the changed code, and a scheduled batch run fuzzes the grown corpus
-daily. The targets treat a typed `StashError` as the correct fail-closed
+The store's untrusted-input surfaces -- hostile ref strings, the disk
+backend's entry-sidecar bytes, and its tombstone-grave bytes -- are fuzzed
+continuously with ClusterFuzzLite (jazzer.js): pull requests that touch
+`src/` get a short fuzzing burst against the changed code, and a scheduled
+batch run fuzzes the grown corpus daily. The targets treat a typed `StashError` as the correct fail-closed
 verdict on hostile input; anything else that escapes -- an untyped
 exception, a hang -- is reported as a crash. The harness lives in
 `.clusterfuzzlite/` (with a plain-node seed-corpus check at
@@ -110,6 +110,21 @@ exception, a hang -- is reported as a crash. The harness lives in
   under it -- the once-only read gone. A non-positive `claimTimeout` is refused at
   construction (it would reclaim an active pop instantly). A claim survives a
   crash on disk only; the memory backend is process-lifetime by definition.
+
+- **Replication cannot resurrect a destroyed entry -- if `tombstoneTtl` is set
+  right.** Every early destruction leaves a tombstone, and `store()` refuses a
+  tombstoned id, so a `store` racing a `drop` (or a sync replaying an old copy)
+  never brings a burned entry back within the tombstone window. That window is the
+  one setting the deployment owns: `tombstoneTtl` (default `'30d'`) must comfortably
+  exceed the longest gap between reconciliations, or a grave is pruned before a lagging
+  replica has seen it and the id can return. StashJS cannot know the sync schedule, so
+  it documents this floor rather than enforcing it -- size it against your slowest
+  replica, not an arbitrary number. A tombstone records only `{ id, destroyedAt,
+  cause }`; it never carries the destroyed entry's digest, size, or `meta`, so a grave
+  cannot leak the content the destruction removed. Replicating a `reads: 1` entry to
+  more than one node weakens exactly-once to eventually-once (each node serves one read
+  before the graves converge): serve reads from a single node (cold standby) unless
+  that tradeoff is a deliberate choice.
 
 ## What StashJS deliberately does not do
 

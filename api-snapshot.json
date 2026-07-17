@@ -1,6 +1,6 @@
 {
   "generator": "scripts/refresh-api-snapshot.js",
-  "packageVersion": "0.1.8",
+  "packageVersion": "0.1.9",
   "surface": {
     "index": {
       "kind": "object",
@@ -78,6 +78,14 @@
               "kind": "function",
               "arity": 0
             },
+            "store": {
+              "kind": "function",
+              "arity": 2
+            },
+            "tombstones": {
+              "kind": "function",
+              "arity": 0
+            },
             "verify": {
               "kind": "function",
               "arity": 0
@@ -118,6 +126,10 @@
               "kind": "function",
               "arity": 1
             },
+            "hasTombstone": {
+              "kind": "function",
+              "arity": 1
+            },
             "isClaimed": {
               "kind": "function",
               "arity": 1
@@ -130,11 +142,19 @@
               "kind": "function",
               "arity": 0
             },
+            "listTombstones": {
+              "kind": "function",
+              "arity": 0
+            },
             "read": {
               "kind": "function",
               "arity": 1
             },
             "remove": {
+              "kind": "function",
+              "arity": 1
+            },
+            "removeTombstone": {
               "kind": "function",
               "arity": 1
             },
@@ -157,6 +177,10 @@
             "write": {
               "kind": "function",
               "arity": 3
+            },
+            "writeTombstone": {
+              "kind": "function",
+              "arity": 2
             }
           }
         }
@@ -181,6 +205,10 @@
               "kind": "function",
               "arity": 1
             },
+            "hasTombstone": {
+              "kind": "function",
+              "arity": 1
+            },
             "isClaimed": {
               "kind": "function",
               "arity": 1
@@ -193,11 +221,19 @@
               "kind": "function",
               "arity": 0
             },
+            "listTombstones": {
+              "kind": "function",
+              "arity": 0
+            },
             "read": {
               "kind": "function",
               "arity": 1
             },
             "remove": {
+              "kind": "function",
+              "arity": 1
+            },
+            "removeTombstone": {
               "kind": "function",
               "arity": 1
             },
@@ -220,6 +256,10 @@
             "write": {
               "kind": "function",
               "arity": 3
+            },
+            "writeTombstone": {
+              "kind": "function",
+              "arity": 2
             }
           }
         },
@@ -245,9 +285,11 @@
     "stash.push": "0.1.0",
     "stash.apply": "0.1.0",
     "stash.pop": "0.1.7",
+    "stash.store": "0.1.9",
     "stash.show": "0.1.0",
     "stash.has": "0.1.8",
     "stash.stats": "0.1.8",
+    "stash.tombstones": "0.1.9",
     "stash.verify": "0.1.8",
     "stash.list": "0.1.0",
     "stash.drop": "0.1.0",

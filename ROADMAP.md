@@ -71,12 +71,22 @@ Entry payloads emitted after commit, and is async-iterable. `has(ref)` is a
 boolean existence check; `stats()` returns `{ entries, bytes, claimed }`. The
 backend contract gains `verify`.
 
-## M7 -- Replication -- NEXT
+## M7 -- Replication -- SHIPPED (0.1.9)
 
-Tombstones on every early-destruction path, `store()` with the SPEC.md
-section 4.4 order of checks, `tombstones()`, `tombstoneTtl` pruning.
+Every early destruction -- `pop`, `drop`, `clear`, a spent read budget -- writes a
+tombstone of `{ id, destroyedAt, cause }` and nothing more, so a destroyed id never
+comes back; expiry writes none (terms travel with the entry). `store(entry, source)`
+is the replication-grade insert: it files an already-created entry with its identity
+preserved, proceeds through the section 4.4 order of checks (malformed id, tombstoned
+id, expired, identical, digest conflict, else write), verifies the bytes against the
+supplied digest and size as they stream, and emits nothing -- a sync daemon never
+hears its own writes. `tombstones()` returns the graves for reconciliation; feeding
+each id to a replica's `drop()` converges two stores with no resurrection.
+`tombstoneTtl` (default `'30d'`, `null` never prunes) reaps a grave once older than
+the window, riding the existing sweep. The backend contract gains `writeTombstone`,
+`hasTombstone`, `listTombstones`, and `removeTombstone`.
 
-## M8 -- Docs
+## M8 -- Docs -- NEXT
 
 README polish, runnable examples (cold-standby sync sketch, the permission
 flags), JSDoc across the public surface.

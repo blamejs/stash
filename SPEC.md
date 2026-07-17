@@ -452,9 +452,11 @@ holds the bytes.
   async listClaims() {},                // → { id, claimedAt }[]  (for recovery)
   async stats() {},                     // → { entries, bytes, claimed }
   async consumeRead(id) {},             // atomic readsLeft decrement → remaining
-  async writeTombstone(id, t) {},       // { destroyedAt, cause }
+  async isClaimed(id) {},               // → boolean (a contended reader probes before the advisory stat)
+  async writeTombstone(id, t) {},       // first-write-wins; t is { id, destroyedAt, cause }
   async hasTombstone(id) {},            // → boolean
   async listTombstones() {},            // → Tombstone[]
+  async removeTombstone(id) {},         // → boolean (ttl pruning reaps a grave)
   async verify(opts) {},                // integrity + orphan audit → report; repair opt-in
 }
 ```

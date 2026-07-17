@@ -19,3 +19,6 @@ zip -j "$OUT/fuzz_ref_seed_corpus.zip" .clusterfuzzlite/seeds/fuzz_ref/*
 
 compile_javascript_fuzzer stash .clusterfuzzlite/fuzz_sidecar.js
 zip -j "$OUT/fuzz_sidecar_seed_corpus.zip" .clusterfuzzlite/seeds/fuzz_sidecar/*
+
+compile_javascript_fuzzer stash .clusterfuzzlite/fuzz_tombstone.js
+zip -j "$OUT/fuzz_tombstone_seed_corpus.zip" .clusterfuzzlite/seeds/fuzz_tombstone/*

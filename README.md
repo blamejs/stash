@@ -76,12 +76,11 @@ Requires Node `>= 24.18.0`.
 
 ## What ships today
 
-The M1 + M2 + M3 + M4 + M5 + M6 surface (see `SPEC.md` section 12 for the full delivery plan):
+The M1 + M2 + M3 + M4 + M5 + M6 + M7 surface (see `SPEC.md` section 12 for the full delivery plan):
 
 - `push` / `pop` / `apply` / `show` / `has` / `list` / `stats` / `verify` /
-  `drop` / `clear` over either backend, with size and `sha256` digest computed
-  as the bytes stream through
-  and digest-verified reads.
+  `store` / `tombstones` / `drop` / `clear` over either backend, with size and
+  `sha256` digest computed as the bytes stream through and digest-verified reads.
 - **Pop & read budgets**: `pop(ref)` streams an entry and destroys it the
   instant the stream drains cleanly -- bytes out once, then gone -- with two
   concurrent pops racing on an atomic claim so exactly one drains and the other
@@ -102,7 +101,7 @@ The M1 + M2 + M3 + M4 + M5 + M6 surface (see `SPEC.md` section 12 for the full d
   store is judged full, and every rejected push leaves no partial behind.
 - **Audit & events**: `verify()` walks the store and reports physical damage --
   a bit-flipped blob, a corrupt sidecar, an orphaned blob or half-written
-  `.tmp`, a foreign file, a stale claim -- streaming a `sha256` over every blob;
+  `.tmp`, a foreign file, a stale claim, a corrupt tombstone -- streaming a `sha256` over every blob;
   it is a dry run by default, and `verify({ repair: true })` removes only what it
   condemns, sparing healthy entries, an in-flight `.tmp`, and a claim recovery
   owns. A `Stash` is an `EventEmitter` -- `'pushed'` / `'popped'` / `'dropped'` /
@@ -130,12 +129,25 @@ The M1 + M2 + M3 + M4 + M5 + M6 surface (see `SPEC.md` section 12 for the full d
   frozen codes).
 - Ref generation and whitelist validation.
 
-Spec'd options whose milestone has not shipped (`tombstoneTtl`) **throw at
-construction** rather than sitting silently unenforced -- a security option that
-is accepted but ignored would be a fail-open default.
+- **Replication**: `store(entry, source)` files an already-created entry with its
+  identity intact -- the caller supplies the full `Entry` and it lands verbatim,
+  the bytes verified against the supplied digest and size as they stream so
+  transfer corruption is caught on the way in. A malformed id, a tombstoned id, an
+  already-expired entry, or a digest conflict is refused before anything lands; an
+  identical entry is an idempotent no-op, so retrying a sync is free. `store` emits
+  no event, so a sync daemon never echoes its own writes. Every early destruction --
+  `pop`, `drop`, `clear`, a spent read budget -- leaves a tombstone of
+  `{ id, destroyedAt, cause }` (expiry leaves none); `tombstones()` returns them for
+  reconciliation, and feeding each id to a replica's `drop()` converges two stores
+  with no resurrection. `tombstoneTtl` (default `'30d'`, `null` never prunes) reaps
+  a grave once older than the window -- keep it above the longest gap between
+  reconciliations, or a forgotten grave lets an id come back.
 
-Next up: the replication primitives (`store`, tombstones). `ROADMAP.md` tracks
-status; `SPEC.md` is the contract.
+Every option `SPEC.md` defines is now accepted and enforced; an unknown option is a
+config-time `TypeError`.
+
+Next up: documentation polish and runnable examples (`ROADMAP.md` M8). `SPEC.md`
+is the contract.
 
 ## Run it sandboxed
 
