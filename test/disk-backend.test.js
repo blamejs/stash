@@ -31,7 +31,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
 import { Stash, RefNotFound, RefClaimed, InvalidRef, IntegrityError, SizeExceeded } from "../src/index.js";
-import { DiskBackend, descriptorMatchesName, verifyDescriptorAgainstName, _writeAll } from "../src/backends/disk.js";
+import { DiskBackend, descriptorMatchesName, verifyDescriptorAgainstName, sameFile, _writeAll } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
 import { freshScratchDir, cleanupScratch } from "./_scratch.js";
 
@@ -587,6 +587,38 @@ suite("disk: fd-based read discipline (CWE-367)", () => {
     assert.equal(descriptorMatchesName(opened, otherVolume), false);
   });
 
+  test("descriptorMatchesName: two DISTINCT files colliding at ino:0 are NOT equated (Windows NTFS-index-zero)", () => {
+    // Windows synthesizes ino from the NTFS file index and can transiently report
+    // 0 for a file under heavy parallel I/O. If two distinct in-root files both
+    // report {dev, ino:0}, a bare dev+ino compare is 0===0 && sameDev -> true, so
+    // the swap guard would vouch for a descriptor bound to a DIFFERENT object than
+    // the name now points at (fail-open). size and creation time are the tiebreak:
+    // two distinct files differ on those even at a colliding zero inode.
+    const opened = { dev: 1, ino: 0, size: 5, birthtimeMs: 100, isSymbolicLink: () => false };
+    const swappedIn = { dev: 1, ino: 0, size: 9, birthtimeMs: 200, isSymbolicLink: () => false };
+    assert.equal(descriptorMatchesName(opened, swappedIn), false);
+  });
+
+  test("descriptorMatchesName: an untampered file at ino:0 still matches (size+birthtime agree)", () => {
+    // The tightening must not false-reject a legitimate read whose inode reads 0:
+    // fstat and lstat of the SAME object agree on size and birthtime, so a genuine
+    // zero-inode file still passes.
+    const same = { dev: 1, ino: 0, size: 5, birthtimeMs: 100, isSymbolicLink: () => false };
+    assert.equal(descriptorMatchesName(same, { ...same }), true);
+  });
+
+  // sameFile -- the disk backend's file-identity choke point (the ONE dev+ino
+  // comparison), driven directly so its contract is pinned regardless of the
+  // consumers that route through it.
+  test("sameFile: identical stats are the same object; any differing discriminator is not", () => {
+    const base = { dev: 7, ino: 42, size: 100, birthtimeMs: 1234 };
+    assert.equal(sameFile(base, { ...base }), true);
+    assert.equal(sameFile(base, { ...base, dev: 8 }), false);
+    assert.equal(sameFile(base, { ...base, ino: 43 }), false);
+    assert.equal(sameFile(base, { ...base, size: 101 }), false); // the ino:0 tiebreak
+    assert.equal(sameFile(base, { ...base, birthtimeMs: 1235 }), false); // the ino:0 tiebreak
+  });
+
   // verifyDescriptorAgainstName -- the lstat-after-open orchestration that only
   // runs on a platform without O_NOFOLLOW (dead on Linux, where O_NOFOLLOW
   // refuses a symlink at the open itself). Driven directly so every branch --
@@ -611,19 +643,19 @@ suite("disk: fd-based read discipline (CWE-367)", () => {
     const a = join(dir, "a");
     writeFileSync(a, "a");
     const b = join(dir, "b");
-    writeFileSync(b, "b");
+    writeFileSync(b, "bb"); // a DIFFERENT size, so size discriminates even if ino collides at 0 (Windows)
     const fh = await open(a, "r");
     try {
       const aStat = await fh.stat();
       const bStat = statSync(b);
-      // The swap guard keys on {dev, ino}; it can only distinguish two objects when
-      // the platform gives them distinct identities. Windows synthesizes `ino` from
-      // the NTFS file index and can transiently report 0 for BOTH files under heavy
-      // parallel I/O -- and then there is no swap to detect, because the filesystem
-      // itself cannot tell the objects apart. Assert that precondition first: this is
-      // the FS declining to identify the objects, not the guard failing.
-      if (bStat.dev === aStat.dev && bStat.ino === aStat.ino) return;
-      // the descriptor is a's; the name b lstats to a different inode -> refused.
+      // The swap guard keys on file identity (sameFile: dev+ino, with size+birthtime
+      // tie-breaking a Windows ino:0 collision). It can only distinguish two objects
+      // when the platform gives them distinct identities -- if sameFile itself cannot
+      // tell a and b apart (every discriminator collides), there is no swap to detect
+      // because the filesystem has declined to identify the objects. Assert that
+      // precondition first: this is the FS, not the guard, failing to distinguish.
+      if (sameFile(aStat, bStat)) return;
+      // the descriptor is a's; the name b lstats to a different object -> refused.
       await assert.rejects(verifyDescriptorAgainstName(aStat, b, "damaged"), IntegrityError);
     } finally {
       await fh.close();

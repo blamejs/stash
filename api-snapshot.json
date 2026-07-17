@@ -1,6 +1,6 @@
 {
   "generator": "scripts/refresh-api-snapshot.js",
-  "packageVersion": "0.1.12",
+  "packageVersion": "0.1.13",
   "surface": {
     "index": {
       "kind": "object",
@@ -268,6 +268,10 @@
           "arity": 3
         },
         "descriptorMatchesName": {
+          "kind": "function",
+          "arity": 2
+        },
+        "sameFile": {
           "kind": "function",
           "arity": 2
         },

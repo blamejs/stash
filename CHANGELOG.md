@@ -2,6 +2,38 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 0.1.13 — 2026-07-17
+
+On a platform without O_NOFOLLOW (Windows), the disk backend cannot refuse a
+symlink at the open itself, so after opening a blob or sidecar it
+cross-checks the descriptor's identity against a no-follow lookup of the name
+-- catching a symlink traversed at open or a name swapped for a different
+object afterward. That check keyed on device + inode alone. Windows
+synthesizes the inode from the NTFS file index and can transiently report 0
+for a file under heavy parallel I/O, so two distinct in-root files could both
+read as inode 0 and be mistaken for the same object -- a fail-open in the
+swap guard. The identity comparison now also requires size and creation time
+to match. Because the new terms are ANDed on, the check only ever becomes
+more selective: it never accepts a swap it rejected before, and an untampered
+read (whose open descriptor and name resolve to the same inode) still
+matches, since size and creation time agree for one object. This is
+defense-in-depth -- planting a symlink in the store root already requires a
+privilege the recommended permission sandbox denies -- but a security guard
+that silently passes on an identity collision is a real gap, now closed. No
+API change.
+
+### Fixed
+
+- Disk backend, platforms without `O_NOFOLLOW` (Windows): the post-open
+  symlink-swap guard compared only device + inode, so two distinct files that
+  transiently reported inode 0 (an NTFS-file-index quirk under heavy parallel
+  I/O) could be mistaken for one object -- a fail-open. The file-identity
+  comparison now also requires size and creation time to agree. The terms are
+  ANDed, so the check is strictly more selective and cannot vouch for a
+  swapped object it previously rejected; an untampered read still matches.
+  The same identity check is now the single choke point behind both the
+  read-path swap guard and the crash-recovery interrupted-claim check.
+
 ## 0.1.12 — 2026-07-17
 
 The integrity hash is now a construct-time choice: new Stash({ backend,

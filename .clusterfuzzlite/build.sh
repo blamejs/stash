@@ -14,6 +14,9 @@ npm install --no-save --no-package-lock --no-engine-strict @jazzer.js/core@2.1.0
 
 # Each target compiles to $OUT/<basename>; its seed corpus rides along as
 # $OUT/<basename>_seed_corpus.zip.
+compile_javascript_fuzzer stash .clusterfuzzlite/fuzz_digest.js
+zip -j "$OUT/fuzz_digest_seed_corpus.zip" .clusterfuzzlite/seeds/fuzz_digest/*
+
 compile_javascript_fuzzer stash .clusterfuzzlite/fuzz_ref.js
 zip -j "$OUT/fuzz_ref_seed_corpus.zip" .clusterfuzzlite/seeds/fuzz_ref/*
 
