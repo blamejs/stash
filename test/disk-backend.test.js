@@ -28,7 +28,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
 import { Stash, RefNotFound, RefClaimed, InvalidRef, IntegrityError, SizeExceeded } from "../src/index.js";
-import { DiskBackend, descriptorMatchesName, verifyDescriptorAgainstName } from "../src/backends/disk.js";
+import { DiskBackend, descriptorMatchesName, verifyDescriptorAgainstName, _writeAll } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
 import { freshScratchDir, cleanupScratch } from "./_scratch.js";
 
@@ -984,6 +984,50 @@ suite("disk: drop races the claim lifecycle (SPEC 4.2)", () => {
     await assert.rejects(backend.restore(id), RefNotFound);
     assert.deepEqual(readdirSync(join(root, "blobs")), [], "no blob orphaned in blobs/ without a sidecar");
     assert.deepEqual(readdirSync(join(root, "meta")), [], "the sidecar stays gone -- not resurrected");
+  });
+
+  test("a claim over a symlinked blob never follows the link to touch an outside target", { skip: !FILE_SYMLINKS }, async () => {
+    // A hostile blobs/<id> symlink is hard-linked into claims/ as a link to the
+    // symlink. A path utimes would FOLLOW it and stamp the target's mtime outside
+    // the store before the open rejects the claim -- bending the no-follow
+    // discipline. lutimes stamps the link itself, so the target is never touched
+    // and the claim still fails loudly at the open.
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(100, 1)], skeleton(id, 2));
+    const outside = freshRoot();
+    mkdirSync(outside, { recursive: true });
+    const target = join(outside, "outside-target");
+    writeFileSync(target, "attacker-owned");
+    const targetMtimeBefore = statSync(target).mtimeMs;
+    rmSync(join(root, "blobs", id));
+    symlinkSync(target, join(root, "blobs", id), "file"); // swap the blob for a link out of the store
+    await assert.rejects(backend.claim(id), IntegrityError);
+    assert.equal(statSync(target).mtimeMs, targetMtimeBefore, "the outside target's mtime was not touched");
+  });
+
+  test("writeAll writes the whole buffer under short writes, and fails on no progress", async () => {
+    // FileHandle.write can resolve after fewer than length bytes; a truncated
+    // sidecar or blob reads back as corruption and loses a completed drain's
+    // budget. writeAll must loop until the buffer is fully written.
+    const payload = Buffer.from("the full serialized sidecar payload, longer than one short write");
+    const landed = Buffer.alloc(payload.length);
+    let calls = 0;
+    const shortFh = {
+      write: async (buf, off, len, pos) => {
+        calls += 1;
+        const n = Math.min(3, len); // pathological: at most three bytes per call
+        buf.copy(landed, pos, off, off + n);
+        return { bytesWritten: n };
+      },
+    };
+    await _writeAll(shortFh, payload, 0);
+    assert.deepEqual(landed, payload, "every byte landed despite three-byte short writes");
+    assert.ok(calls > 1, "the write actually looped over the short writes");
+    // a write that makes no progress is a fault, not an infinite loop
+    const stuckFh = { write: async () => ({ bytesWritten: 0 }) };
+    await assert.rejects(_writeAll(stuckFh, payload, 0), IntegrityError);
   });
 
   test("a budgeted read racing a concurrent drop leaves no resurrection and no orphan half", async () => {

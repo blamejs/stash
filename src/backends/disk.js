@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 import { constants as FS } from "node:fs";
-import { link, lstat, mkdir, open, readdir, realpath, rename, rm, utimes } from "node:fs/promises";
+import { link, lstat, lutimes, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { C } from "../constants.js";
@@ -85,6 +85,21 @@ async function _renameReplacing(from, to) {
       if (!transient || attempt >= RENAME_RETRY_LIMIT) throw err;
       await new Promise((resolve) => setTimeout(resolve, RENAME_RETRY_DELAY_MS));
     }
+  }
+}
+
+// Write the ENTIRE buffer, looping over short writes: a single write() can
+// resolve after fewer than `length` bytes, and a truncated sidecar or blob reads
+// back as corruption -- losing a completed drain's read budget, or failing a
+// digest that was in fact correct. Bytes go to `position + written` so the loop
+// is offset-correct for both a fresh file and an in-place rewrite. A write that
+// makes no progress is a fault, not a retry.
+export async function _writeAll(fh, bytes, position) {
+  let written = 0;
+  while (written < bytes.length) {
+    const { bytesWritten } = await fh.write(bytes, written, bytes.length - written, position + written);
+    if (bytesWritten === 0) throw new IntegrityError("store write made no progress");
+    written += bytesWritten;
   }
 }
 
@@ -285,7 +300,7 @@ export class DiskBackend {
     const fh = await open(tmpPath, "wx", FILE_MODE);
     try {
       try {
-        await fh.write(bytes);
+        await _writeAll(fh, bytes, 0);
         await fh.sync();
       } finally {
         await fh.close();
@@ -328,8 +343,8 @@ export class DiskBackend {
         for await (const chunk of source) {
           const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           hash.update(buf);
+          await _writeAll(fh, buf, size); // write at the running offset, looping short writes
           size += buf.length;
-          await fh.write(buf);
         }
         await fh.sync();
       } finally {
@@ -585,8 +600,13 @@ export class DiskBackend {
     // claim on an older entry would look instantly stale to recovery (fragile
     // area 3). A crash in the window before this leaves the old mtime, which
     // recovery resolves per policy -- both directions are the configured policy.
+    // lutimes, NOT utimes: a hostile blobs/<id> symlink is hard-linked into
+    // claims/ as a link to the symlink, and a path utimes would FOLLOW it and
+    // touch the target's timestamps OUTSIDE the store. lutimes stamps the link
+    // itself; the #openStored below then rejects the symlinked claim (O_NOFOLLOW),
+    // so the tamper never bends the store's no-follow discipline.
     const claimedAt = Date.now();
-    await utimes(claimPath, new Date(claimedAt), new Date(claimedAt));
+    await lutimes(claimPath, new Date(claimedAt), new Date(claimedAt));
     const entry = await this.stat(id); // the winner reads the sidecar (present)
     const damaged = "claimed blob storage shape is damaged";
     const fh = await this.#openStored(claimPath, () => new IntegrityError(damaged), damaged);
@@ -733,11 +753,11 @@ export class DiskBackend {
       const next = spend(await this.#readSidecar(fh, id));
       const bytes = Buffer.from(JSON.stringify(next), "utf8");
       // In-place rewrite through the anchored descriptor: truncate, then write
-      // from offset 0 and fsync. A crash mid-write leaves a short/corrupt sidecar,
-      // which the next read rejects as IntegrityError -- fail-closed and loud,
-      // never silently bad.
+      // the WHOLE buffer from offset 0 (looping short writes) and fsync. A crash
+      // mid-write leaves a short/corrupt sidecar, which the next read rejects as
+      // IntegrityError -- fail-closed and loud, never silently bad.
       await fh.truncate(0);
-      await fh.write(bytes, 0, bytes.length, 0);
+      await _writeAll(fh, bytes, 0);
       await fh.sync();
       return next.readsLeft;
     } finally {
