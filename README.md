@@ -146,6 +146,13 @@ The M1 + M2 + M3 + M4 + M5 + M6 + M7 surface (see `SPEC.md` section 12 for the f
   a grave once older than the window -- keep it above the longest gap between
   reconciliations, or a forgotten grave lets an id come back.
 
+- **Digest agility**: the integrity hash is a construct-time choice --
+  `new Stash({ backend, digest })` selects `sha256` (default), `sha512`, `sha3-256`,
+  `sha3-512`, or `shake256` (`node:crypto` builtins; still no encryption -- this is
+  integrity, not confidentiality). The stored digest is self-describing
+  (`"algo:hex"`), so reads and `verify()` hash with each entry's own algorithm and a
+  store may mix algorithms; the default leaves every existing store byte-identical.
+
 Every option `SPEC.md` defines is now accepted and enforced; an unknown option is a
 config-time `TypeError`.
 

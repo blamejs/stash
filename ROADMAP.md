@@ -97,7 +97,19 @@ gains a verb table mapped to the git-stash mental model and an error-code table
 generated from `src/errors.js` (a drift check keeps it in sync). The public
 surface is documented in full through the source comment blocks the wiki
 renders. No library surface changes -- the `SPEC.md` section 12 delivery plan is
-complete and the store is feature-complete pre-1.0.
+complete.
+
+## M9 -- Digest agility -- SHIPPED (0.1.12)
+
+The integrity hash becomes a construct-time choice. `new Stash({ backend, digest })`
+selects `sha256` (the default, unchanged), `sha512`, `sha3-256`, `sha3-512`, or
+`shake256` -- all `node:crypto` builtins, so the zero-dependency rule holds, and
+still no key and no cipher: this is integrity, not confidentiality. The stored
+digest is self-describing (`"algo:hex"`), so `apply`, `pop`, and `verify()` hash
+each entry with its OWN algorithm and one store may mix them; `store()` replicates
+an entry with its algorithm intact. Omitting the option keeps `sha256`, so every
+existing store is byte-identical. This extends the `SPEC.md` section 12 plan beyond
+its original close.
 
 ## Standing constraints
 

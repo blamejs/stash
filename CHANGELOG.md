@@ -2,6 +2,36 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 0.1.12 — 2026-07-17
+
+The integrity hash is now a construct-time choice: new Stash({ backend,
+digest }) selects sha256 (the default, unchanged), sha512, sha3-256,
+sha3-512, or shake256 -- all node:crypto builtins, so the zero-dependency
+rule holds. This is crypto-agnosticism for INTEGRITY, not confidentiality:
+there is still no key and no cipher anywhere in the tree. The stored digest
+is self-describing ("algo:hex"), so a read -- and verify() -- hashes with the
+algorithm the entry was WRITTEN with, never a global assumption. A store may
+therefore hold entries under different algorithms (the option changed over
+the store's life, or store() replicated an entry that carried its own) and
+each still verifies. The construct-time option sets the algorithm for new
+pushes only; omitting it keeps sha256, so every existing store is
+byte-identical. An unknown algorithm is a config-time TypeError; a stored
+digest with an unknown algorithm or the wrong hex length is an
+IntegrityError.
+
+### Added
+
+- `digest` constructor option -- the integrity-hash algorithm for new writes:
+  `sha256` (default), `sha512`, `sha3-256`, `sha3-512`, or `shake256`. sha2
+  is FIPS 180-4; sha3 and shake are FIPS 202; `shake256`'s output is pinned
+  to 64 bytes. The stored digest is self-describing (`"<algo>:<hex>"`), so
+  `apply`, `pop`, and `verify()` hash each entry with its own algorithm -- a
+  store may mix algorithms and every entry still verifies, and `store()`
+  replicates an entry with its algorithm intact. The default is unchanged, so
+  an omitted option leaves every existing store byte-identical. This stays
+  inside SPEC.md section 1: still no key, no cipher -- the digest verifies
+  integrity, never confidentiality.
+
 ## 0.1.11 — 2026-07-17
 
 A correctness sweep of the documentation against the actual code. No library

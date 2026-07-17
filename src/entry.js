@@ -13,6 +13,7 @@
 // bug class this file exists to prevent -- the readsLeft field-literal
 // shape is detector-enforced.
 
+import { isValidDigest } from "./digest.js";
 import { isValid } from "./ref.js";
 
 // The frozen field set, in canonical order. The sidecar codec derives its
@@ -27,8 +28,6 @@ export const FIELDS = Object.freeze([
   "readsLeft",
   "meta",
 ]);
-
-const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
 function _isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -59,7 +58,7 @@ export function assertShape(value, ErrorClass) {
   }
   if (!isValid(value.id)) throw new ErrorClass("stored entry rejected: id");
   if (!_isCount(value.size)) throw new ErrorClass("stored entry rejected: size");
-  if (typeof value.digest !== "string" || !DIGEST_PATTERN.test(value.digest)) {
+  if (!isValidDigest(value.digest)) {
     throw new ErrorClass("stored entry rejected: digest");
   }
   if (!_isCount(value.createdAt)) throw new ErrorClass("stored entry rejected: createdAt");

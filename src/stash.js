@@ -38,11 +38,11 @@
  *   verdicts.
  */
 
-import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { Transform, pipeline } from "node:stream";
 
 import { C } from "./constants.js";
+import { DEFAULT_DIGEST, algoOf, assertDigestAlgo, digestHash, digestMarker, finalize } from "./digest.js";
 import { parse } from "./duration.js";
 import { assertShape, isExpired, make, makeTombstone } from "./entry.js";
 import { IntegrityError, RefClaimed, RefNotFound, SizeExceeded, StashFull } from "./errors.js";
@@ -110,7 +110,12 @@ function _toChunkSource(source) {
 // and the pipeline callback can both reach it (fragile area 11). An unbudgeted,
 // unclaimed apply passes no verdict and behaves exactly as before.
 function _verifiedStream(entry, source, verdict) {
-  const hash = createHash("sha256");
+  // Self-describing: verify with the algorithm the entry was WRITTEN with (its
+  // stored "<algo>:<hex>"), never a global assumption -- a store may hold entries
+  // under different digests (SPEC.md 5). The entry passed integrity on the read
+  // path (assertShape -> isValidDigest), so the algorithm always resolves.
+  const algo = algoOf(entry.digest);
+  const hash = digestHash(algo);
   let resolved = false;
   const verify = new Transform({
     transform(chunk, _encoding, callback) {
@@ -118,7 +123,7 @@ function _verifiedStream(entry, source, verdict) {
       callback(null, chunk);
     },
     async flush(callback) {
-      const got = "sha256:" + hash.digest("hex");
+      const got = finalize(hash, algo);
       if (!constantTimeEqual(got, entry.digest)) {
         resolved = true;
         if (verdict && verdict.onFail) await _settle(verdict.onFail);
@@ -162,7 +167,11 @@ function _verifiedStream(entry, source, verdict) {
 // SPEC.md 8). In-stream, never write-then-check -- a post-hoc check would leave the
 // corrupt entry live and listed in the window between the write and the check.
 async function* _verifiedInbound(source, entry) {
-  const hash = createHash("sha256");
+  // Verify against the SUPPLIED entry's own algorithm (its digest is self-
+  // describing, validated by assertShape upstream) -- a replicated sha3-512 entry
+  // is checked with sha3-512, not a global assumption.
+  const algo = algoOf(entry.digest);
+  const hash = digestHash(algo);
   let size = 0;
   for await (const chunk of source) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -174,7 +183,7 @@ async function* _verifiedInbound(source, entry) {
   // across replicas even though the bytes are identical. Both are IntegrityError --
   // untrusted replicated bytes that disagree with their own manifest.
   if (size !== entry.size) throw new IntegrityError();
-  if (!constantTimeEqual("sha256:" + hash.digest("hex"), entry.digest)) throw new IntegrityError();
+  if (!constantTimeEqual(finalize(hash, algo), entry.digest)) throw new IntegrityError();
 }
 
 // Run a claim-resolution hook, swallowing its own failure: a restore/burn that
@@ -331,8 +340,15 @@ function _positiveCount(value, label) {
  * deployment can run, and keep a disk root to a single writing process -- a
  * claim held past the lease by a concurrent instance would be reclaimed out from
  * under the live reader. A non-positive `claimTimeout` is refused at
- * construction. Spec options whose milestone has not shipped (`tombstoneTtl`)
- * throw a TypeError at construction rather than sitting silently unenforced.
+ * construction. `opts.tombstoneTtl` (a duration string, a number of ms, or `null`
+ * to never prune; default `'30d'`) is how long a destruction's grave is kept
+ * before pruning -- size it above the longest gap between replica reconciliations
+ * or a forgotten grave lets an id come back. `opts.digest` picks the integrity
+ * hash for new pushes -- `'sha256'` (the default, unchanged), `'sha512'`,
+ * `'sha3-256'`, `'sha3-512'`, or `'shake256'`; the stored digest is self-describing,
+ * so a read verifies with the entry's OWN algorithm and one store may mix them.
+ * Every spec'd option is now accepted and enforced; an unknown one is a
+ * config-time TypeError.
  *
  * @example
  *   import { Stash } from "@blamejs/stash";
@@ -351,6 +367,10 @@ export class Stash extends EventEmitter {
   #onPopFailure = "restore";
   #claimTimeoutMs = 0;
   #tombstoneTtlMs = null;
+  // The integrity-hash algorithm for NEW writes (push). Reads are self-describing
+  // (they verify with the entry's own stored algorithm), so this only picks what a
+  // fresh push records. Default sha256 keeps every existing store byte-identical.
+  #digestAlgo = DEFAULT_DIGEST;
   // The lazy crash-recovery scan, memoized: resolved on the first public verb
   // (never in the constructor -- constructors do no I/O), mirroring the disk
   // backend's #init retry-on-failure memo. The memo is re-run once a claim it
@@ -368,7 +388,7 @@ export class Stash extends EventEmitter {
   constructor(opts) {
     super();
     options(opts, "new Stash", {
-      allowed: ["backend", "ttl", "sweepInterval", "maxSize", "maxEntries", "maxTotal", "onPopFailure", "claimTimeout", "tombstoneTtl"],
+      allowed: ["backend", "ttl", "sweepInterval", "maxSize", "maxEntries", "maxTotal", "onPopFailure", "claimTimeout", "tombstoneTtl", "digest"],
     });
     const backend = opts.backend;
     if (backend === null || typeof backend !== "object") {
@@ -421,6 +441,8 @@ export class Stash extends EventEmitter {
     // null never prunes (graves live forever); an absent option inherits '30d'.
     const tombstoneTtl = opts.tombstoneTtl === undefined ? DEFAULT_TOMBSTONE_TTL : opts.tombstoneTtl;
     this.#tombstoneTtlMs = parse(tombstoneTtl, "tombstoneTtl");
+    // The integrity hash for new writes: a registry algorithm (default sha256).
+    this.#digestAlgo = assertDigestAlgo(opts.digest === undefined ? DEFAULT_DIGEST : opts.digest, "new Stash: digest");
     const sweepMs = parse(opts.sweepInterval, "sweepInterval");
     if (sweepMs !== null) {
       if (sweepMs <= 0 || sweepMs > C.TIME.MAX_TIMER_MS) {
@@ -730,6 +752,12 @@ export class Stash extends EventEmitter {
         if (residual < 0) throw new StashFull();
       }
     }
+    // Self-describing selection: stamp the entry with the chosen algorithm's pending
+    // marker ("<algo>:") so it travels INSIDE the documented write(id, source, entry)
+    // contract -- the backend reads it back (algoOf) and computes that hash. Threading
+    // the algorithm as an out-of-band write() argument would let a custom backend built
+    // to the 3-arg contract silently drop the selection back to the default.
+    entry.digest = digestMarker(this.#digestAlgo);
     const bounded = _boundedSource(chunks, this.#maxSize, residual);
     const stored = await this.#backend.write(id, bounded, entry);
     this.#emit("pushed", stored); // after the write commits (SPEC.md 4.3)
@@ -985,6 +1013,9 @@ export class Stash extends EventEmitter {
     // throws before the backend's rename, leaving nothing on disk (SPEC.md 8). store is
     // silent -- no event on this write.
     const bounded = _verifiedInbound(_boundedSource(chunks, this.#maxSize, residual), entry);
+    // The replicated entry already carries its full self-describing digest, so the
+    // backend re-hashes with the entry's own algorithm (algoOf) and a sha3-512 entry
+    // lands as sha3-512 -- the selection rides in the entry, never an extra argument.
     await this.#backend.write(ref, bounded, entry);
     // TOCTOU (fragile area, CWE-367): a concurrent pop/drop could dig the grave
     // between the step-2 check and this write landing. The grave must ALWAYS win --

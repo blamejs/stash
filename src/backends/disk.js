@@ -7,12 +7,13 @@
  * memory backend; this file's primitives render on the same page.)
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { constants as FS } from "node:fs";
 import { link, lstat, lutimes, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { C } from "../constants.js";
+import { DEFAULT_DIGEST, algoOf, digestHash, finalize } from "../digest.js";
 import { assertShape, assertTombstoneShape, spend } from "../entry.js";
 import { IntegrityError, InvalidRef, RefClaimed, RefNotFound } from "../errors.js";
 import { assertValid, constantTimeEqual, isValid } from "../ref.js";
@@ -347,10 +348,15 @@ export class DiskBackend {
   // that window to the microseconds between the realpath and the open.
   async write(id, source, entry) {
     assertValid(id);
+    // The algorithm rides IN the entry's self-describing digest (a fresh push's
+    // pending "<algo>:" marker, a replicated entry's full "<algo>:<hex>"), so the
+    // policy layer's selection reaches the backend through the documented argument,
+    // never an out-of-band one; a markerless entry defaults to sha256, unchanged.
+    const algo = algoOf(entry.digest) ?? DEFAULT_DIGEST;
     const blobDir = await this.#containedDir("blobs");
     const tmpPath = join(blobDir, id + ".tmp");
     const blobPath = join(blobDir, id);
-    const hash = createHash("sha256");
+    const hash = digestHash(algo);
     let size = 0;
     const fh = await open(tmpPath, "wx", FILE_MODE);
     try {
@@ -373,7 +379,7 @@ export class DiskBackend {
 
     const stored = structuredClone(entry);
     stored.size = size;
-    stored.digest = "sha256:" + hash.digest("hex");
+    stored.digest = finalize(hash, algo);
     const sidecar = Buffer.from(JSON.stringify(stored), "utf8");
     if (sidecar.length > MAX_SIDECAR_BYTES) {
       await rm(blobPath, { force: true });
@@ -647,14 +653,16 @@ export class DiskBackend {
     return { entries, bytes, claimed };
   }
 
-  // #hashBlob(path) -> { size, digest }. Stream-hash a stored blob through the
-  // contained, symlink-refused open (never a full-blob read, SPEC.md 2): a symlink
-  // where the blob belongs is refused at #openStored (O_NOFOLLOW / fstat guard),
-  // so verify follows nothing (CWE-59). Reads in bounded chunks off the descriptor.
-  async #hashBlob(path) {
+  // #hashBlob(path, algo) -> { size, digest }. Stream-hash a stored blob with the
+  // ENTRY's own algorithm (self-describing, so bit rot on a sha3-512 entry is caught
+  // by re-hashing with sha3-512), through the contained, symlink-refused open (never
+  // a full-blob read, SPEC.md 2): a symlink where the blob belongs is refused at
+  // #openStored (O_NOFOLLOW / fstat guard), so verify follows nothing (CWE-59). Reads
+  // in bounded chunks off the descriptor.
+  async #hashBlob(path, algo) {
     const fh = await this.#openStored(path, () => new RefNotFound(), "blob storage shape is damaged");
     try {
-      const hash = createHash("sha256");
+      const hash = digestHash(algo);
       let size = 0;
       const buf = Buffer.allocUnsafe(64 * C.BYTES.KIB);
       for (;;) {
@@ -663,7 +671,7 @@ export class DiskBackend {
         hash.update(buf.subarray(0, bytesRead));
         size += bytesRead;
       }
-      return { size, digest: "sha256:" + hash.digest("hex") };
+      return { size, digest: finalize(hash, algo) };
     } finally {
       await fh.close();
     }
@@ -838,7 +846,7 @@ export class DiskBackend {
       }
       let got;
       try {
-        got = await this.#hashBlob(blobPath);
+        got = await this.#hashBlob(blobPath, algoOf(entry.digest));
       } catch (err) {
         if (err instanceof RefNotFound) continue; // vanished mid-walk (a claim committed / a drop)
         if (err instanceof IntegrityError) { // a symlink / non-regular blob, refused
