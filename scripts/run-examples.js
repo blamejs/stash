@@ -3,14 +3,15 @@
 //
 // Runs every top-level example under examples/ and asserts it exits 0 with its
 // success marker. The examples are documentation that has to keep working, so
-// this runs in CI (npm run examples), and drift rule 16 / the no-MVP rule make
-// a broken example a failing build.
+// this runs in CI and the smoke pipeline, and drift rule 16 / the no-MVP rule
+// make a broken example a failing build.
 //
 // It lives in scripts/, NOT under a test/ directory, on purpose: `node --test`
 // auto-discovers any .js beneath a test/ dir, so a harness there would run inside
 // the suite (and the sandboxed suite, which denies the spawn the permission-flags
-// demo needs) and again in the dedicated examples step. Keeping it here means
-// examples run only through `npm run examples`. Run it directly:
+// demo needs) and again in the dedicated examples step. examples/ and scripts/ are
+// both repo-only (excluded from the npm tarball), so there is no published npm
+// script to invoke this -- CI and the smoke pipeline call it directly:
 //
 //   node scripts/run-examples.js
 //

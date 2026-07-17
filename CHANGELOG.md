@@ -14,7 +14,7 @@ itself under the Node permission model and shows a stash write to the granted
 root succeeding while a write outside it is denied by the runtime. The README
 gains a verb table mapped to the git-stash mental model, an error-code table
 generated from src/errors.js so it cannot drift, and a runnable-examples
-section. `npm run examples` runs all three in CI.
+section. All three examples run in CI, so a broken one fails the build.
 
 ### Added
 
@@ -23,8 +23,8 @@ section. `npm run examples` runs all three in CI.
   gone, read budgets, expiry, prune/clear), `cold-standby.js` (replicate a
   store to a standby and prove no resurrection), and `permission-flags.js`
   (run under `--permission` and prove the filesystem grant is scoped to the
-  store root -- an out-of-scope write is denied). `npm run examples` runs
-  them all and is part of the pre-release checks.
+  store root -- an out-of-scope write is denied). All three run in CI and the
+  pre-release checks, so a broken example fails the build.
 - README verb table mapping every method to the git-stash mental model, and
   an error-code table generated from `src/errors.js` (a drift check keeps it
   in sync with the shipped typed-error set, SPEC.md section 10).

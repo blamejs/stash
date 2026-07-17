@@ -91,7 +91,8 @@ the window, riding the existing sweep. The backend contract gains `writeTombston
 Three runnable, self-asserting examples under `examples/` -- a lifecycle
 walkthrough, a cold-standby replication sketch, and a permission-model grant
 demonstration that re-execs itself under `--permission` and proves an
-out-of-scope write is denied -- run in CI via `npm run examples`. The README
+out-of-scope write is denied -- all run in CI, so a broken example fails the
+build. The README
 gains a verb table mapped to the git-stash mental model and an error-code table
 generated from `src/errors.js` (a drift check keeps it in sync). The public
 surface is documented in full through the source comment blocks the wiki

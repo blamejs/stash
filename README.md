@@ -206,7 +206,7 @@ node examples/cold-standby.js      # replicate a store without resurrecting the 
 node examples/permission-flags.js  # run under --permission; prove the grant is scoped
 ```
 
-They assert every step, so `npm run examples` keeps them honest in CI.
+They assert every step and run in CI, so a broken example fails the build.
 
 ## Run it sandboxed
 
