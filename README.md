@@ -210,11 +210,15 @@ They assert every step and run in CI, so a broken example fails the build.
 
 ## Run it sandboxed
 
-StashJS is designed to run under the Node permission model, with filesystem
-grants scoped to the store and nothing else:
+StashJS is designed to run under the Node permission model, with the WRITE grant
+scoped to the store. The read grant spans the app directory -- Node loads its
+module graph (your code and `node_modules`) from disk -- while only the store's
+directory is writable. Create that directory first: under the sandbox the backend
+can fill it but not create it (creating it would need write on its parent).
 
 ```
-node --permission --allow-fs-read=./.stash/* --allow-fs-write=./.stash/* app.js
+mkdir -p .stash
+node --permission --allow-fs-read=. --allow-fs-write=./.stash app.js
 ```
 
 The Node permission model is a process-level filesystem allowlist, not per-module
