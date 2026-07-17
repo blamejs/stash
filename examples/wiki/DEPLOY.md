@@ -19,7 +19,7 @@ docker compose up --build
 
 `docker compose` builds from the repo root (the site needs the library
 `src/` to generate its pages) and serves on 3011. Health: `GET /healthz`
-returns `{"status":"ok"}`.
+returns a JSON body with `"status":"ok"` (plus a `pages` count).
 
 ## Production (TLS on stashjs.com)
 

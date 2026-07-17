@@ -9,4 +9,4 @@ Operator-facing migration recipes, one per breaking change. When a breaking chan
 
 ## No migrations
 
-No releases have shipped yet. There are no active deprecations and no migration steps.
+No breaking-change migrations have shipped yet -- every 0.1.x release has been additive. There are no active deprecations and no migration steps.

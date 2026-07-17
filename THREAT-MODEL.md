@@ -9,12 +9,9 @@ would love to escape. This document states what the library defends, where
 the trust boundaries are, the threat classes it is designed against, and
 what is explicitly out of scope.
 
-**Implementation status matters here.** The library is mid-build: milestone
-milestones M1 (the memory backend and the six verbs) and M2 (the disk
-backend with containment) are implemented; milestones M3-M8 are specified in
-[SPEC.md](SPEC.md) section 12 and not yet built. Each defense below is
-marked accordingly. A defense marked *specified* is a design commitment the
-implementation must meet, not shipped code.
+Every defense below is **implemented**: the SPEC.md section 12 delivery plan
+(M1-M8) is complete as of 0.1.10, and the store is feature-complete pre-1.0.
+Each defense notes the milestone that shipped it.
 
 ## Assets
 
@@ -35,10 +32,10 @@ implementation must meet, not shipped code.
 | Input | Trust | Handling |
 |---|---|---|
 | Refs arriving at any public method | **Untrusted** | Whitelist regex (`/^v1_[A-Za-z0-9_-]{43}$/`) before anything else; `InvalidRef` otherwise -- *implemented (M1)* |
-| Blob bytes (`push` sources) | **Untrusted, opaque** | Never interpreted, sniffed, or inspected; size-limited mid-stream -- *limits specified (M4)* |
+| Blob bytes (`push` sources) | **Untrusted, opaque** | Never interpreted, sniffed, or inspected; size-limited mid-stream -- *limits implemented (M4)* |
 | `meta` values | **Untrusted, opaque** | Round-tripped verbatim; never read, validated, indexed, or logged -- *implemented (M1)* |
-| Replication input (`store()` entries) | **Untrusted** | Full check order of SPEC.md section 4.4: ref whitelist, tombstone refusal, expiry no-op, idempotency, digest-conflict rejection -- *specified (M7)* |
-| The filesystem under the stash root | **Semi-trusted** | Realpath containment, `lstat` symlink rejection, digest verification -- *specified (M2/M5/M6)* |
+| Replication input (`store()` entries) | **Untrusted** | Full check order of SPEC.md section 4.4: ref whitelist, tombstone refusal, expiry no-op, idempotency, digest-conflict rejection -- *implemented (M7)* |
+| The filesystem under the stash root | **Semi-trusted** | Realpath containment, `lstat` symlink rejection, digest verification -- *implemented (M2/M5/M6)* |
 | Constructor options (backend, TTL, limits, policies) | **Operator-provided (trusted)** | Taken as configuration |
 
 ## Threat classes and design response
@@ -88,9 +85,8 @@ implementation must meet, not shipped code.
    `StashFull`. There is **no eviction**: silently destroying the oldest
    entry to make room would turn a push flood into an attack on other
    people's data -- for a whistleblower drop, a denial-of-evidence
-   primitive. The loud rejection is the feature. *Limits specified (M4);
-   not yet built. No-eviction is a standing design rule (SPEC.md
-   section 3).*
+   primitive. The loud rejection is the feature. *Limits implemented (M4).
+   No-eviction is a standing design rule (SPEC.md section 3).*
 
 6. **Partial-read data loss.** A destructive read's connection drops at
    60% and the bytes are gone while the reader got half a file. -> `pop`
@@ -99,9 +95,7 @@ implementation must meet, not shipped code.
    `onPopFailure` policy -- `'restore'` by default (the entry survives for
    retry; losing data by default is hostile), `'burn'` as an explicit
    opt-in for stores that treat any read attempt as observation. Claims
-   orphaned by a crash are recovered per the same policy. *Specified (M5);
-   `pop` does not ship yet -- M1's verb set has no destructive read except
-   `drop` / `clear`, which read nothing.*
+   orphaned by a crash are recovered per the same policy. *Implemented (M5).*
 
 7. **Capability leakage through errors, logs, and telemetry** (CWE-209, CWE-532)**.** A ref in a
    log file is a leaked capability. -> No error message ever contains a
@@ -125,16 +119,14 @@ implementation must meet, not shipped code.
    gap between reconciliations -- a knob only the deployment can set. And a
    read budget is enforced per store, so multi-replica serving degrades
    exactly-once to eventually-once; the spec directs consumers to a
-   cold-standby topology if they need the stronger guarantee. *Specified
-   (M7); not yet built.*
+   cold-standby topology if they need the stronger guarantee. *Implemented (M7).*
 
 9. **Silent corruption** (the CWE-354 class, validated rather than skipped)**.** Bit rot or a tampered blob served as good bytes.
    -> A digest is computed during the write stream, verified incrementally
    on read, and a mismatch is a loud `IntegrityError`, never silent bad
    bytes; `verify()` audits the whole store for corrupt blobs, orphaned
    halves, and stale claims, and removes nothing without an explicit
-   `repair: true`. *Specified (M2 digest-on-write, M5 verify-on-read,
-   M6 audit); not yet built.*
+   `repair: true`. *Implemented (M2 digest-on-write, M5 verify-on-read, M6 audit).*
 
 As defense-in-depth around all of the above, the library is designed to run
 under Node's permission model with filesystem grants scoped to the stash

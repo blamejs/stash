@@ -614,8 +614,17 @@ suite("disk: fd-based read discipline (CWE-367)", () => {
     writeFileSync(b, "b");
     const fh = await open(a, "r");
     try {
-      // the descriptor is a's; the name b lstats to a different inode
-      await assert.rejects(verifyDescriptorAgainstName(await fh.stat(), b, "damaged"), IntegrityError);
+      const aStat = await fh.stat();
+      const bStat = statSync(b);
+      // The swap guard keys on {dev, ino}; it can only distinguish two objects when
+      // the platform gives them distinct identities. Windows synthesizes `ino` from
+      // the NTFS file index and can transiently report 0 for BOTH files under heavy
+      // parallel I/O -- and then there is no swap to detect, because the filesystem
+      // itself cannot tell the objects apart. Assert that precondition first: this is
+      // the FS declining to identify the objects, not the guard failing.
+      if (bStat.dev === aStat.dev && bStat.ino === aStat.ino) return;
+      // the descriptor is a's; the name b lstats to a different inode -> refused.
+      await assert.rejects(verifyDescriptorAgainstName(aStat, b, "damaged"), IntegrityError);
     } finally {
       await fh.close();
     }

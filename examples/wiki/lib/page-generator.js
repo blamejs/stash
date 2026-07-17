@@ -645,7 +645,7 @@ export function build(opts) {
     "const ref = await stash.push(ciphertext);   // ref: 'v1_...' - a capability\n" +
     "const entry = await stash.show(ref);        // metadata only, never contents\n" +
     "const readable = await stash.apply(ref);    // digest-verified stream", "js"));
-  homeMain.push('<div class="callout callout-tip"><span class="callout-label">Tip</span>Run the process holding the blobs under the Node permission model, locked to the stash directory and nothing else: <code>node --permission --allow-fs-read=./.stash/* --allow-fs-write=./.stash/* app.js</code>. A compromised dependency elsewhere in the tree cannot read the stash, and the stash cannot read anything else.</div>');
+  homeMain.push('<div class="callout callout-tip"><span class="callout-label">Tip</span>Run the process holding the blobs under the Node permission model -- a process-level filesystem allowlist, with the write grant scoped to the store and read spanning the app directory (Node loads its module graph from disk): <code>mkdir -p .stash &amp;&amp; node --permission --allow-fs-read=. --allow-fs-write=./.stash app.js</code>. A compromised dependency cannot reach outside the grant to the wider filesystem.</div>');
 
   homeMain.push('<h2 id="design-tenets"><a href="#design-tenets">Design tenets</a></h2>');
   homeMain.push('<ul class="tenets">');

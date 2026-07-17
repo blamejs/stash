@@ -2,6 +2,47 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 0.1.11 — 2026-07-17
+
+A correctness sweep of the documentation against the actual code. No library
+surface changes. The SPEC.md permission-model command granted read only to
+the store directory, so an app launched under --permission could not read its
+own module graph and died with ERR_ACCESS_DENIED before the store started; it
+now reads the app directory (write still scoped to the store, which is
+pre-created). The SPEC.md method table said verify({ repair: true }) removes
+what it finds, which overstated it: repair removes damaged blob/sidecar
+pairs, orphans, foreign files, and corrupt tombstones, but leaves a stale
+claim for crash recovery to resolve. THREAT-MODEL.md and ARCHITECTURE.md
+still described the store as mid-build with most milestones unshipped; they
+now reflect that the SPEC.md section 12 plan (M1-M8) is complete.
+MIGRATING.md's 'no releases have shipped yet' and CONTRIBUTING.md's
+milestone-build guidance were likewise brought up to date.
+
+### Fixed
+
+- The `--permission` sandbox command in `SPEC.md` (and the architecture doc
+  and generated docs site) was unrunnable: it granted `--allow-fs-read` only
+  on the store directory, but Node must read the application's own module
+  graph from disk to launch, so the process failed `ERR_ACCESS_DENIED` before
+  the store initialized. The command now reads the app directory and writes
+  only the pre-created store, matching the shipped `permission-flags`
+  example. The accompanying prose is corrected too: the permission model is a
+  process-level filesystem allowlist, not per-module isolation.
+- `SPEC.md`'s `verify()` description said `{ repair: true }` 'removes what it
+  finds'; it now states repair removes damaged blob/sidecar pairs, orphaned
+  `.tmp` files, foreign files, and corrupt tombstones, and reports -- but
+  never deletes -- a stale claim, which crash recovery owns (deleting a
+  restorable claim would be data loss).
+- `THREAT-MODEL.md` and `ARCHITECTURE.md` described the store as mid-build
+  with milestones M3-M8 'not yet built'; every defense is implemented, and
+  both docs now reflect that the `SPEC.md` section 12 delivery plan (M1-M8)
+  is complete and the store is feature-complete pre-1.0. The architecture
+  module map and backend-interface list are corrected to the full shipped
+  set.
+- `MIGRATING.md` said 'no releases have shipped yet' (eleven have); it now
+  reads 'no breaking-change migrations have shipped yet'. `CONTRIBUTING.md`
+  no longer presents the fully-shipped M2-M8 milestones as open build work.
+
 ## 0.1.10 — 2026-07-17
 
 This release is documentation; the library surface does not change. Three

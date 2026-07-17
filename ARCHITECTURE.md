@@ -7,10 +7,14 @@ A contributor's guide to where things live and why the pieces are shaped the way
 ```
 stashjs/
 |-- src/
-|   |-- index.js          # Single export surface -- Stash + the typed errors
+|   |-- index.js          # Single export surface -- Stash + the typed errors + version
 |   |-- stash.js          # Policy layer: TTL, limits, read budgets, claim lifecycle, events
 |   |-- ref.js            # Ref generation, whitelist validation, timing-safe comparison
-|   |-- duration.js       # '24h' -> milliseconds
+|   |-- entry.js          # The canonical Entry schema (one shape, both directions) + tombstones
+|   |-- validate.js       # Config-time input-shape validation (option + plain-object whitelists)
+|   |-- constants.js      # C.TIME / C.BYTES / C.REF -- every scale literal, deep-frozen
+|   |-- duration.js       # '24h' -> milliseconds (composes C.TIME)
+|   |-- size.js           # '100mb' -> bytes (a sibling to duration, its own scale table)
 |   |-- errors.js         # StashError base + the typed subclasses with stable codes
 |   `-- backends/
 |       |-- memory.js     # Map-backed backend -- shipped
@@ -37,7 +41,7 @@ const entry = await stash.show(ref);
 The load-bearing split is SPEC.md section 9: **`Stash` holds the policy; the backend holds the bytes.** The backend is the only thing that touches storage.
 
 - **`Stash` (src/stash.js)** owns everything that is a decision: TTL and expiry, size and count limits, read-budget accounting, the claim lifecycle for destructive reads, the `onPopFailure` policy, event emission, and ref validation at every public entry point.
-- **A backend** implements a flat async interface -- `write` / `read` / `claim` / `restore` / `commit` / `remove` / `stat` / `list` / `listClaims` / `stats` / `consumeRead` / `writeTombstone` / `hasTombstone` / `listTombstones` / `verify` -- and nothing else. It stores and retrieves; it does not decide.
+- **A backend** implements a fixed async storage interface -- `write` / `read` / `claim` / `restore` / `commit` / `consumeRead` / `isClaimed` / `remove` / `stat` / `list` / `listClaims` / `stats` / `verify` / `writeTombstone` / `hasTombstone` / `listTombstones` / `removeTombstone` -- and nothing else. It stores and retrieves; it does not decide.
 
 Because the policy layer never touches storage directly, both backends run the same conformance test suite, and a behavior implemented once in `Stash` (lazy expiry, budget accounting, the claim cycle) cannot diverge between them.
 
@@ -76,10 +80,11 @@ Every failure is a typed class extending `StashError` with a stable `.code` (SPE
 The library is designed to run cleanly under Node's stable permission model (SPEC.md section 2.1):
 
 ```
-node --permission --allow-fs-read=./.stash/* --allow-fs-write=./.stash/* app.js
+mkdir -p .stash
+node --permission --allow-fs-read=. --allow-fs-write=./.stash app.js
 ```
 
-This is the crypto-agnosticism argument enforced by the runtime instead of by discipline: the process holding the blobs can be locked to the directory holding the blobs and nothing else. The design implications are mandatory: no child processes, no worker threads, no native addons, no WASI (each would need its own grant); paths only, never file descriptors (fds bypass the model); no `process.permission.has()` branching -- if the grant is wrong, the `ERR_ACCESS_DENIED` surfaces loudly. The permission model follows symlinks out of granted paths, so symlink containment is the DiskBackend's own job (`realpath` the root at construction, assert every resolved path stays under it, `lstat` rather than `stat` so a planted symlink reads as corruption, not a blob). And `--permission` does not gate the network on this Node line -- the store opens no sockets regardless, which is the actual guarantee.
+This is the crypto-agnosticism argument enforced by the runtime instead of by discipline: the whole process is confined to the app directory and its store -- read spans the app's own module graph (Node loads it from disk), write is scoped to the store, and nothing wider is reachable. It is a process-level filesystem allowlist, not per-module isolation. The design implications are mandatory: no child processes, no worker threads, no native addons, no WASI (each would need its own grant); paths only, never file descriptors (fds bypass the model); no `process.permission.has()` branching -- if the grant is wrong, the `ERR_ACCESS_DENIED` surfaces loudly. The permission model follows symlinks out of granted paths, so symlink containment is the DiskBackend's own job (`realpath` the root at construction, assert every resolved path stays under it, `lstat` rather than `stat` so a planted symlink reads as corruption, not a blob). And `--permission` does not gate the network on this Node line -- the store opens no sockets regardless, which is the actual guarantee.
 
 ## Constraints the layout encodes
 
@@ -95,12 +100,16 @@ SPEC.md section 3 is load-bearing and binds contributors and maintainer alike. T
 
 ## Implementation status
 
-Honest map of built versus specified, tracking the milestone plan in SPEC.md section 12:
+The SPEC.md section 12 delivery plan (M1-M8) is **complete** as of 0.1.10; the store is feature-complete pre-1.0. Everything this document describes is shipped code:
 
-- **Built (M1 -- skeleton):** the typed errors, ref generation + whitelist validation, the `MemoryBackend`, and the `push` / `apply` / `show` / `list` / `drop` / `clear` verbs. No TTL, no claims, no limits yet.
-- **Specified, not yet built (M3-M8):** expiry, `prune()`, the sweep timer, `Symbol.asyncDispose` (M3); `maxSize` / `maxEntries` / `maxTotal` enforcement (M4); `pop`, claims, `onPopFailure`, crash recovery, read budgets (M5); `has` / `stats` / `verify` and the event set (M6); tombstones and `store()` replication (M7); README and examples (M8).
-
-Where this document describes M2+ behavior, it is describing the specification the implementation must meet, not shipped code.
+- **M1 skeleton** -- typed errors, ref generation + whitelist, `MemoryBackend`, `push` / `apply` / `show` / `list` / `drop` / `clear`.
+- **M2 disk** -- `DiskBackend`: sidecar metadata, atomic tmp-fsync-rename, `0700`/`0600`, realpath containment, size-bounded sidecar validation.
+- **M3 expiry** -- `ttl`, lazy expiry, `prune()`, the `unref()`'d sweep timer, `close()` / `Symbol.asyncDispose`.
+- **M4 limits** -- `maxSize` (mid-stream), `maxEntries` / `maxTotal`, `StashFull`, `stats()`.
+- **M5 pop & budgets** -- `pop`, the claim lifecycle, `reads` budgets, `onPopFailure`, crash recovery.
+- **M6 audit** -- `has` / `stats` / `verify`, the event set (`pushed` / `popped` / `dropped` / `expired` / `sweepError`), async-iterable.
+- **M7 replication** -- tombstones, `store()`, `tombstones()`, `tombstoneTtl`.
+- **M8 docs** -- README polish, runnable examples, generated error-code table.
 
 ## Where to read first
 
