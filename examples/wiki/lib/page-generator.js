@@ -54,6 +54,18 @@ function _repoLink(href) {
   return REPO_BLOB + href.replace(/^\.?\//, "");
 }
 
+// Rewrite one README link/image target for the wiki context: the logo asset is
+// served locally; an in-page #anchor and any absolute URL (the status badges,
+// the npm/site links) pass through; a repo-relative path (ROADMAP.md, SPEC.md,
+// LICENSE) points at the GitHub source tree.
+function _readmeLink(href) {
+  if (!href) return href;
+  if (href.indexOf("assets/stashjs-logo.png") !== -1) return "/stashjs-logo.png";
+  if (href.charAt(0) === "#") return href;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(href) || href.indexOf("mailto:") === 0) return href;
+  return REPO_BLOB + href.replace(/^\.?\//, "");
+}
+
 var esc = ent.escapeHtml;
 
 var BRAND = "StashJS";
@@ -543,19 +555,28 @@ export function build(opts) {
     });
   }
 
-  // ---- Overview: the shipped SPEC.md, rendered to HTML ----
-  // A single curated top-level page - the specification is the project's
-  // contract and its front door, so the wiki carries it verbatim rather
-  // than a hand-maintained second copy. Repo-relative links are rewritten
-  // for the wiki context.
-  var overviewItem = { slug: "overview", title: "Specification", path: "/overview" };
+  // ---- Overview: the repository README, rendered to HTML ----
+  // The README is the project's front door, so the wiki carries it verbatim
+  // rather than a hand-maintained second copy; repo-relative links are rewritten
+  // for the wiki context and the status badges load as external images. The
+  // shipped SPEC.md -- the contract -- rides alongside as its own Specification
+  // page rather than a hand-maintained second copy.
+  var overviewItem = { slug: "overview", title: "Overview", path: "/overview" };
+  var readmePath = path.resolve(libDir, "..", "README.md");
+  var readmeHtml;
+  try { readmeHtml = markdown.render(fs.readFileSync(readmePath, "utf8"), { rewriteLink: _readmeLink }); }
+  catch (_e) { readmeHtml = null; }
+  var specItem = { slug: "specification", title: "Specification", path: "/specification" };
   var specPath = path.resolve(libDir, "..", "SPEC.md");
   var specHtml;
   try { specHtml = markdown.render(fs.readFileSync(specPath, "utf8"), { rewriteLink: _repoLink }); }
   catch (_e) { specHtml = null; }
-  if (specHtml) {
-    navGroups.unshift({ group: "Overview", items: [overviewItem] });
-    pathToGroup["/overview"] = "Overview";
+  var overviewItems = [];
+  if (readmeHtml) overviewItems.push(overviewItem);
+  if (specHtml) overviewItems.push(specItem);
+  if (overviewItems.length) {
+    navGroups.unshift({ group: "Overview", items: overviewItems });
+    overviewItems.forEach(function (it) { pathToGroup[it.path] = "Overview"; });
   }
 
   // Reference: the auto-generated index + error catalog, pinned last.
@@ -647,9 +668,18 @@ export function build(opts) {
   homeMain.push("</div>");
   _addPage("/", { title: "Home", h1: BRAND, main: homeMain.join("\n"), description: SITE_DESCRIPTION, ldKind: "website" });
 
-  // ---- Overview page (rendered SPEC.md) ----
-  if (specHtml) {
+  // ---- Overview page (rendered README) + Specification page (rendered SPEC.md) ----
+  if (readmeHtml) {
     _addPage("/overview", {
+      title: "Overview",
+      h1: BRAND,
+      main: '<div class="mdoc">' + readmeHtml + "</div>",
+      description: SITE_DESCRIPTION,
+      ldKind: "website",
+    });
+  }
+  if (specHtml) {
+    _addPage("/specification", {
       title: "Specification",
       h1: BRAND,
       main: '<div class="mdoc">' + specHtml + "</div>",

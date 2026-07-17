@@ -36,10 +36,10 @@ import { Transform, pipeline } from "node:stream";
 import { C } from "./constants.js";
 import { parse } from "./duration.js";
 import { isExpired, make } from "./entry.js";
-import { IntegrityError, RefNotFound, SizeExceeded, StashFull } from "./errors.js";
+import { IntegrityError, RefClaimed, RefNotFound, SizeExceeded, StashFull } from "./errors.js";
 import { assertValid, constantTimeEqual, generate } from "./ref.js";
 import { parse as parseSize } from "./size.js";
-import { options, plainObject } from "./validate.js";
+import { oneOf, options, plainObject } from "./validate.js";
 
 // Constructor options the spec defines but a shipped milestone does not yet
 // implement. Accepting one silently would fail open (an operator who set
@@ -48,16 +48,29 @@ import { options, plainObject } from "./validate.js";
 // delivery plan; the policy layer names the lists, validate owns the
 // mechanism.
 const UNIMPLEMENTED_OPTIONS = [
-  "onPopFailure",
   "tombstoneTtl",
-  "claimTimeout",
 ];
 
-const UNIMPLEMENTED_PUSH_OPTIONS = ["reads"];
+const UNIMPLEMENTED_PUSH_OPTIONS = [];
 
 // The backend surface Stash drives today. Validated at construction so a
 // misassembled backend fails at boot, not at first push.
-const REQUIRED_BACKEND_METHODS = ["write", "read", "remove", "stat", "list", "stats"];
+const REQUIRED_BACKEND_METHODS = [
+  "write", "read", "remove", "stat", "list", "stats",
+  "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
+];
+
+// onPopFailure resolves a pop (or a budgeted read) that fails to fully drain
+// with a matching digest: 'restore' (default) returns the entry so the read can
+// be retried; 'burn' destroys it anyway -- opt-in paranoia for a caller who
+// treats an attempted read as an observed one.
+const ON_POP_FAILURE = ["restore", "burn"];
+
+// A claim older than this is treated as a prior run's abandoned pop and resolved
+// per onPopFailure by the lazy recovery scan; a younger one is another live
+// process's pop, left alone. A duration string (one consumer) resolved through
+// duration.parse -- not a constants.js scale literal.
+const DEFAULT_CLAIM_TIMEOUT = "10m";
 
 // Normalize a push source to an async-iterable of byte chunks, or throw a
 // config-time TypeError. Accepted: Buffer | Uint8Array | string | Readable |
@@ -73,27 +86,73 @@ function _toChunkSource(source) {
 }
 
 // Wrap a backend read stream in a digest-verifying passthrough. The hash is
-// updated as chunks flow and compared -- timing-safe -- when the source
-// ends; a mismatch errors the stream with IntegrityError instead of
-// delivering silently bad bytes. Streaming: nothing is buffered.
-function _verifiedStream(entry, source) {
+// updated as chunks flow and compared -- timing-safe -- when the source ends; a
+// mismatch errors the stream with IntegrityError instead of delivering silently
+// bad bytes. Streaming: nothing is buffered.
+//
+// `verdict` (optional) drives the claimed-read lifecycle for pop and budgeted
+// apply. `onCommit()` runs in flush on a full drain with a matching digest --
+// BEFORE the transform signals end, so a consumer that has seen 'end' knows the
+// destruction (or budget debit) has already committed; no test needs to poll.
+// `onFail()` runs exactly once on the OTHER outcomes -- a digest mismatch, a
+// source error, or a premature destroy -- to restore or burn the claim. The
+// `resolved` latch guarantees the verdict fires exactly once even though flush
+// and the pipeline callback can both reach it (fragile area 11). An unbudgeted,
+// unclaimed apply passes no verdict and behaves exactly as before.
+function _verifiedStream(entry, source, verdict) {
   const hash = createHash("sha256");
+  let resolved = false;
   const verify = new Transform({
     transform(chunk, _encoding, callback) {
       hash.update(chunk);
       callback(null, chunk);
     },
-    flush(callback) {
+    async flush(callback) {
       const got = "sha256:" + hash.digest("hex");
-      if (constantTimeEqual(got, entry.digest)) callback();
-      else callback(new IntegrityError());
+      if (!constantTimeEqual(got, entry.digest)) {
+        resolved = true;
+        if (verdict && verdict.onFail) await _settle(verdict.onFail);
+        callback(new IntegrityError());
+        return;
+      }
+      if (verdict && verdict.onCommit) {
+        resolved = true;
+        // onCommit runs to completion BEFORE the callback signals end, so a
+        // consumer that has seen 'end' knows the commit landed. Convert its
+        // outcome to an Error-or-null (`.then(ok, fail)`, no catch to misread as
+        // fail-open) and hand it straight to the single flush callback: a commit
+        // fault surfaces on the stream, and recovery resolves the still-standing
+        // claim later.
+        callback(await verdict.onCommit().then(() => null, (err) => err));
+        return;
+      }
+      callback();
     },
   });
-  // pipeline propagates source errors into `verify` and destroys both sides;
-  // the consumer observes every failure on the returned stream, so the
-  // callback has nothing left to report.
-  pipeline(source, verify, () => {});
+  // pipeline propagates source errors into `verify` and destroys both sides; the
+  // consumer observes every failure on the returned stream. A failure that
+  // reaches here without flush having resolved (a source error, a premature
+  // destroy at N%) still owes the claim its verdict.
+  pipeline(source, verify, (err) => {
+    if (err && !resolved && verdict && verdict.onFail) {
+      resolved = true;
+      void _settle(verdict.onFail);
+    }
+  });
   return verify;
+}
+
+// Run a claim-resolution hook, swallowing its own failure: a restore/burn that
+// cannot land must not throw into a stream teardown or an unhandledRejection. A
+// claim it leaves standing is exactly what the lazy recovery scan resolves on
+// the next construction over the store.
+async function _settle(hook) {
+  // Drop-silent by design (drift rule 8's one sanctioned outlet): a restore/burn
+  // that cannot land must not throw into a stream teardown or an
+  // unhandledRejection. A claim it leaves standing is exactly what the lazy
+  // recovery scan resolves on the next construction. The hook is an async call,
+  // so its rejection routes through `.catch`, never a synchronous throw.
+  await hook().catch(() => {});
 }
 
 // _dispose(source) -- best-effort teardown of an opened backend read source we
@@ -223,8 +282,21 @@ function _positiveCount(value, label) {
  * its metadata, not the blob alone -- so many tiny blobs carrying large `meta`
  * cannot slip past it. It is a ceiling you set, not one the disk enforces: size
  * it below the backing partition's free space (and keep `maxSize` at or below
- * it), or the filesystem fills before the limit fires. Spec options whose
- * milestone has not shipped (`onPopFailure`, `tombstoneTtl`, `claimTimeout`)
+ * it), or the filesystem fills before the limit fires.
+ *
+ * `opts.onPopFailure` decides what happens to an entry whose `pop` (or budgeted
+ * `apply`) fails to fully drain -- a stream destroyed early, a source error, a
+ * digest mismatch: `'restore'` (the default) returns the entry so the read can
+ * be retried, `'burn'` destroys it anyway. `opts.claimTimeout` (a duration
+ * string or a number of ms, default `'10m'`, and strictly POSITIVE) is how long
+ * a claim left by a crashed process is treated as still live before recovery
+ * reclaims it on the next construction; a claim younger than this is left
+ * untouched. Recovery cannot tell a crashed reader's claim from a legitimately
+ * slow live one, so set `claimTimeout` ABOVE the longest `pop`/budgeted read a
+ * deployment can run, and keep a disk root to a single writing process -- a
+ * claim held past the lease by a concurrent instance would be reclaimed out from
+ * under the live reader. A non-positive `claimTimeout` is refused at
+ * construction. Spec options whose milestone has not shipped (`tombstoneTtl`)
  * throw a TypeError at construction rather than sitting silently unenforced.
  *
  * @example
@@ -241,10 +313,19 @@ export class Stash {
   #maxSize = null;
   #maxTotal = null;
   #maxEntries = null;
+  #onPopFailure = "restore";
+  #claimTimeoutMs = 0;
+  // The lazy crash-recovery scan, memoized: resolved on the first public verb
+  // (never in the constructor -- constructors do no I/O), mirroring the disk
+  // backend's #init retry-on-failure memo. The memo is re-run once a claim it
+  // skipped for being younger than the lease would have aged past it -- #nextRecoverAt
+  // is the earliest such deadline (Infinity when the scan resolved everything).
+  #recovered = null;
+  #nextRecoverAt = 0;
 
   constructor(opts) {
     options(opts, "new Stash", {
-      allowed: ["backend", "ttl", "sweepInterval", "maxSize", "maxEntries", "maxTotal"],
+      allowed: ["backend", "ttl", "sweepInterval", "maxSize", "maxEntries", "maxTotal", "onPopFailure", "claimTimeout"],
       unimplemented: UNIMPLEMENTED_OPTIONS,
     });
     const backend = opts.backend;
@@ -277,6 +358,22 @@ export class Stash {
     if (this.#maxSize !== null && this.#maxTotal !== null && this.#maxSize > this.#maxTotal) {
       throw new TypeError("new Stash: maxSize must not exceed maxTotal -- a per-entry cap above the whole-store cap can never bind");
     }
+    // Pop lifecycle: onPopFailure is a closed enum (restore | burn), claimTimeout
+    // the crash-recovery staleness threshold. Both validated at config time -- an
+    // unrecognized policy or a NaN threshold is a silently-disabled recovery scan.
+    this.#onPopFailure = opts.onPopFailure === undefined
+      ? "restore"
+      : oneOf(opts.onPopFailure, "new Stash: onPopFailure", ON_POP_FAILURE);
+    const claimTimeout = opts.claimTimeout === undefined ? DEFAULT_CLAIM_TIMEOUT : opts.claimTimeout;
+    this.#claimTimeoutMs = parse(claimTimeout, "claimTimeout");
+    // Strictly POSITIVE: recovery reclaims a claim older than this as a crashed
+    // prior run's, so a zero (or negative) lease would treat an active pop as
+    // instantly abandoned and let recovery restore/burn it out from under a live
+    // reader -- the once-only read guarantee gone. The lease must exceed the
+    // longest pop a deployment can run (see the constructor docs).
+    if (this.#claimTimeoutMs === null || this.#claimTimeoutMs <= 0) {
+      throw new TypeError("new Stash: claimTimeout must be a positive duration");
+    }
     const sweepMs = parse(opts.sweepInterval, "sweepInterval");
     if (sweepMs !== null) {
       if (sweepMs <= 0 || sweepMs > C.TIME.MAX_TIMER_MS) {
@@ -305,15 +402,13 @@ export class Stash {
     if (this.#sweepInFlight !== null) return;
     const work = this.prune();
     this.#sweepInFlight = work.then(() => {}, () => {});
-    try {
-      await work;
-    } catch { // drop-silent -- by design (allow:catch-return-swallow): a rejected
-      // background sweep would become an unhandledRejection, fatal on Node, and a
-      // janitor must never take the process down. M6 replaces this silence with
-      // the 'sweepError' emit; vector 16 pins survival now.
-    } finally {
-      this.#sweepInFlight = null;
-    }
+    // Drop-silent by design (drift rule 8's tier-3 sink): a rejected background
+    // sweep would become an unhandledRejection, fatal on Node, and a janitor must
+    // never take the process down. M6 replaces this silence with the 'sweepError'
+    // emit; vector 16 pins survival now. The failure routes through `.catch`, so
+    // the in-flight flag always clears -- no try/finally to misread as fail-open.
+    await work.catch(() => {});
+    this.#sweepInFlight = null;
   }
 
   // #statLive(ref) -- the shared lazy-expiry gate. stat the entry, and if it is
@@ -332,6 +427,109 @@ export class Stash {
     return entry;
   }
 
+  // #rejectIfClaimed(ref) -- the claim gates contended access to an entry's
+  // mutable state, not just its bytes. A live claim means a pop or budgeted read
+  // holds the entry, so a concurrent reader rejects RefClaimed HERE, before the
+  // advisory stat opens the sidecar the holder is rewriting -- on Windows an open
+  // reader blocks that rewrite's rename and livelocks the holder. Advisory: the
+  // claim's own link is the authoritative mutex, so a claim taken in the window
+  // after this probe still serializes correctly -- the loser then rejects at the
+  // link instead. #recover(), run first by every verb, clears stale claims, so a
+  // hit here is a live claim, not a prior run's debris.
+  async #rejectIfClaimed(ref) {
+    if (await this.#backend.isClaimed(ref)) throw new RefClaimed();
+  }
+
+  // #recover() -- the lazy crash-recovery scan (SPEC.md 6). Memoized so it runs
+  // on the first public verb -- never in the constructor (no I/O there) -- and
+  // re-runs only once a claim it skipped for being too young would have aged past
+  // the lease (see #nextRecoverAt below), not per operation. It resolves every
+  // STALE claim: one older than claimTimeout was abandoned by a prior run, while a
+  // younger one may be a live pop and is left, then re-checked once it ages. A
+  // claim whose sidecar is gone is an
+  // interrupted commit -- recovery FINISHES the deletion (never restores a
+  // sidecar-less blob into the store, fragile area 6); otherwise the entry is
+  // resolved per onPopFailure ('burn' destroys, 'restore' returns it). It drives
+  // backend methods only, so it cannot recurse into a public verb. A failed scan
+  // clears the memo so the next verb retries, mirroring the disk backend's #init.
+  #recover() {
+    // Re-run once a claim a prior scan skipped for being younger than the lease
+    // would have aged past it: memoizing forever would strand a claim that looked
+    // live at the first op (a crash within claimTimeout) as ECLAIMED until a
+    // restart. The memo stays shared until #nextRecoverAt, so concurrent ops still
+    // run one scan; a scan that resolves everything sets the deadline to Infinity.
+    if (this.#recovered !== null && Date.now() < this.#nextRecoverAt) return this.#recovered;
+    this.#nextRecoverAt = Infinity; // claim this re-scan for concurrent ops to share
+    this.#recovered = (async () => {
+      const claims = await this.#backend.listClaims();
+      const now = Date.now();
+      let nextAt = Infinity;
+      for (const { id, claimedAt } of claims) {
+        const staleAt = claimedAt + this.#claimTimeoutMs;
+        if (now < staleAt) { // still within the lease -- maybe a live pop; leave it,
+          nextAt = Math.min(nextAt, staleAt); // but re-scan once it would age past the lease
+          continue;
+        }
+        let hasSidecar = true;
+        try {
+          await this.#backend.stat(id);
+        } catch (err) {
+          if (err instanceof RefNotFound) hasSidecar = false;
+          else throw err;
+        }
+        // Resolve the stale claim, tolerating one that ANOTHER process's recovery
+        // over the same root already resolved between our listClaims and here: two
+        // simultaneous starts can list the same stale claim, and the loser's
+        // restore then finds it gone (RefNotFound) or its target already restored
+        // (IntegrityError). Recovery's contract is only that no stale claim REMAINS,
+        // so the verdict is the claim's presence: if it is gone the work is done --
+        // swallow the fault; a claim still standing after a failed restore/commit is
+        // a real fault, propagated to clear the memo for a retry.
+        try {
+          if (!hasSidecar || this.#onPopFailure === "burn") {
+            await this.#backend.commit(id);
+          } else {
+            await this.#backend.restore(id);
+          }
+        } catch (err) {
+          if (await this.#backend.isClaimed(id)) throw err;
+        }
+      }
+      this.#nextRecoverAt = nextAt;
+    })().catch((err) => {
+      this.#recovered = null;
+      this.#nextRecoverAt = 0;
+      throw err;
+    });
+    return this.#recovered;
+  }
+
+  // #claimedRead(ref, onCommit) -- the ONE claimed-read path, shared by pop and
+  // budgeted apply (SPEC.md 4.1 "same commit path", drift rule 6a). Claim the
+  // entry (the claim serializes concurrent readers; the loser gets RefClaimed
+  // from the backend), re-check expiry on the CLAIMED entry -- the authoritative
+  // check, since a TTL can lapse between the advisory pre-check and winning the
+  // claim (fragile area 4) -- then stream it digest-verified. A full drain with a
+  // matching digest runs `onCommit(claimedEntry)`; any other outcome (mismatch,
+  // error, premature destroy) restores the claim, or burns it under
+  // onPopFailure: 'burn'. pop and budgeted apply differ only in onCommit, so the
+  // destruction/restore machinery has exactly one home.
+  async #claimedRead(ref, onCommit) {
+    const { entry, source } = await this.#backend.claim(ref);
+    if (isExpired(entry, Date.now())) {
+      _dispose(source);
+      await this.#backend.restore(ref);
+      await this.#backend.remove(ref); // lazy-drop the now-expired entry
+      throw new RefNotFound();
+    }
+    return _verifiedStream(entry, source, {
+      onCommit: () => onCommit(entry),
+      onFail: () => (this.#onPopFailure === "burn"
+        ? this.#backend.commit(ref)
+        : this.#backend.restore(ref)),
+    });
+  }
+
   /**
    * @primitive  stash.push
    * @signature  stash.push(source, opts) -> Promise<string>
@@ -347,8 +545,13 @@ export class Stash {
    * digest as the bytes pass. `opts.meta` is a caller-owned plain object,
    * round-tripped verbatim as JSON and never interpreted. `opts.ttl` overrides
    * the constructor default for this entry (`null` overrides a default back to
-   * no expiry); an absent `ttl` inherits the default. Terms are fixed at push
-   * and only move the entry toward destruction -- there is no touch or extend.
+   * no expiry); an absent `ttl` inherits the default. `opts.reads` is a read
+   * budget: a positive integer count of successful `apply` drains after which
+   * the entry self-destructs (`null`, the default, is unlimited). A budgeted
+   * `apply` spends one credit only on a full, digest-verified drain -- an
+   * abandoned or corrupted read costs nothing -- and the read that takes the
+   * budget to zero destroys the entry. Terms are fixed at push and only move the
+   * entry toward destruction -- there is no touch or extend.
    * The ref is random -- a capability, not a content address. Construct-time
    * `maxSize` bounds this entry (`SizeExceeded`, thrown mid-stream), and
    * `maxEntries` / `maxTotal` bound the whole store (`StashFull`); a rejected
@@ -358,7 +561,7 @@ export class Stash {
    *   const ref = await stash.push(ciphertext, { meta: { kind: "drop" }, ttl: "1h" });
    */
   async push(source, opts = {}) {
-    options(opts, "push", { allowed: ["meta", "ttl"], unimplemented: UNIMPLEMENTED_PUSH_OPTIONS });
+    options(opts, "push", { allowed: ["meta", "ttl", "reads"], unimplemented: UNIMPLEMENTED_PUSH_OPTIONS });
     let meta = {};
     if (opts.meta !== undefined) {
       plainObject(opts.meta, "push: meta");
@@ -374,7 +577,11 @@ export class Stash {
     // the constructor default; an absent key inherits it. parse throws a
     // config-time TypeError before anything is stored on a malformed ttl.
     const ttlMs = opts.ttl !== undefined ? parse(opts.ttl, "push: ttl") : this.#ttlMs;
+    // reads (null = unlimited) is the entry's read budget; make() validates it as
+    // a positive integer or null at this single construction site.
+    const reads = opts.reads === undefined ? null : opts.reads;
     const chunks = _toChunkSource(source);
+    await this.#recover();
     // Stash-wide bounds, enforced in the policy layer before the backend stores
     // a byte. maxEntries is a hard pre-check (a new entry always adds one) and
     // rejects before the stream starts. maxTotal is enforced mid-stream against
@@ -388,7 +595,7 @@ export class Stash {
     // atomic; concurrent pushes can overshoot by the in-flight count, which
     // bounds the overshoot without a lock the sidecar design omits.
     const id = generate();
-    const entry = make(id, meta, ttlMs);
+    const entry = make(id, meta, ttlMs, reads);
     let residual = null;
     if (this.#maxEntries !== null || this.#maxTotal !== null) {
       await this.prune();
@@ -431,13 +638,38 @@ export class Stash {
    * passing and never streamed, even if the sweeper has not run; a malformed
    * ref dies at the whitelist with `InvalidRef` before any storage access.
    *
+   * An entry pushed with a read budget (`reads`) is instead claimed for the
+   * read: concurrent readers serialize through the claim (the loser rejects
+   * `RefClaimed`), one credit is spent only on a full, digest-verified drain,
+   * and the read that exhausts the budget destroys the entry through the same
+   * path as `pop`. An unbudgeted entry stays lock-free and pays nothing for the
+   * feature.
+   *
    * @example
    *   const readable = await stash.apply(ref);
    *   for await (const chunk of readable) sink.write(chunk);
    */
   async apply(ref) {
     assertValid(ref);
+    await this.#recover();
+    await this.#rejectIfClaimed(ref); // a contended reader bails before opening the sidecar
     const entry = await this.#statLive(ref);
+    // A budgeted entry (reads !== null) serializes through the claim mechanism --
+    // two concurrent reads cannot both spend the last credit -- and spends one
+    // credit ONLY on a full drain with a matching digest (an abandoned or failed
+    // read costs nothing). The read that takes readsLeft to zero destroys the
+    // entry through the SAME commit path as pop. An unbudgeted entry stays
+    // lock-free and pays nothing for the feature.
+    if (entry.reads !== null) {
+      return this.#claimedRead(ref, async (claimed) => {
+        if (claimed.readsLeft === 1) {
+          await this.#backend.commit(ref); // the last credit: destroy through the commit path
+        } else {
+          await this.#backend.consumeRead(ref); // persist the debit BEFORE restoring (fragile area 5)
+          await this.#backend.restore(ref);
+        }
+      });
+    }
     const source = await this.#backend.read(ref);
     // The gate above and this open are two awaits apart, so a short TTL can
     // lapse in between -- opening a read on a live entry that is expired by the
@@ -451,6 +683,39 @@ export class Stash {
       throw new RefNotFound();
     }
     return _verifiedStream(entry, source);
+  }
+
+  /**
+   * @primitive  stash.pop
+   * @signature  stash.pop(ref) -> Promise<Readable>
+   * @since      0.1.7
+   * @status     experimental
+   * @spec       SPEC.md 4, SPEC.md 6, FIPS 180-4
+   * @defends    CWE-362, CWE-367, CWE-354
+   * @related    stash.apply, stash.drop
+   *
+   * Read an entry's bytes and destroy it: the stream is digest-verified as it
+   * drains, and the entry is deleted the instant it drains cleanly -- bytes out
+   * once, then gone. Pop ignores any read budget; it is terminal by definition.
+   *
+   * The claim is atomic at the filesystem: two concurrent `pop(ref)` race on the
+   * claim, exactly one wins and drains, the other rejects `RefClaimed`
+   * (`ECLAIMED`). A stream that errors, is destroyed early, or fails its digest
+   * is resolved by `onPopFailure` -- `'restore'` (default) returns the entry so
+   * the read can be retried, `'burn'` destroys it anyway. An unknown, expired, or
+   * already-claimed ref rejects (`RefNotFound` / `RefClaimed`); a malformed ref
+   * dies at the whitelist with `InvalidRef` before any storage access.
+   *
+   * @example
+   *   const readable = await stash.pop(ref); // drains, then the entry is gone
+   *   for await (const chunk of readable) sink.write(chunk);
+   */
+  async pop(ref) {
+    assertValid(ref);
+    await this.#recover();
+    await this.#rejectIfClaimed(ref); // a concurrent pop's loser bails before the advisory stat
+    await this.#statLive(ref); // advisory: reject an expired entry with zero claim taken
+    return this.#claimedRead(ref, () => this.#backend.commit(ref));
   }
 
   /**
@@ -472,6 +737,7 @@ export class Stash {
    */
   async show(ref) {
     assertValid(ref);
+    await this.#recover();
     return this.#statLive(ref);
   }
 
@@ -502,6 +768,7 @@ export class Stash {
     if (opts.includeExpired !== undefined && typeof opts.includeExpired !== "boolean") {
       throw new TypeError("list: includeExpired must be a boolean");
     }
+    await this.#recover();
     const entries = await this.#backend.list();
     if (opts.includeExpired) return entries;
     const now = Date.now();
@@ -526,6 +793,7 @@ export class Stash {
    */
   async drop(ref) {
     assertValid(ref);
+    await this.#recover();
     return this.#backend.remove(ref);
   }
 
@@ -543,6 +811,7 @@ export class Stash {
    *   const destroyed = await stash.clear();
    */
   async clear() {
+    await this.#recover();
     const entries = await this.#backend.list();
     let destroyed = 0;
     for (const entry of entries) {
@@ -571,6 +840,13 @@ export class Stash {
    *   const reaped = await stash.prune(); // number of expired entries destroyed
    */
   async prune() {
+    // prune is a public verb AND the background sweep's operation, so it carries
+    // the same first-operation recovery every other verb does: a sweep-only
+    // deployment must still resolve a prior run's stale claims (restore/burn per
+    // onPopFailure), not leave claimed bytes occupying the store until some other
+    // verb happens to run. #recover drives backend methods only, so this cannot
+    // recurse into prune; it is memoized, so the sweep runs it just once.
+    await this.#recover();
     const entries = await this.#backend.list();
     const now = Date.now();
     let destroyed = 0;

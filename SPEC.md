@@ -337,6 +337,14 @@ construction, `Stash` scans for claims older than `claimTimeout` (default `10m`)
 each per `onPopFailure`. The scan is lazy — it runs on first use, not in the constructor,
 because constructors don't do I/O.
 
+Recovery reclaims a claim purely by age, and cannot tell a crashed reader's claim from a
+legitimately slow live one. This is a **single-writer-per-root** model: one process opens a
+disk root at a time, and `claimTimeout` must exceed the longest `pop`/budgeted read that
+process can run, so a live reader's claim is never mistaken for abandoned. A non-positive
+`claimTimeout` is refused at construction — it would make recovery reclaim an active pop
+instantly. Concurrent writers over one root, or a lease that survives a slow reader, are not in
+scope here (they would need a heartbeat/lease that the monotone rule’s "no touch" forbids).
+
 ---
 
 ## 7. Expiry

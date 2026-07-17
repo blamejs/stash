@@ -96,6 +96,20 @@ exception, a hang -- is reported as a crash. The harness lives in
   and keep `maxSize` at or below `maxTotal`. On the memory backend the ceiling is
   the process heap, not a partition. SPEC.md section 8.2 has the full sizing
   guidance.
+- **A pop or budgeted read is claimed, not locked in memory.** Concurrent
+  `pop(ref)` (and concurrent budgeted `apply`) race on an atomic filesystem
+  claim -- a hard link on disk -- so exactly one reader drains and the rest
+  reject `RefClaimed`; the last read credit cannot be double-spent, and a credit
+  is charged only on a full, digest-verified drain, so an abandoned or corrupted
+  read never consumes budget. A process killed mid-pop leaves a claim, not a
+  lost entry: the next construction reclaims it on its first operation, resolving
+  it per `onPopFailure`. Recovery reclaims a claim purely by age, so this is a
+  single-writer-per-root model: keep one process on a disk root, and set
+  `claimTimeout` ABOVE the longest `pop`/budgeted read that process can run, or a
+  legitimately slow reader's claim looks abandoned and gets reclaimed out from
+  under it -- the once-only read gone. A non-positive `claimTimeout` is refused at
+  construction (it would reclaim an active pop instantly). A claim survives a
+  crash on disk only; the memory backend is process-lifetime by definition.
 
 ## What StashJS deliberately does not do
 

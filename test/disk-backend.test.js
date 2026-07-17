@@ -10,22 +10,26 @@ import {
   appendFileSync,
   constants,
   existsSync,
+  linkSync,
   lstatSync,
+  lutimesSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
   truncateSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { open } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
-import { Stash, RefNotFound, InvalidRef, IntegrityError, SizeExceeded } from "../src/index.js";
-import { DiskBackend, descriptorMatchesName, verifyDescriptorAgainstName } from "../src/backends/disk.js";
+import { Stash, RefNotFound, RefClaimed, InvalidRef, IntegrityError, SizeExceeded } from "../src/index.js";
+import { DiskBackend, descriptorMatchesName, verifyDescriptorAgainstName, _writeAll } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
 import { freshScratchDir, cleanupScratch } from "./_scratch.js";
 
@@ -91,6 +95,57 @@ function freshStash() {
   const root = freshRoot();
   return { root, stash: new Stash({ backend: new DiskBackend({ root }) }) };
 }
+
+// Older than the default '10m' claimTimeout: a claim stamped this far back reads
+// as a prior run's abandoned pop, not a live one.
+const CLAIM_STALE_MS = 20 * 60 * 1000;
+
+// Plant the on-disk state a crashed pop leaves behind. A real claim hard-links
+// blobs/<id> into claims/<id> then unlinks the original, so the net state is the
+// blob living only under claims/<id>; its mtime is claimedAt (what recovery reads
+// to age the claim). A stale mtime is a prior run's abandoned pop; a fresh one
+// (ageMs: 0) is another live process's. The sidecar stays in meta/ unless
+// `dropSidecar` simulates a commit interrupted after the sidecar unlink.
+// renameSync of a just-written blob can EPERM briefly on Windows while the OS
+// still holds the closed handle (antivirus / indexer / lazy release); POSIX
+// renames on the first try. A bounded retry with a short synchronous pause
+// clears it. Test-only robustness -- the shipped backend has its own retry.
+function _renameSyncRetry(from, to) {
+  const spin = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(from, to);
+      return;
+    } catch (err) {
+      if (err.code !== "EPERM" || attempt >= 50) throw err;
+      Atomics.wait(spin, 0, 0, 4); // ~4ms synchronous pause before the next attempt
+    }
+  }
+}
+
+function plantClaim(root, ref, { ageMs = CLAIM_STALE_MS, dropSidecar = false } = {}) {
+  _renameSyncRetry(join(root, "blobs", ref), join(root, "claims", ref));
+  const when = new Date(Date.now() - ageMs);
+  utimesSync(join(root, "claims", ref), when, when);
+  if (dropSidecar) rmSync(join(root, "meta", ref + ".json"));
+}
+
+// A child that takes a real claim then SIGKILLs itself mid-pop, leaving the
+// actual on-disk crash state (blob under claims/, sidecar intact) the planted
+// vectors simulate. It imports the library by absolute URL so it resolves from
+// anywhere; it signals readiness by writing the ref only AFTER pop has claimed.
+const RECOVER_CHILD = [
+  `import { Stash } from ${JSON.stringify(new URL("../src/index.js", import.meta.url).href)};`,
+  `import { DiskBackend } from ${JSON.stringify(new URL("../src/backends/disk.js", import.meta.url).href)};`,
+  `import { writeFileSync } from "node:fs";`,
+  `const [root, refFile] = process.argv.slice(2);`,
+  `const stash = new Stash({ backend: new DiskBackend({ root }) });`,
+  `const ref = await stash.push(Buffer.alloc(65536, 3));`,
+  `await stash.pop(ref);`, // claim taken: blob moved to claims/, stream never drained
+  `writeFileSync(refFile, ref);`, // tell the parent the claim is in place
+  `process.kill(process.pid, "SIGKILL");`, // die mid-pop, claim abandoned
+  ``,
+].join("\n");
 
 suite("disk: construction", () => {
   test("root is validated at config time; the constructor does no I/O", () => {
@@ -743,5 +798,364 @@ suite("disk: limits (SPEC.md 8)", () => {
     assert.equal(s.entries, 2, "both sidecars present -> both counted");
     assert.equal(s.entries, listed.length, "stats().entries agrees with list().length");
     assert.ok(s.bytes > 10, "counts one intact blob plus both sidecars, minus the removed blob");
+  });
+});
+
+suite("disk: crash recovery (SPEC 6)", () => {
+  test("an abandoned claim restores on the first op, not at construction (default policy)", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("survivor");
+    plantClaim(root, ref); // a prior run killed mid-pop: stale claim, sidecar intact
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    assert.equal(existsSync(join(root, "claims", ref)), true, "the constructor performed no scan");
+    assert.deepEqual(await drain(await next.apply(ref)), Buffer.from("survivor"), "the first op restored it");
+    assert.equal(existsSync(join(root, "claims", ref)), false, "the resolved claim is gone");
+    assert.equal(existsSync(join(root, "blobs", ref)), true, "the blob is live under blobs/ again");
+  });
+
+  test("an abandoned claim burns under onPopFailure:'burn', leaving no residue", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("condemned");
+    plantClaim(root, ref);
+    const next = new Stash({ backend: new DiskBackend({ root }), onPopFailure: "burn" });
+    await assert.rejects(next.apply(ref), RefNotFound);
+    for (const dir of ["blobs", "meta", "claims"]) {
+      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ holds no residue`);
+    }
+  });
+
+  test("a FRESH claim is left alone -- another process's live pop is not resolved out from under it", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("in-flight");
+    plantClaim(root, ref, { ageMs: 0 }); // claimedAt = now -> a live pop, not this run's to resolve
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    await assert.rejects(next.apply(ref), RefClaimed); // recovery left it; the reader sees the live claim
+    assert.equal(existsSync(join(root, "claims", ref)), true, "the live claim is untouched");
+  });
+
+  test("an interrupted commit is finished, never restored -- a claim without a sidecar is completed", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("half-deleted");
+    plantClaim(root, ref, { dropSidecar: true }); // the sidecar was already unlinked: commit was interrupted
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    await assert.rejects(next.apply(ref), RefNotFound);
+    for (const dir of ["blobs", "meta", "claims"]) {
+      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ emptied -- the deletion finished`);
+    }
+  });
+
+  test("a read debit survives a crash between the debit and the restore -- exactly the remaining budget serves", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("twice", { reads: 2 });
+    // The window between consumeRead (sidecar already decremented) and restore
+    // (blob still claimed): a crash here must leave the debit persisted, so the
+    // entry serves its REMAINING credit, never the pre-debit count.
+    const sidecar = join(root, "meta", ref + ".json");
+    const entry = JSON.parse(readFileSync(sidecar, "utf8"));
+    entry.readsLeft = 1;
+    writeFileSync(sidecar, JSON.stringify(entry));
+    plantClaim(root, ref);
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    assert.deepEqual(await drain(await next.apply(ref)), Buffer.from("twice"), "the surviving credit serves");
+    await assert.rejects(next.apply(ref), RefNotFound, "one credit remained and is now spent -- not two");
+  });
+
+  test("a planted symlink at claims/<id> is never followed off the store", { skip: !FILE_SYMLINKS }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("real");
+    const secret = join(freshRoot(), "outside");
+    mkdirSync(join(secret, ".."), { recursive: true });
+    writeFileSync(secret, "attacker-controlled");
+    rmSync(join(root, "blobs", ref)); // clear the real blob, plant a link in its claimed place
+    symlinkSync(secret, join(root, "claims", ref), "file");
+    // lutimes, not utimes: stamp the LINK's own mtime (utimes would follow it and
+    // age the target) so recovery reads the claim as stale and resolves it.
+    const when = new Date(Date.now() - CLAIM_STALE_MS);
+    lutimesSync(join(root, "claims", ref), when, when);
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    // recovery restores by RENAME (the link is moved, never dereferenced); the
+    // read then refuses the symlinked blob rather than serving foreign bytes.
+    await assert.rejects(next.apply(ref), IntegrityError);
+    assert.equal(readFileSync(secret, "utf8"), "attacker-controlled", "the link target was never touched");
+  });
+
+  test("file modes survive a claim/restore cycle: the restored blob is still 0600", { skip: process.platform === "win32" }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push(Buffer.alloc(65536, 1), { reads: 2 });
+    await drain(await stash.apply(ref)); // a budgeted read: claim -> consumeRead -> restore
+    assert.equal(statSync(join(root, "blobs", ref)).mode & 0o777, 0o600, "the restored blob keeps 0600");
+  });
+
+  test("a drop during a live claim is monotone -- restoring the abandoned claim resurrects nothing", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("condemned");
+    plantClaim(root, ref, { ageMs: 0 }); // a live claim: the blob sits in claims/, the sidecar in meta/
+    await stash.drop(ref); // drop mid-claim removes the sidecar -- the entry is destroyed
+    assert.equal(existsSync(join(root, "meta", ref + ".json")), false, "the sidecar is gone");
+    // The claim-holder (or a later run) tries to restore the abandoned claim. A
+    // dropped entry MUST NOT come back, and no orphan blob may be left behind
+    // (SPEC 4.2 monotone) -- the same contract the memory backend's remove states.
+    const backend = new DiskBackend({ root });
+    await assert.rejects(backend.restore(ref), RefNotFound, "restore of a dropped entry finds nothing");
+    for (const dir of ["blobs", "meta", "claims"]) {
+      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ empty -- no orphan, no resurrection`);
+    }
+  });
+
+  test("a process killed mid-pop leaves a claim the next construction recovers", { skip: SANDBOXED || process.platform === "win32", timeout: 15000 }, async () => {
+    const root = freshRoot();
+    const bay = freshScratchDir("recover-child");
+    mkdirSync(bay, { recursive: true });
+    const refFile = join(bay, "ref");
+    const childFile = join(bay, "child.mjs");
+    writeFileSync(childFile, RECOVER_CHILD);
+    // The child SIGKILLs itself after claiming, so execFileSync throws on the
+    // signal exit -- that throw IS the crash under test.
+    let died = false;
+    try {
+      execFileSync(process.execPath, [childFile, root, refFile], { stdio: "ignore" });
+    } catch {
+      died = true;
+    }
+    assert.ok(died, "the child self-terminated mid-pop");
+    const ref = readFileSync(refFile, "utf8").trim();
+    assert.equal(existsSync(join(root, "claims", ref)), true, "the kill left the blob claimed in claims/");
+    assert.equal(existsSync(join(root, "blobs", ref)), false, "blobs/ is empty -- the claim took the blob");
+    // A fresh construction recovers the abandoned claim on its first op. The
+    // real kill happened many ms ago (execFileSync blocked for the child's whole
+    // life), so a 1ms claimTimeout reads it as stale; the default policy restores.
+    const next = new Stash({ backend: new DiskBackend({ root }), claimTimeout: 1 });
+    assert.deepEqual(await drain(await next.apply(ref)), Buffer.alloc(65536, 3), "the killed pop's entry recovered and served");
+  });
+
+  test("recovery tolerates a claim another instance's start already resolved -- no spurious failure", async () => {
+    // Two Stash instances over one root can list the same stale claim before
+    // either resolves it. A one-shot side effect on stat plays the racing
+    // instance here: it restores the claim in the window between this recovery's
+    // listClaims and its own restore, so the loser's restore finds blobs/<id>
+    // already occupied (IntegrityError) with the claim gone. Recovery must read
+    // that as concurrent COMPLETION -- no stale claim remains -- and let the
+    // now-live entry serve, never abort the loser's first operation.
+    const { root, stash } = freshStash();
+    const ref = await stash.push("survivor");
+    plantClaim(root, ref); // stale claim, sidecar intact
+    const inner = new DiskBackend({ root });
+    let raced = false;
+    const backend = {};
+    for (const m of ["write", "read", "remove", "stat", "list", "stats", "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed"]) {
+      backend[m] = (...a) => inner[m](...a);
+    }
+    backend.stat = async (id) => {
+      const entry = await inner.stat(id);
+      if (!raced) { raced = true; await inner.restore(id); } // the racing instance restores it first
+      return entry;
+    };
+    const loser = new Stash({ backend });
+    assert.deepEqual(
+      await drain(await loser.apply(ref)),
+      Buffer.from("survivor"),
+      "the already-recovered entry serves; a concurrent restore is completion, not failure",
+    );
+  });
+
+  test("recovery completes an interrupted claim (crash after link, before unlink) -- a duplicate link, not a brick", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("survivor");
+    // The crash window: the blob is hard-linked into claims/ but the original
+    // blobs/ name was never removed -- both names point at one blob. Stamp the
+    // claim stale so recovery acts.
+    linkSync(join(root, "blobs", ref), join(root, "claims", ref));
+    const when = new Date(Date.now() - CLAIM_STALE_MS);
+    lutimesSync(join(root, "claims", ref), when, when);
+    // restore must recognize blobs/<id> as the SAME inode (the interrupted claim),
+    // drop the redundant claim, and keep the entry live -- not brick every op with
+    // a "target occupied" IntegrityError recovery can never clear.
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    assert.deepEqual(await drain(await next.apply(ref)), Buffer.from("survivor"), "the interrupted-claim entry recovered and serves");
+    assert.equal(existsSync(join(root, "claims", ref)), false, "the redundant claim name was dropped");
+    assert.equal(existsSync(join(root, "blobs", ref)), true, "the entry stays live at blobs/");
+  });
+
+  test("prune alone recovers stale claims -- a sweep-only deployment resolves an abandoned pop", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("survivor");
+    plantClaim(root, ref); // stale claim, sidecar intact
+    // prune is the ONLY operation a sweep-only deployment runs; it must carry the
+    // first-operation recovery, resolving the stale claim rather than deferring it
+    // until some other verb happens to run.
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    await next.prune();
+    assert.equal(existsSync(join(root, "claims", ref)), false, "prune recovered the stale claim");
+    assert.deepEqual(await drain(await next.apply(ref)), Buffer.from("survivor"), "the recovered entry is live");
+  });
+
+  test("recovery re-runs after the grace period -- a claim young at the first op is reclaimed once it ages, no restart", { timeout: 5000 }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("survivor");
+    plantClaim(root, ref, { ageMs: 0 }); // a fresh claim: younger than the lease at the first op
+    const next = new Stash({ backend: new DiskBackend({ root }), claimTimeout: 50 });
+    await assert.rejects(next.apply(ref), RefClaimed); // the first op leaves the young claim alone
+    // Once the claim ages past the 50ms lease, a LATER op must re-run recovery and
+    // restore it -- without a restart. Poll that later op (memoizing recovery
+    // forever would spin here until the test times out).
+    let bytes;
+    for (;;) {
+      try { bytes = await drain(await next.apply(ref)); break; }
+      catch (err) {
+        if (!(err instanceof RefClaimed)) throw err;
+        await new Promise((r) => setImmediate(r));
+      }
+    }
+    assert.deepEqual(bytes, Buffer.from("survivor"), "recovery re-ran after the grace period and the entry serves");
+  });
+});
+
+suite("disk: drop races the claim lifecycle (SPEC 4.2)", () => {
+  const skeleton = (id, reads) => ({
+    id, size: 0, digest: null, createdAt: 0, expiresAt: null, reads, readsLeft: reads, meta: {},
+  });
+
+  test("consumeRead rewrites the sidecar in place, never via a fresh file", { skip: process.platform === "win32" }, async () => {
+    // The debit rewrites the sidecar THROUGH the descriptor it read -- same inode
+    // -- not a tmp+rename that installs a new one. That is what keeps the debit
+    // safe against a concurrent drop: a rename recreates a name the drop removed
+    // (resurrection), while an in-place write lands on the same inode, or on a
+    // ghost if the name was unlinked. Inode identity is the observable proof.
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(100, 1)], skeleton(id, 2));
+    (await backend.claim(id)).source.destroy();
+    const sidecar = join(root, "meta", id + ".json");
+    const before = statSync(sidecar).ino;
+    assert.equal(await backend.consumeRead(id), 1);
+    assert.equal(statSync(sidecar).ino, before, "the sidecar keeps its inode -- rewritten in place, not replaced");
+  });
+
+  test("consumeRead of an entry whose sidecar was dropped refuses and recreates nothing", async () => {
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(100, 1)], skeleton(id, 2));
+    (await backend.claim(id)).source.destroy();
+    rmSync(join(root, "meta", id + ".json")); // a concurrent drop removed the sidecar
+    await assert.rejects(backend.consumeRead(id), RefNotFound);
+    assert.deepEqual(readdirSync(join(root, "meta")), [], "the debit never recreated the dropped sidecar");
+  });
+
+  test("restore of an entry whose sidecar was dropped refuses and leaves no orphan blob", async () => {
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(100, 1)], skeleton(id, 2));
+    (await backend.claim(id)).source.destroy();
+    rmSync(join(root, "meta", id + ".json")); // a concurrent drop removed the sidecar
+    await assert.rejects(backend.restore(id), RefNotFound);
+    assert.deepEqual(readdirSync(join(root, "blobs")), [], "no blob orphaned in blobs/ without a sidecar");
+    assert.deepEqual(readdirSync(join(root, "meta")), [], "the sidecar stays gone -- not resurrected");
+  });
+
+  test("a claim over a symlinked blob never follows the link to touch an outside target", { skip: !FILE_SYMLINKS }, async () => {
+    // A hostile blobs/<id> symlink is hard-linked into claims/ as a link to the
+    // symlink. A path utimes would FOLLOW it and stamp the target's mtime outside
+    // the store before the open rejects the claim -- bending the no-follow
+    // discipline. lutimes stamps the link itself, so the target is never touched
+    // and the claim still fails loudly at the open.
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(100, 1)], skeleton(id, 2));
+    const outside = freshRoot();
+    mkdirSync(outside, { recursive: true });
+    const target = join(outside, "outside-target");
+    writeFileSync(target, "attacker-owned");
+    const targetMtimeBefore = statSync(target).mtimeMs;
+    rmSync(join(root, "blobs", id));
+    symlinkSync(target, join(root, "blobs", id), "file"); // swap the blob for a link out of the store
+    await assert.rejects(backend.claim(id), IntegrityError);
+    assert.equal(statSync(target).mtimeMs, targetMtimeBefore, "the outside target's mtime was not touched");
+  });
+
+  test("writeAll writes the whole buffer under short writes, and fails on no progress", async () => {
+    // FileHandle.write can resolve after fewer than length bytes; a truncated
+    // sidecar or blob reads back as corruption and loses a completed drain's
+    // budget. writeAll must loop until the buffer is fully written.
+    const payload = Buffer.from("the full serialized sidecar payload, longer than one short write");
+    const landed = Buffer.alloc(payload.length);
+    let calls = 0;
+    const shortFh = {
+      write: async (buf, off, len, pos) => {
+        calls += 1;
+        const n = Math.min(3, len); // pathological: at most three bytes per call
+        buf.copy(landed, pos, off, off + n);
+        return { bytesWritten: n };
+      },
+    };
+    await _writeAll(shortFh, payload, 0);
+    assert.deepEqual(landed, payload, "every byte landed despite three-byte short writes");
+    assert.ok(calls > 1, "the write actually looped over the short writes");
+    // a write that makes no progress is a fault, not an infinite loop
+    const stuckFh = { write: async () => ({ bytesWritten: 0 }) };
+    await assert.rejects(_writeAll(stuckFh, payload, 0), IntegrityError);
+  });
+
+  test("stats() counts a sidecar-less claim blob's bytes so a drop-during-claim cannot bypass maxTotal", async () => {
+    // pop/read + drop + abandon leaves a blob under claims/ with no sidecar in
+    // meta/. Those bytes still occupy the store, so stats() must count them --
+    // otherwise repeating the sequence hoards claim blobs that every bounded push
+    // sees as an empty store, a maxTotal bypass and a disk-fill.
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(5000, 1)], skeleton(id, 2));
+    (await backend.claim(id)).source.destroy(); // blob -> claims/, sidecar in meta/
+    rmSync(join(root, "meta", id + ".json")); // a drop removes the sidecar; the blob lingers in claims/
+    const s = await backend.stats();
+    assert.equal(s.entries, 0, "no live entry -- the sidecar is gone");
+    assert.equal(s.claimed, 1, "the claim is counted");
+    assert.ok(s.bytes >= 5000, "the sidecar-less claim blob's bytes count against the store footprint");
+  });
+
+  test("a claim whose sidecar was dropped after the blob moved cleans up, never orphans", async () => {
+    // The claim links+unlinks the blob into claims/ THEN stats the sidecar; a drop
+    // that removes the sidecar in that window makes stat RefNotFound. The claim
+    // must undo itself -- not strand the blob in claims/ where it blocks later
+    // reads and holds maxTotal until a future run's recovery.
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(100, 1)], skeleton(id, 2));
+    rmSync(join(root, "meta", id + ".json")); // the entry is dropped before the claim's stat
+    await assert.rejects(backend.claim(id), RefNotFound);
+    assert.deepEqual(readdirSync(join(root, "claims")), [], "the dropped entry's blob is not orphaned in claims/");
+  });
+
+  test("a claim that fails on a corrupt sidecar after the blob moved restores it, never orphans", async () => {
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(100, 1)], skeleton(id, 2));
+    writeFileSync(join(root, "meta", id + ".json"), "{ not valid json"); // stat throws IntegrityError post-move
+    await assert.rejects(backend.claim(id), IntegrityError);
+    assert.deepEqual(readdirSync(join(root, "claims")), [], "no orphan claim left behind");
+    assert.equal(existsSync(join(root, "blobs", id)), true, "the blob was restored to blobs/, its pre-claim state");
+  });
+
+  test("a budgeted read racing a concurrent drop leaves no resurrection and no orphan half", async () => {
+    // Sweep the finalize window many rounds: a drop removing the sidecar while a
+    // reads:2 apply debits-and-restores must keep the entry destroyed -- never a
+    // recreated sidecar (resurrection) nor a sidecar-less blob stranded in blobs/
+    // (an unreclaimable orphan). A blob may linger in claims/ pending recovery.
+    for (let round = 0; round < 40; round += 1) {
+      const { root, stash } = freshStash();
+      const ref = await stash.push(Buffer.alloc(65536, round % 256), { reads: 2 });
+      const reader = (async () => {
+        try { await drain(await stash.apply(ref)); } catch { /* raced: RefNotFound / RefClaimed / IntegrityError are all fine */ }
+      })();
+      const dropper = stash.drop(ref).catch(() => {});
+      await Promise.all([reader, dropper]);
+      assert.deepEqual(readdirSync(join(root, "meta")), [], `round ${round}: no sidecar survives a dropped entry`);
+      assert.deepEqual(readdirSync(join(root, "blobs")), [], `round ${round}: no blob orphaned in blobs/`);
+    }
   });
 });

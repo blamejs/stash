@@ -8,7 +8,7 @@ import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 
-import { Stash, RefNotFound, InvalidRef, IntegrityError, StashError, SizeExceeded, StashFull } from "../src/index.js";
+import { Stash, RefNotFound, RefClaimed, InvalidRef, IntegrityError, StashError, SizeExceeded, StashFull } from "../src/index.js";
 import { MemoryBackend } from "../src/backends/memory.js";
 import { DiskBackend } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
@@ -42,6 +42,44 @@ async function drain(readable) {
   const chunks = [];
   for await (const chunk of readable) chunks.push(chunk);
   return Buffer.concat(chunks);
+}
+
+// The full backend method set. A probe/corrupting mock wraps a real backend and
+// must implement all of it, or the Stash constructor rejects it (or #recover's
+// listClaims call throws); this array keeps every mock in step with
+// REQUIRED_BACKEND_METHODS as the contract grows across milestones.
+const BACKEND_METHODS = [
+  "write", "read", "remove", "stat", "list", "stats",
+  "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
+];
+
+// wrapBackend(inner, overrides) -- a complete backend delegating every method to
+// `inner`, with named methods overridden. One home for the pass-through mock so
+// a new backend method does not mean editing a dozen hand-built objects.
+function wrapBackend(inner, overrides = {}) {
+  const backend = {};
+  for (const m of BACKEND_METHODS) backend[m] = (...a) => inner[m](...a);
+  return Object.assign(backend, overrides);
+}
+
+// retryClaimed(fn) -- run a claimed read, retrying while it loses the claim race
+// (RefClaimed). The budget vectors race N readers on one entry; the losers of
+// each round retry until the entry is exhausted (then RefNotFound ends it). The
+// retry yields to the MACROTASK queue (setImmediate), not a bare microtask spin:
+// a tight microtask retry loop would starve the claim holder's stream drain (it
+// advances on IO/macrotasks) and livelock -- nobody makes progress.
+async function retryClaimed(fn) {
+  for (;;) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof RefClaimed) {
+        await new Promise((r) => setImmediate(r));
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 for (const { name, create } of BACKENDS) {
@@ -345,7 +383,7 @@ for (const { name, create } of BACKENDS) {
       const inner = create();
       const calls = [];
       const backend = {};
-      for (const m of ["write", "read", "remove", "stat", "list", "stats"]) {
+      for (const m of BACKEND_METHODS) {
         backend[m] = (...args) => { calls.push(m); return inner[m](...args); };
       }
       const stash = new Stash({ backend });
@@ -363,11 +401,7 @@ for (const { name, create } of BACKENDS) {
       const inner = create();
       let readCalled = false;
       const backend = {
-        write: (...a) => inner.write(...a),
-        stat: (...a) => inner.stat(...a),
-        remove: (...a) => inner.remove(...a),
-        list: (...a) => inner.list(...a),
-        stats: (...a) => inner.stats(...a),
+        ...wrapBackend(inner),
         read: async (id) => {
           readCalled = true;
           const e = await inner.stat(id);
@@ -389,11 +423,7 @@ for (const { name, create } of BACKENDS) {
       // stream still drops and rejects, without re-destroying or hanging.
       const inner = create();
       const backend = {
-        write: (...a) => inner.write(...a),
-        stat: (...a) => inner.stat(...a),
-        remove: (...a) => inner.remove(...a),
-        list: (...a) => inner.list(...a),
-        stats: (...a) => inner.stats(...a),
+        ...wrapBackend(inner),
         read: async (id) => {
           const e = await inner.stat(id);
           while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2));
@@ -415,11 +445,7 @@ for (const { name, create } of BACKENDS) {
       // reject / remove.
       const inner = create();
       const backend = {
-        write: (...a) => inner.write(...a),
-        stat: (...a) => inner.stat(...a),
-        remove: (...a) => inner.remove(...a),
-        list: (...a) => inner.list(...a),
-        stats: (...a) => inner.stats(...a),
+        ...wrapBackend(inner),
         read: async (id) => {
           const e = await inner.stat(id);
           while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2));
@@ -438,11 +464,7 @@ for (const { name, create } of BACKENDS) {
       // lapsing entry whose read() returns a stream that errors when destroyed.
       const inner = create();
       const backend = {
-        write: (...a) => inner.write(...a),
-        stat: (...a) => inner.stat(...a),
-        remove: (...a) => inner.remove(...a),
-        list: (...a) => inner.list(...a),
-        stats: (...a) => inner.stats(...a),
+        ...wrapBackend(inner),
         read: async (id) => {
           const e = await inner.stat(id);
           while (Date.now() < e.expiresAt) await new Promise((r) => setTimeout(r, 2));
@@ -590,7 +612,7 @@ for (const { name, create } of BACKENDS) {
     test("maxEntries: a full store is StashFull before the stream starts; drop frees a slot", async () => {
       const inner = create();
       const backend = {};
-      for (const m of ["write", "read", "remove", "stat", "list", "stats"]) backend[m] = (...a) => inner[m](...a);
+      for (const m of BACKEND_METHODS) backend[m] = (...a) => inner[m](...a);
       const stash = new Stash({ backend, maxEntries: 1 });
       const first = await stash.push("a");
       let pulled = false;
@@ -674,10 +696,10 @@ for (const { name, create } of BACKENDS) {
       const inner = create();
       let statsCalls = 0;
       const backend = {};
-      for (const m of ["write", "read", "remove", "stat", "list"]) backend[m] = (...a) => inner[m](...a);
+      for (const m of BACKEND_METHODS) backend[m] = (...a) => inner[m](...a);
       backend.stats = (...a) => { statsCalls += 1; return inner.stats(...a); };
       const stash = new Stash({ backend });
-      await stash.push(Buffer.alloc(4096, 1));
+      await stash.push(Buffer.alloc(65536, 1));
       assert.equal(statsCalls, 0, "the common path pays nothing for the feature");
     });
 
@@ -718,6 +740,207 @@ for (const { name, create } of BACKENDS) {
       await assert.rejects(stash.push(Buffer.alloc(5, 1)), (e) => e instanceof StashError);
       assert.throws(() => new Stash({ backend: create(), maxSize: "nope" }), (e) => e instanceof TypeError && !(e instanceof StashError));
     });
+
+    // ---- M5: pop and read budgets (SPEC.md 4, 4.1, 6) --------------------------
+
+    test("pop round-trips and destroys: the payload streams once, then the entry is gone", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push("bytes at rest");
+      assert.deepEqual(await drain(await stash.pop(ref)), Buffer.from("bytes at rest"));
+      await assert.rejects(stash.show(ref), (e) => e instanceof RefNotFound && e.code === "ENOREF");
+      await assert.rejects(stash.apply(ref), RefNotFound);
+      await assert.rejects(stash.pop(ref), RefNotFound);
+      assert.deepEqual(await stash.list(), []);
+    });
+
+    test("pop ignores the read budget: one drain destroys a reads:3 entry", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push("terminal", { reads: 3 });
+      assert.deepEqual(await drain(await stash.pop(ref)), Buffer.from("terminal"));
+      await assert.rejects(stash.show(ref), RefNotFound); // pop is terminal, budget notwithstanding
+    });
+
+    test("concurrent pop: exactly one drains the payload, the other is RefClaimed", async () => {
+      const stash = new Stash({ backend: create() });
+      // A payload above the stream highWaterMark: the winner's claim stays held
+      // (backpressure) until it is drained, so the loser's claim genuinely races
+      // a live claim rather than a payload that already auto-committed.
+      const payload = Buffer.alloc(65536, 7);
+      const ref = await stash.push(payload);
+      const settled = await Promise.allSettled([stash.pop(ref), stash.pop(ref)]);
+      const winners = settled.filter((r) => r.status === "fulfilled");
+      const losers = settled.filter((r) => r.status === "rejected");
+      assert.equal(winners.length, 1, "exactly one pop won the claim");
+      assert.equal(losers.length, 1);
+      assert.equal(losers[0].reason.code, "ECLAIMED");
+      assert.deepEqual(await drain(winners[0].value), payload);
+      await assert.rejects(stash.show(ref), RefNotFound);
+    });
+
+    test("pop destroyed mid-stream restores under the default policy; a retry drains fully", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push(Buffer.alloc(65536, 7));
+      const partial = await stash.pop(ref);
+      partial.destroy(); // abandon -- the claim resolves to restore in the background
+      // the restore is not instantaneous, so a retried pop loses the claim until
+      // it lands (RefClaimed) -- the real caller pattern; retry until it drains.
+      const retried = await retryClaimed(async () => drain(await stash.pop(ref)));
+      assert.deepEqual(retried, Buffer.alloc(65536, 7)); // survived the abandon
+    });
+
+    test("pop destroyed mid-stream under onPopFailure: 'burn' destroys the entry", async () => {
+      const stash = new Stash({ backend: create(), onPopFailure: "burn" });
+      const ref = await stash.push(Buffer.alloc(65536, 7));
+      const partial = await stash.pop(ref);
+      partial.destroy();
+      await pollUntil(async () => { try { await stash.show(ref); return false; } catch { return true; } });
+      await assert.rejects(stash.show(ref), RefNotFound); // burned
+    });
+
+    test("a corrupted pop errors IntegrityError; under 'restore' the entry survives", async () => {
+      const inner = create();
+      const backend = wrapBackend(inner, {
+        claim: async (id) => {
+          const c = await inner.claim(id);
+          c.source.destroy();
+          return { entry: c.entry, source: Readable.from([Buffer.from("tampered")]) };
+        },
+      });
+      const stash = new Stash({ backend });
+      const ref = await stash.push("original");
+      await assert.rejects(drain(await stash.pop(ref)), (e) => e instanceof IntegrityError && e.code === "EINTEGRITY");
+      assert.equal((await stash.show(ref)).id, ref); // restored, not lost
+    });
+
+    test("reads:2 sequential: two full drains, readsLeft:1 between, then RefNotFound", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push("twice", { reads: 2 });
+      assert.deepEqual(await drain(await stash.apply(ref)), Buffer.from("twice"));
+      assert.equal((await stash.show(ref)).readsLeft, 1);
+      assert.deepEqual(await drain(await stash.apply(ref)), Buffer.from("twice"));
+      await assert.rejects(stash.show(ref), RefNotFound);
+      await assert.rejects(stash.apply(ref), RefNotFound);
+    });
+
+    test("reads:2 concurrent: exactly two drained successes ever, then RefNotFound", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push("shared", { reads: 2 });
+      let drained = 0;
+      // race more readers than credits; losers retry the claim until it is exhausted
+      await Promise.all(Array.from({ length: 6 }, () => (async () => {
+        try {
+          const bytes = await retryClaimed(async () => drain(await stash.apply(ref)));
+          assert.deepEqual(bytes, Buffer.from("shared"));
+          drained += 1;
+        } catch (err) {
+          if (!(err instanceof RefNotFound)) throw err; // the budget is spent -- expected
+        }
+      })()));
+      assert.equal(drained, 2, "a reads:2 entry served exactly twice under contention");
+      await assert.rejects(stash.show(ref), RefNotFound);
+    });
+
+    test("a budgeted read serializes: the loser rejects at claim time, it does not queue", async () => {
+      const stash = new Stash({ backend: create() });
+      const payload = Buffer.alloc(65536, 1);
+      const ref = await stash.push(payload, { reads: 1 });
+      // both applies race for the single credit; the winner holds the claim
+      // (large payload, backpressure) so the loser rejects RefClaimed at claim
+      // time rather than queueing behind the winner.
+      const settled = await Promise.allSettled([stash.apply(ref), stash.apply(ref)]);
+      const winners = settled.filter((r) => r.status === "fulfilled");
+      const losers = settled.filter((r) => r.status === "rejected");
+      assert.equal(winners.length, 1, "one reader won the single credit");
+      assert.equal(losers[0].reason.code, "ECLAIMED");
+      assert.deepEqual(await drain(winners[0].value), payload);
+      await assert.rejects(stash.show(ref), RefNotFound); // the one credit is spent
+    });
+
+    test("an abandoned budgeted read spends nothing: readsLeft is unchanged, monotone", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push(Buffer.alloc(65536, 1), { reads: 2 });
+      const partial = await stash.apply(ref);
+      partial.destroy(); // abandon -- the claim restores in the background, no spend
+      // retry the next read past the in-flight restore (RefClaimed), then confirm
+      // the budget was never debited: the abandoned read cost nothing.
+      const bytes = await retryClaimed(async () => drain(await stash.apply(ref)));
+      assert.deepEqual(bytes, Buffer.alloc(65536, 1)); // still readable
+      // that retried read spent one of two credits; the abandoned one spent none
+      assert.equal((await stash.show(ref)).readsLeft, 1, "only the completed read debited -- the abandon cost nothing");
+    });
+
+    test("a failed budgeted read (digest mismatch) errors IntegrityError and spends nothing", async () => {
+      const inner = create();
+      const backend = wrapBackend(inner, {
+        claim: async (id) => {
+          const c = await inner.claim(id);
+          c.source.destroy();
+          return { entry: c.entry, source: Readable.from([Buffer.from("tampered")]) };
+        },
+      });
+      const stash = new Stash({ backend });
+      const ref = await stash.push("original", { reads: 2 });
+      await assert.rejects(drain(await stash.apply(ref)), IntegrityError);
+      assert.equal((await stash.show(ref)).readsLeft, 2, "a failed drain is not a spend -- drain AND digest match is");
+    });
+
+    test("an unbudgeted apply stays lock-free: it takes no claim", async () => {
+      const inner = create();
+      const seen = [];
+      const backend = wrapBackend(inner, {
+        claim: (...a) => { seen.push("claim"); return inner.claim(...a); },
+        restore: (...a) => { seen.push("restore"); return inner.restore(...a); },
+        commit: (...a) => { seen.push("commit"); return inner.commit(...a); },
+        consumeRead: (...a) => { seen.push("consumeRead"); return inner.consumeRead(...a); },
+      });
+      const stash = new Stash({ backend });
+      const ref = await stash.push("unbudgeted");
+      await drain(await stash.apply(ref));
+      assert.deepEqual(seen, [], "no claim machinery ran for an unbudgeted apply");
+    });
+
+    test("the terminal budgeted read destroys through the commit path", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push("last", { reads: 1 });
+      assert.deepEqual(await drain(await stash.apply(ref)), Buffer.from("last"));
+      await assert.rejects(stash.show(ref), RefNotFound);
+      await assert.rejects(stash.apply(ref), RefNotFound);
+      assert.deepEqual(await stash.list(), []);
+    });
+
+    test("a claimed entry is RefClaimed to a concurrent reader, not IntegrityError", async () => {
+      const stash = new Stash({ backend: create() });
+      const payload = Buffer.alloc(65536, 3); // above the highWaterMark: the claim stays held
+      const ref = await stash.push(payload);
+      const inflight = await stash.pop(ref); // claimed, not yet drained
+      await assert.rejects(stash.apply(ref), (e) => e instanceof RefClaimed && e.code === "ECLAIMED");
+      await assert.rejects(stash.pop(ref), RefClaimed);
+      await drain(inflight); // finish the pop
+      await assert.rejects(stash.show(ref), RefNotFound);
+    });
+
+    test("pop and budgeted apply on an expired entry are RefNotFound with no claim taken", async () => {
+      const inner = create();
+      const seen = [];
+      const backend = wrapBackend(inner, { claim: (...a) => { seen.push("claim"); return inner.claim(...a); } });
+      const stash = new Stash({ backend });
+      const popRef = await stash.push("gone", { ttl: 0 });
+      await assert.rejects(stash.pop(popRef), RefNotFound);
+      const applyRef = await stash.push("gone2", { ttl: 0, reads: 2 });
+      await assert.rejects(stash.apply(applyRef), RefNotFound);
+      assert.deepEqual(seen, [], "an expired entry is rejected before any claim");
+    });
+
+    test("a drop during a live claim is monotone: the entry never serves again, and the abandon spends nothing", async () => {
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push(Buffer.alloc(65536, 7), { reads: 2 }); // above the highWaterMark: the claim holds
+      const held = await stash.apply(ref); // a budgeted read takes the claim
+      await stash.drop(ref); // destroy the entry mid-claim (SPEC 4.2 monotone)
+      await assert.rejects(stash.show(ref), RefNotFound, "a dropped entry is gone, even while claimed");
+      held.destroy(); // abandon the read -- its onFail restore must NOT resurrect the dropped entry
+      // retry past any in-flight restore (RefClaimed), then confirm the entry stays gone
+      await assert.rejects(retryClaimed(() => stash.apply(ref)), RefNotFound);
+    });
   });
 }
 
@@ -727,12 +950,7 @@ suite("clear under concurrent destruction", () => {
     // the count is actual destructions, not the length of the listing.
     const inner = new MemoryBackend();
     let vanish = null;
-    const backend = {
-      write: (...args) => inner.write(...args),
-      read: (...args) => inner.read(...args),
-      stat: (...args) => inner.stat(...args),
-      list: (...args) => inner.list(...args),
-      stats: (...args) => inner.stats(...args),
+    const backend = wrapBackend(inner, {
       remove: async (id) => {
         if (id === vanish) {
           vanish = null;
@@ -741,7 +959,7 @@ suite("clear under concurrent destruction", () => {
         }
         return inner.remove(id);
       },
-    };
+    });
     const stash = new Stash({ backend });
     await stash.push("survives the race");
     vanish = await stash.push("already gone");
@@ -755,6 +973,7 @@ suite("prune under concurrent destruction", () => {
     const inner = new MemoryBackend();
     let vanish = null;
     const backend = {
+      ...wrapBackend(inner),
       write: (...a) => inner.write(...a),
       read: (...a) => inner.read(...a),
       stat: (...a) => inner.stat(...a),
@@ -829,6 +1048,7 @@ suite("M3 lifecycle: sweeper, close, disposal (SPEC.md 7, 7.1)", () => {
     const inner = new MemoryBackend();
     let ticks = 0;
     const backend = {
+      ...wrapBackend(inner),
       write: (...a) => inner.write(...a),
       read: (...a) => inner.read(...a),
       stat: (...a) => inner.stat(...a),
@@ -852,6 +1072,7 @@ suite("M3 lifecycle: sweeper, close, disposal (SPEC.md 7, 7.1)", () => {
     let release;
     const gate = new Promise((r) => { release = r; });
     const backend = {
+      ...wrapBackend(inner),
       write: (...a) => inner.write(...a),
       read: (...a) => inner.read(...a),
       stat: (...a) => inner.stat(...a),
@@ -881,6 +1102,7 @@ suite("M3 lifecycle: sweeper, close, disposal (SPEC.md 7, 7.1)", () => {
     let closeResolved = false;
     let removedAfterClose = false;
     const backend = {
+      ...wrapBackend(inner),
       write: (...a) => inner.write(...a),
       read: (...a) => inner.read(...a),
       stat: (...a) => inner.stat(...a),
@@ -970,6 +1192,42 @@ for (const { name, create } of BACKENDS) {
       await backend.remove(id);
       assert.deepEqual(await backend.stats(), { entries: 0, bytes: 0, claimed: 0 });
     });
+
+    test("claim / restore / commit / consumeRead / listClaims form the claim contract", async () => {
+      const backend = create();
+      await assert.rejects(backend.claim(generate()), RefNotFound); // nothing to claim
+
+      const id = generate();
+      const payload = Buffer.alloc(20, 7);
+      const skeleton = { id, size: 0, digest: null, createdAt: 0, expiresAt: null, reads: 2, readsLeft: 2, meta: {} };
+      await backend.write(id, [payload], skeleton);
+
+      // claim moves the entry and hands back its bytes; a second claim loses.
+      const claimed = await backend.claim(id);
+      assert.equal(claimed.entry.id, id);
+      assert.deepEqual(await drain(claimed.source), payload);
+      await assert.rejects(backend.claim(id), RefClaimed);
+      await assert.rejects(backend.read(id), RefClaimed); // a claimed blob is not "absent"
+      const claims = await backend.listClaims();
+      assert.equal(claims.length, 1);
+      assert.equal(claims[0].id, id);
+      assert.equal(Number.isSafeInteger(claims[0].claimedAt), true);
+
+      // consumeRead debits the budget; restore returns the entry, decrement kept.
+      assert.equal(await backend.consumeRead(id), 1);
+      await backend.restore(id);
+      assert.equal((await backend.stat(id)).readsLeft, 1);
+      assert.deepEqual(await backend.listClaims(), []);
+      assert.deepEqual(await drain(await backend.read(id)), payload); // round-trips
+
+      // claim -> commit destroys it: gone from stat/read/listClaims.
+      const again = await backend.claim(id);
+      again.source.destroy();
+      await backend.commit(id);
+      await assert.rejects(backend.stat(id), RefNotFound);
+      assert.equal(await backend.remove(id), false);
+      assert.deepEqual(await backend.listClaims(), []);
+    });
   });
 }
 
@@ -978,7 +1236,7 @@ suite("ref validation precedes storage access", () => {
     const calls = [];
     const inner = new MemoryBackend();
     const backend = {};
-    for (const method of ["write", "read", "remove", "stat", "list", "stats"]) {
+    for (const method of BACKEND_METHODS) {
       backend[method] = (...args) => {
         calls.push(method);
         return inner[method](...args);
@@ -1005,17 +1263,12 @@ suite("integrity", () => {
     // digest it recorded -- the storage-rot case the verifying stream exists
     // to catch.
     const inner = new MemoryBackend();
-    const corrupting = {
-      write: (...args) => inner.write(...args),
-      stat: (...args) => inner.stat(...args),
-      remove: (...args) => inner.remove(...args),
-      list: (...args) => inner.list(...args),
-      stats: (...args) => inner.stats(...args),
+    const corrupting = wrapBackend(inner, {
       read: async (id) => {
         await inner.read(id);
         return Readable.from([Buffer.from("tampered bytes")]);
       },
-    };
+    });
     const stash = new Stash({ backend: corrupting });
     const ref = await stash.push("original bytes");
     const readable = await stash.apply(ref);
@@ -1049,10 +1302,35 @@ suite("config-time failures", () => {
 
   test("spec options whose milestone has not shipped throw, never sit unenforced", () => {
     const backend = new MemoryBackend();
-    for (const key of ["onPopFailure", "tombstoneTtl", "claimTimeout"]) {
+    for (const key of ["tombstoneTtl"]) {
       assert.throws(() => new Stash({ backend, [key]: "1h" }), TypeError);
     }
     assert.throws(() => new Stash({ backend: new MemoryBackend(), unknownKnob: 1 }), TypeError);
+  });
+
+  test("pop options are validated at construction: onPopFailure enum, claimTimeout duration, reads a positive integer", async () => {
+    const B = () => new MemoryBackend();
+    // onPopFailure is a closed enum (vector 27).
+    for (const bad of ["explode", 42, ""]) {
+      assert.throws(() => new Stash({ backend: B(), onPopFailure: bad }), TypeError);
+    }
+    new Stash({ backend: B(), onPopFailure: "restore" });
+    new Stash({ backend: B(), onPopFailure: "burn" });
+    // claimTimeout is a POSITIVE duration; a NaN threshold is a silently-disabled
+    // scan, and 0 would make recovery reclaim an active pop instantly (vector 28).
+    for (const bad of ["ten minutes", -1, 0, NaN, {}]) {
+      assert.throws(() => new Stash({ backend: B(), claimTimeout: bad }), TypeError);
+    }
+    new Stash({ backend: B(), claimTimeout: "10m" });
+    new Stash({ backend: B(), claimTimeout: 60000 });
+    new Stash({ backend: B(), claimTimeout: 1 });
+    // reads is a positive integer or null, validated at make() during push (vector 29).
+    const stash = new Stash({ backend: B() });
+    for (const bad of [0, -1, 1.5, "3", Infinity]) {
+      await assert.rejects(stash.push("x", { reads: bad }), TypeError);
+    }
+    assert.match(await stash.push("a", { reads: 1 }), /^v1_/);
+    assert.match(await stash.push("b", { reads: null }), /^v1_/);
   });
 
   test("limit bounds are validated at construction (an unvalidated bound is a disabled check)", () => {
@@ -1085,10 +1363,9 @@ suite("config-time failures", () => {
     new Stash({ backend: new MemoryBackend(), maxTotal: 50 });
   });
 
-  test("push rejects unimplemented and unknown options", async () => {
+  test("push rejects a non-object opts and unknown options", async () => {
     const stash = new Stash({ backend: new MemoryBackend() });
     await assert.rejects(stash.push("x", null), TypeError);
-    await assert.rejects(stash.push("x", { reads: 3 }), TypeError);
     await assert.rejects(stash.push("x", { unknown: true }), TypeError);
     await assert.rejects(stash.push("x", { meta: "not an object" }), TypeError);
     await assert.rejects(stash.push("x", { meta: [] }), TypeError);
@@ -1106,6 +1383,6 @@ suite("config-time failures", () => {
   test("stash errors are distinguishable from config errors", async () => {
     const stash = new Stash({ backend: new MemoryBackend() });
     await assert.rejects(stash.apply("bogus"), (err) => err instanceof StashError);
-    await assert.rejects(stash.push("x", { reads: 3 }), (err) => !(err instanceof StashError));
+    await assert.rejects(stash.push("x", { unknown: true }), (err) => !(err instanceof StashError));
   });
 });
