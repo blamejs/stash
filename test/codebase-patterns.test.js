@@ -202,6 +202,7 @@ const VALID_ALLOW_CLASSES = {
   "constant-time-compare-short-circuited": 1,
   "wiki-port-cross-artifact-drift": 1,
   "wiki-runtime-file-uncopied": 1,
+  "unretried-fs-mutation": 1,
 };
 
 // Drop matches suppressed by a file-level
@@ -869,6 +870,51 @@ test("npm-shim-bare-spawn -- npm/npx runs through a shell, never a bare spawn", 
   });
   bad = _filterMarkers(bad, "npm-shim-bare-spawn");
   _report("no bare npm/npx spawn (use the shell command-string form -- npm is npm.cmd on Windows)", bad);
+});
+
+// ---------------------------------------------------------------------------
+// unretried-fs-mutation -- every disk-backend rename/link is transient-retried
+// ---------------------------------------------------------------------------
+
+test("unretried-fs-mutation -- every disk-backend rename/link routes through the transient-fault retry", () => {
+  // reason: a rename or link on the disk backend can fail with a TRANSIENT
+  // EPERM/EACCES/EBUSY on Windows while a just-closed handle lingers (antivirus,
+  // indexer, or the OS lazily releasing it) -- a legitimate operation racing
+  // that window, not a real fault. Every mutating rename/link therefore routes
+  // through _retryTransient, which re-attempts on exactly those codes and is
+  // inert on POSIX (first-try success); a BARE call dies on the first transient
+  // hit, and for a write the cleanup then destroys the just-streamed bytes.
+  // Anchored on the Node fs API names (rename/link/unlink -- a frozen contract,
+  // like the createReadStream / realpath guards) and the retry-wrapper routing
+  // shape, so it is rename-proof: a bare mutation fires wherever it appears
+  // (including a not-yet-written line), and the retried form stays silent. rm
+  // is deliberately NOT scanned -- its many cleanup calls are force-removes
+  // whose ENOENT is a witness, not a mutation that must survive contention. A
+  // genuinely-immediate rename/link carries an allow:unretried-fs-mutation
+  // marker with its reason.
+  const diskPath = path.join(REPO_ROOT, "src", "backends", "disk.js");
+  const src = _read(diskPath);
+  const callRe = /(?<![\w$])(?:rename|link|unlink)\s*\(/;
+  const routedRe = /_retryTransient\s*\(\s*\(\s*\)\s*=>\s*(?:rename|link|unlink)\s*\(/;
+  const stripped = _lines(_stripComments(src));
+  // Floor: the scan must see real mutation calls, or a moved/renamed backend
+  // file would green this gate vacuously.
+  assert.ok(
+    stripped.some((l) => callRe.test(l)),
+    "no rename/link/unlink calls found in src/backends/disk.js -- detector vacuous (file moved?)"
+  );
+  let bad = [];
+  for (let i = 0; i < stripped.length; i++) {
+    if (callRe.test(stripped[i]) && !routedRe.test(stripped[i])) {
+      bad.push({
+        file: _relPath(diskPath),
+        line: i + 1,
+        content: "bare fs rename/link/unlink -- route through _retryTransient (absorbs a transient Windows EPERM/EACCES/EBUSY): " + stripped[i].trim().slice(0, 100),
+      });
+    }
+  }
+  bad = _filterMarkers(bad, "unretried-fs-mutation");
+  _report("every disk-backend rename/link routes through _retryTransient (transient-fault retry)", bad);
 });
 
 // ---------------------------------------------------------------------------

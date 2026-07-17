@@ -323,6 +323,64 @@ suite("disk: layout and atomicity", () => {
   const CANNOT_FAULT = process.platform === "win32" ||
     (typeof process.getuid === "function" && process.getuid() === 0);
 
+  // A TRANSIENT rename fault on the blob tmp->final move must be absorbed by the
+  // backend's retry, exactly as the sidecar (#writeAtomic) and claim-lifecycle
+  // renames are: a just-closed tmp whose handle briefly lingers (Windows
+  // antivirus / indexer / lazy release) fails the rename with EPERM/EACCES/EBUSY
+  // while a LEGITIMATE push races that window -- the push must not die on it.
+  // Simulated on POSIX by denying write on blobs/ across the FIRST rename attempt
+  // (EACCES, a transient code), then restoring it so an in-flight retry lands.
+  // Without the retry the push rejects on the first attempt and cleanup destroys
+  // the streamed bytes (RED); with it the push rides the fault out (GREEN).
+  test("a transient blob-rename fault is retried, not fatal to a legitimate push", { skip: CANNOT_FAULT, timeout: 15000 }, async () => {
+    const { root, stash } = freshStash();
+    const blobsDir = join(root, "blobs");
+    const payload = Buffer.from("bytes that must survive a transient rename fault");
+
+    // Pause the source at end-of-stream: by then write() has opened blobs/<id>.tmp
+    // and written the bytes, but has NOT yet renamed it into place. Denying writes
+    // to blobs/ here (never before the tmp open) faults the rename specifically --
+    // the op under test -- rather than the tmp create.
+    let reached;
+    const atStreamEnd = new Promise((r) => { reached = r; });
+    let release;
+    const resume = new Promise((r) => { release = r; });
+    async function* gatedSource() {
+      yield payload;
+      reached();    // the tmp now holds the bytes; write() sits between the stream and the rename
+      await resume; // hold until the test has armed the fault, then let write() rename
+    }
+
+    const pushed = stash.push(gatedSource());
+    let settled = false;
+    pushed.then(() => { settled = true; }, () => { settled = true; });
+
+    await atStreamEnd;
+    chmodSync(blobsDir, 0o500); // deny writes: the next rename into blobs/ EACCES-faults
+    release();                  // let write() close the tmp and attempt the rename
+
+    // Poll for the push to SETTLE, bounded by a window well inside the backend's
+    // retry budget, then restore the directory. This is the drift-6b poll-for-an-
+    // event / passive-absence form, and it makes both directions deterministic:
+    //   - unretried backend: the first rename fails and the push REJECTS within a
+    //     few ms; the poll observes that settle and only THEN restores -- so the
+    //     rejection (proof the rename attempt already failed) is locked in first.
+    //   - retrying backend: the push stays pending (each 4ms attempt re-faults on
+    //     the still-0500 dir); the poll's window elapses WITHOUT a settle -- that
+    //     absence is the retry working -- and the restore lets the next in-flight
+    //     attempt land, resolving the push.
+    // The window exceeds close+first-rename (sub-ms on the scratch tmpfs) yet stays
+    // far under the retry ceiling, so neither a slow settle nor an exhausted retry
+    // can flip the verdict.
+    const deadline = Date.now() + 80;
+    while (!settled && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+    chmodSync(blobsDir, 0o700);
+
+    const ref = await pushed; // RED (no retry): rejected here; GREEN (retry): resolves
+    assert.deepEqual(await drain(await stash.apply(ref)), payload, "the pushed bytes survived the transient fault");
+    assert.deepEqual(readdirSync(blobsDir).filter((n) => n.endsWith(".tmp")), [], "no .tmp partial left behind");
+  });
+
   test("a filesystem fault that is not absence propagates loudly", { skip: CANNOT_FAULT }, async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("guarded");

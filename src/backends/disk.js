@@ -392,7 +392,12 @@ export class DiskBackend {
       } finally {
         await fh.close();
       }
-      await rename(tmpPath, blobPath);
+      // The just-closed tmp's handle can linger on Windows (antivirus, indexer,
+      // or the OS lazily releasing it), failing this rename with a transient
+      // EPERM/EACCES/EBUSY while a legitimate push races that window.
+      // _retryTransient absorbs it exactly as the sidecar (#writeAtomic) and the
+      // claim-lifecycle renames do; POSIX lands on the first attempt, inert.
+      await _retryTransient(() => rename(tmpPath, blobPath));
     } catch (err) {
       await rm(tmpPath, { force: true });
       throw err;
