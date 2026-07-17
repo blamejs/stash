@@ -55,9 +55,11 @@ stays monotone across the crash: a dropped entry never comes back.
 
 - `onPopFailure` and `claimTimeout` are now live constructor options; they
   previously threw at construction as not-yet-shipped. `onPopFailure` must be
-  `'restore'` or `'burn'`, and `claimTimeout` a non-negative duration --
-  anything else is a config-time `TypeError`, never a silently disabled
-  setting.
+  `'restore'` or `'burn'`, and `claimTimeout` a POSITIVE duration -- a
+  non-positive lease would let recovery reclaim an active pop instantly, so
+  it is a config-time `TypeError`. Recovery reclaims a claim by age alone, so
+  a disk root is single-writer and `claimTimeout` must exceed the longest
+  read a deployment runs.
 - A custom backend must now implement the claim lifecycle -- `claim`,
   `restore`, `commit`, `listClaims`, `consumeRead`, and `isClaimed` --
   alongside the existing methods, or the `Stash` constructor rejects it.

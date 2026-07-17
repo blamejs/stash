@@ -1316,12 +1316,14 @@ suite("config-time failures", () => {
     }
     new Stash({ backend: B(), onPopFailure: "restore" });
     new Stash({ backend: B(), onPopFailure: "burn" });
-    // claimTimeout is a duration; a NaN threshold is a silently-disabled scan (vector 28).
-    for (const bad of ["ten minutes", -1, NaN, {}]) {
+    // claimTimeout is a POSITIVE duration; a NaN threshold is a silently-disabled
+    // scan, and 0 would make recovery reclaim an active pop instantly (vector 28).
+    for (const bad of ["ten minutes", -1, 0, NaN, {}]) {
       assert.throws(() => new Stash({ backend: B(), claimTimeout: bad }), TypeError);
     }
     new Stash({ backend: B(), claimTimeout: "10m" });
     new Stash({ backend: B(), claimTimeout: 60000 });
+    new Stash({ backend: B(), claimTimeout: 1 });
     // reads is a positive integer or null, validated at make() during push (vector 29).
     const stash = new Stash({ backend: B() });
     for (const bad of [0, -1, 1.5, "3", Infinity]) {

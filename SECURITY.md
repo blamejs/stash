@@ -103,11 +103,13 @@ exception, a hang -- is reported as a crash. The harness lives in
   is charged only on a full, digest-verified drain, so an abandoned or corrupted
   read never consumes budget. A process killed mid-pop leaves a claim, not a
   lost entry: the next construction reclaims it on its first operation, resolving
-  it per `onPopFailure`. Tune `claimTimeout` to how long a legitimately live pop
-  may run in your deployment -- set it too low and a slow reader's claim looks
-  abandoned to a second process; too high and a genuinely crashed claim lingers
-  before recovery. A claim survives a crash on disk only; the memory backend is
-  process-lifetime by definition.
+  it per `onPopFailure`. Recovery reclaims a claim purely by age, so this is a
+  single-writer-per-root model: keep one process on a disk root, and set
+  `claimTimeout` ABOVE the longest `pop`/budgeted read that process can run, or a
+  legitimately slow reader's claim looks abandoned and gets reclaimed out from
+  under it -- the once-only read gone. A non-positive `claimTimeout` is refused at
+  construction (it would reclaim an active pop instantly). A claim survives a
+  crash on disk only; the memory backend is process-lifetime by definition.
 
 ## What StashJS deliberately does not do
 

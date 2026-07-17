@@ -288,11 +288,16 @@ function _positiveCount(value, label) {
  * `apply`) fails to fully drain -- a stream destroyed early, a source error, a
  * digest mismatch: `'restore'` (the default) returns the entry so the read can
  * be retried, `'burn'` destroys it anyway. `opts.claimTimeout` (a duration
- * string or a number of ms, default `'10m'`) is how long a claim left by a
- * crashed process is treated as another live reader's before recovery reclaims
- * it on the next construction; a claim younger than this is left untouched.
- * Spec options whose milestone has not shipped (`tombstoneTtl`) throw a
- * TypeError at construction rather than sitting silently unenforced.
+ * string or a number of ms, default `'10m'`, and strictly POSITIVE) is how long
+ * a claim left by a crashed process is treated as still live before recovery
+ * reclaims it on the next construction; a claim younger than this is left
+ * untouched. Recovery cannot tell a crashed reader's claim from a legitimately
+ * slow live one, so set `claimTimeout` ABOVE the longest `pop`/budgeted read a
+ * deployment can run, and keep a disk root to a single writing process -- a
+ * claim held past the lease by a concurrent instance would be reclaimed out from
+ * under the live reader. A non-positive `claimTimeout` is refused at
+ * construction. Spec options whose milestone has not shipped (`tombstoneTtl`)
+ * throw a TypeError at construction rather than sitting silently unenforced.
  *
  * @example
  *   import { Stash } from "@blamejs/stash";
@@ -358,8 +363,13 @@ export class Stash {
       : oneOf(opts.onPopFailure, "new Stash: onPopFailure", ON_POP_FAILURE);
     const claimTimeout = opts.claimTimeout === undefined ? DEFAULT_CLAIM_TIMEOUT : opts.claimTimeout;
     this.#claimTimeoutMs = parse(claimTimeout, "claimTimeout");
-    if (this.#claimTimeoutMs === null || this.#claimTimeoutMs < 0) {
-      throw new TypeError("new Stash: claimTimeout must be a non-negative duration");
+    // Strictly POSITIVE: recovery reclaims a claim older than this as a crashed
+    // prior run's, so a zero (or negative) lease would treat an active pop as
+    // instantly abandoned and let recovery restore/burn it out from under a live
+    // reader -- the once-only read guarantee gone. The lease must exceed the
+    // longest pop a deployment can run (see the constructor docs).
+    if (this.#claimTimeoutMs === null || this.#claimTimeoutMs <= 0) {
+      throw new TypeError("new Stash: claimTimeout must be a positive duration");
     }
     const sweepMs = parse(opts.sweepInterval, "sweepInterval");
     if (sweepMs !== null) {
