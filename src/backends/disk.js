@@ -46,6 +46,11 @@ const FILE_MODE = 0o600;
 // unaffected. O_NONBLOCK is 0 on platforms that lack it (Windows), where a
 // FIFO cannot be planted unprivileged in the first place.
 const READ_FLAGS = FS.O_RDONLY | (FS.O_NOFOLLOW || 0) | (FS.O_NONBLOCK || 0);
+// The read discipline's flags with O_RDWR for an in-place sidecar rewrite, and
+// deliberately NO O_CREAT: consumeRead must debit an EXISTING sidecar, never
+// recreate one a concurrent drop removed (SPEC 4.2 monotone). The open ENOENTs
+// if the entry is gone; it never brings a dropped entry back.
+const WRITE_FLAGS = FS.O_RDWR | (FS.O_NOFOLLOW || 0) | (FS.O_NONBLOCK || 0);
 
 // Windows lacks O_NOFOLLOW (0 above), so the open cannot refuse a symlink on
 // its own there; a post-open lstat cross-checks the final component instead.
@@ -248,10 +253,10 @@ export class DiskBackend {
   // swapped after the open they name different objects; only an untampered
   // regular file makes fstat and lstat agree. Comparing them binds the
   // verdict to the descriptor, closing the window O_NOFOLLOW closes on POSIX.
-  async #openStored(path, onAbsent, damaged) {
+  async #openStored(path, onAbsent, damaged, flags = READ_FLAGS) {
     let fh;
     try {
-      fh = await open(path, READ_FLAGS);
+      fh = await open(path, flags);
     } catch (err) {
       if (err && err.code === "ENOENT") throw onAbsent();
       if (_openTamper(err)) throw new IntegrityError(damaged);
@@ -433,24 +438,32 @@ export class DiskBackend {
     const sidecarPath = join(metaDir, id + ".json");
     const fh = await this.#openStored(sidecarPath, () => new RefNotFound(), "sidecar storage shape is damaged");
     try {
-      if ((await fh.stat()).size > MAX_SIDECAR_BYTES) {
-        throw new IntegrityError("sidecar exceeds its size bound");
-      }
-      const raw = await fh.readFile("utf8");
-      let parsed;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        throw new IntegrityError("sidecar is not valid JSON");
-      }
-      assertShape(parsed, IntegrityError);
-      // The sidecar's stored id must equal the addressed id, compared in
-      // constant time -- the same timing-safe path refs and digests take.
-      if (!constantTimeEqual(parsed.id, id)) throw new IntegrityError("sidecar identity mismatch");
-      return parsed;
+      return await this.#readSidecar(fh, id);
     } finally {
       await fh.close();
     }
+  }
+
+  // #readSidecar(fh, id) -> Entry. Read and strictly validate a sidecar from an
+  // OPEN descriptor: bounded read, JSON.parse under a corruption verdict, exact
+  // shape via the canonical entry module, and the sidecar's own id must be the id
+  // addressed (constant-time, the same path refs and digests take). Shared by
+  // stat (read-only) and consumeRead (which rewrites in place through the same
+  // descriptor), so reader validation and the debit path can never diverge.
+  async #readSidecar(fh, id) {
+    if ((await fh.stat()).size > MAX_SIDECAR_BYTES) {
+      throw new IntegrityError("sidecar exceeds its size bound");
+    }
+    const raw = await fh.readFile("utf8");
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new IntegrityError("sidecar is not valid JSON");
+    }
+    assertShape(parsed, IntegrityError);
+    if (!constantTimeEqual(parsed.id, id)) throw new IntegrityError("sidecar identity mismatch");
+    return parsed;
   }
 
   // list() -> Entry[]. Loud, not lossy: a sidecar that fails validation
@@ -619,6 +632,19 @@ export class DiskBackend {
       if (_absent(err)) throw new RefNotFound();
       throw err;
     }
+    // Re-check the sidecar AFTER the move: the check above and this rename are not
+    // atomic, so a drop that removes the sidecar in that window would leave the
+    // restored blob as an unreferenced orphan -- invisible to stat/list and never
+    // reclaimed by recovery (its scan is claim-driven, and this blob is no longer
+    // a claim), a permanent leak under repeated races. If the entry vanished,
+    // finish the destruction the drop began by removing the blob we just moved.
+    try {
+      await lstat(join(metaDir, id + ".json"));
+    } catch (err) {
+      _absent(err);
+      await rm(blobPath, { force: true });
+      throw new RefNotFound();
+    }
   }
 
   // commit(id) -> void. Destroy a claimed entry: sidecar first, then the claimed
@@ -688,11 +714,34 @@ export class DiskBackend {
   // means a crash after this leaves a correctly-decremented entry, so a completed
   // drain is always paid for (fragile area 5).
   async consumeRead(id) {
-    const entry = await this.stat(id);
-    const next = spend(entry);
-    const sidecar = Buffer.from(JSON.stringify(next), "utf8");
+    assertValid(id);
     const metaDir = await this.#containedDir("meta");
-    await this.#writeAtomic(metaDir, id + ".json", sidecar);
-    return next.readsLeft;
+    const sidecarPath = join(metaDir, id + ".json");
+    const damaged = "sidecar storage shape is damaged";
+    // ONE descriptor for the read AND the rewrite: the open is the atomicity
+    // anchor. A concurrent drop that removes the sidecar BEFORE this open ENOENTs
+    // (RefNotFound -- the debit never recreates a dropped entry); one that removes
+    // it AFTER unlinks the name while this descriptor keeps the now-nameless
+    // inode, so the debit lands on a ghost and no dropped entry is resurrected
+    // (SPEC 4.2 monotone). A tmp+rename would instead recreate the name a
+    // concurrent drop had just removed. spend() owns the arithmetic (no readsLeft
+    // literal here -- the guard-shape tripwire). Persisting the debit before the
+    // caller restores the blob means a crash after this leaves a correctly
+    // decremented entry, so a completed drain is always paid for (fragile area 5).
+    const fh = await this.#openStored(sidecarPath, () => new RefNotFound(), damaged, WRITE_FLAGS);
+    try {
+      const next = spend(await this.#readSidecar(fh, id));
+      const bytes = Buffer.from(JSON.stringify(next), "utf8");
+      // In-place rewrite through the anchored descriptor: truncate, then write
+      // from offset 0 and fsync. A crash mid-write leaves a short/corrupt sidecar,
+      // which the next read rejects as IntegrityError -- fail-closed and loud,
+      // never silently bad.
+      await fh.truncate(0);
+      await fh.write(bytes, 0, bytes.length, 0);
+      await fh.sync();
+      return next.readsLeft;
+    } finally {
+      await fh.close();
+    }
   }
 }

@@ -118,11 +118,12 @@ function _verifiedStream(entry, source, verdict) {
       if (verdict && verdict.onCommit) {
         resolved = true;
         // onCommit runs to completion BEFORE the callback signals end, so a
-        // consumer that has seen 'end' knows the commit landed. A commit fault
-        // surfaces on the stream (callback(err)); recovery resolves the
-        // still-standing claim later. _commitVerdict returns the fault (or null)
-        // rather than throwing, keeping this a single fail-closed callback.
-        callback(await _commitVerdict(verdict.onCommit));
+        // consumer that has seen 'end' knows the commit landed. Convert its
+        // outcome to an Error-or-null (`.then(ok, fail)`, no catch to misread as
+        // fail-open) and hand it straight to the single flush callback: a commit
+        // fault surfaces on the stream, and recovery resolves the still-standing
+        // claim later.
+        callback(await verdict.onCommit().then(() => null, (err) => err));
         return;
       }
       callback();
@@ -146,23 +147,12 @@ function _verifiedStream(entry, source, verdict) {
 // claim it leaves standing is exactly what the lazy recovery scan resolves on
 // the next construction over the store.
 async function _settle(hook) {
-  try {
-    await hook();
-  } catch { /* drop-silent -- by design (allow:catch-return-swallow): recovery reconciles a claim left standing */ }
-}
-
-// _commitVerdict(onCommit) -> Error | null. Run the terminal commit hook and
-// hand its fault back rather than throwing, so the flush stays a single
-// fail-closed callback (callback(err) on a fault, callback(null) on success) --
-// a commit that cannot land surfaces on the stream, and the still-standing claim
-// is resolved by the lazy recovery scan.
-async function _commitVerdict(onCommit) {
-  try {
-    await onCommit();
-    return null;
-  } catch (err) {
-    return err;
-  }
+  // Drop-silent by design (drift rule 8's one sanctioned outlet): a restore/burn
+  // that cannot land must not throw into a stream teardown or an
+  // unhandledRejection. A claim it leaves standing is exactly what the lazy
+  // recovery scan resolves on the next construction. The hook is an async call,
+  // so its rejection routes through `.catch`, never a synchronous throw.
+  await hook().catch(() => {});
 }
 
 // _dispose(source) -- best-effort teardown of an opened backend read source we
@@ -399,15 +389,13 @@ export class Stash {
     if (this.#sweepInFlight !== null) return;
     const work = this.prune();
     this.#sweepInFlight = work.then(() => {}, () => {});
-    try {
-      await work;
-    } catch { // drop-silent -- by design (allow:catch-return-swallow): a rejected
-      // background sweep would become an unhandledRejection, fatal on Node, and a
-      // janitor must never take the process down. M6 replaces this silence with
-      // the 'sweepError' emit; vector 16 pins survival now.
-    } finally {
-      this.#sweepInFlight = null;
-    }
+    // Drop-silent by design (drift rule 8's tier-3 sink): a rejected background
+    // sweep would become an unhandledRejection, fatal on Node, and a janitor must
+    // never take the process down. M6 replaces this silence with the 'sweepError'
+    // emit; vector 16 pins survival now. The failure routes through `.catch`, so
+    // the in-flight flag always clears -- no try/finally to misread as fail-open.
+    await work.catch(() => {});
+    this.#sweepInFlight = null;
   }
 
   // #statLive(ref) -- the shared lazy-expiry gate. stat the entry, and if it is

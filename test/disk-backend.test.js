@@ -910,3 +910,67 @@ suite("disk: crash recovery (SPEC 6)", () => {
     assert.deepEqual(await drain(await next.apply(ref)), Buffer.alloc(65536, 3), "the killed pop's entry recovered and served");
   });
 });
+
+suite("disk: drop races the claim lifecycle (SPEC 4.2)", () => {
+  const skeleton = (id, reads) => ({
+    id, size: 0, digest: null, createdAt: 0, expiresAt: null, reads, readsLeft: reads, meta: {},
+  });
+
+  test("consumeRead rewrites the sidecar in place, never via a fresh file", { skip: process.platform === "win32" }, async () => {
+    // The debit rewrites the sidecar THROUGH the descriptor it read -- same inode
+    // -- not a tmp+rename that installs a new one. That is what keeps the debit
+    // safe against a concurrent drop: a rename recreates a name the drop removed
+    // (resurrection), while an in-place write lands on the same inode, or on a
+    // ghost if the name was unlinked. Inode identity is the observable proof.
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(100, 1)], skeleton(id, 2));
+    (await backend.claim(id)).source.destroy();
+    const sidecar = join(root, "meta", id + ".json");
+    const before = statSync(sidecar).ino;
+    assert.equal(await backend.consumeRead(id), 1);
+    assert.equal(statSync(sidecar).ino, before, "the sidecar keeps its inode -- rewritten in place, not replaced");
+  });
+
+  test("consumeRead of an entry whose sidecar was dropped refuses and recreates nothing", async () => {
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(100, 1)], skeleton(id, 2));
+    (await backend.claim(id)).source.destroy();
+    rmSync(join(root, "meta", id + ".json")); // a concurrent drop removed the sidecar
+    await assert.rejects(backend.consumeRead(id), RefNotFound);
+    assert.deepEqual(readdirSync(join(root, "meta")), [], "the debit never recreated the dropped sidecar");
+  });
+
+  test("restore of an entry whose sidecar was dropped refuses and leaves no orphan blob", async () => {
+    const { root } = freshStash();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    await backend.write(id, [Buffer.alloc(100, 1)], skeleton(id, 2));
+    (await backend.claim(id)).source.destroy();
+    rmSync(join(root, "meta", id + ".json")); // a concurrent drop removed the sidecar
+    await assert.rejects(backend.restore(id), RefNotFound);
+    assert.deepEqual(readdirSync(join(root, "blobs")), [], "no blob orphaned in blobs/ without a sidecar");
+    assert.deepEqual(readdirSync(join(root, "meta")), [], "the sidecar stays gone -- not resurrected");
+  });
+
+  test("a budgeted read racing a concurrent drop leaves no resurrection and no orphan half", async () => {
+    // Sweep the finalize window many rounds: a drop removing the sidecar while a
+    // reads:2 apply debits-and-restores must keep the entry destroyed -- never a
+    // recreated sidecar (resurrection) nor a sidecar-less blob stranded in blobs/
+    // (an unreclaimable orphan). A blob may linger in claims/ pending recovery.
+    for (let round = 0; round < 40; round += 1) {
+      const { root, stash } = freshStash();
+      const ref = await stash.push(Buffer.alloc(65536, round % 256), { reads: 2 });
+      const reader = (async () => {
+        try { await drain(await stash.apply(ref)); } catch { /* raced: RefNotFound / RefClaimed / IntegrityError are all fine */ }
+      })();
+      const dropper = stash.drop(ref).catch(() => {});
+      await Promise.all([reader, dropper]);
+      assert.deepEqual(readdirSync(join(root, "meta")), [], `round ${round}: no sidecar survives a dropped entry`);
+      assert.deepEqual(readdirSync(join(root, "blobs")), [], `round ${round}: no blob orphaned in blobs/`);
+    }
+  });
+});
