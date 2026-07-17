@@ -218,13 +218,14 @@ export class MemoryBackend {
   // digest. A Map has no orphan halves, no corrupt sidecars, and no in-flight
   // .tmp by construction, so those finding kinds are structurally empty here --
   // the report SHAPE matches the disk backend's. A claimed entry (mid-pop) still
-  // occupies the store and is COUNTED in `scanned` -- disk counts its sidecar in
-  // meta/, so both backends report the same scanned total for one logical store
-  // (cross-backend parity) -- but its digest is not re-checked here, matching
-  // disk's walk, which skips a blob that lives under claims/. A stale claim (older
-  // than the lease) is REPORTED, never repaired (resolving it is crash recovery's
-  // job). Repair removes only a digest-mismatched entry -- its chunks and metadata
-  // go together, and healthy entries survive untouched.
+  // occupies the store: it is COUNTED in `scanned` (disk counts its sidecar in
+  // meta/, so both backends report the same scanned total for one logical store)
+  // and its digest IS re-checked (disk hashes the claimed blob from claims/), but a
+  // mismatch is REPORTED and NEVER repaired -- a claimed entry is mid-pop and the
+  // pop's drain-verify / recovery owns resolving it. A stale claim (older than the
+  // lease) is REPORTED, never repaired (resolving it is crash recovery's job).
+  // Repair removes only a digest-mismatched UNCLAIMED entry -- its chunks and
+  // metadata go together, and healthy entries survive untouched.
   async verify(opts) {
     const findings = [];
     const repaired = [];
@@ -244,6 +245,14 @@ export class MemoryBackend {
     const now = Date.now();
     for (const [id, held] of this.#claims) {
       scanned += 1; // a claimed blob still occupies the store; disk counts its meta/ sidecar, so match
+      const hash = createHash("sha256");
+      for (const buf of held.chunks) hash.update(buf);
+      // Digest-checked like any other (disk hashes the claimed blob), but a mismatch
+      // is reported and NEVER repaired (mid-pop). In memory the claimed chunks are
+      // the same object the digest was taken over at push, so this mismatch is
+      // unreachable via the public API -- the check keeps the backends parallel and
+      // would catch a future bug that mutated claimed chunks.
+      if (!constantTimeEqual("sha256:" + hash.digest("hex"), held.entry.digest)) findings.push({ kind: "digest-mismatch", id });
       if (now - held.claimedAt >= opts.claimTimeoutMs) findings.push({ kind: "stale-claim", id });
     }
     return { scanned, findings, repaired };

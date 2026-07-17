@@ -720,43 +720,52 @@ export class DiskBackend {
         }
         throw err; // an fs FAULT -- never a finding
       }
+      // Find the blob: normally blobs/<id>, but a pop/apply may have claimed it
+      // into claims/<id> after this walk began -- re-check claims/ LIVE, never a
+      // stale snapshot. A claimed blob is a live entry mid-read: it is STILL
+      // digest-checked (a read audits every blob's integrity without mutating), but
+      // any finding on it is REPORTED and NEVER condemned -- condemning a claimed
+      // entry would destroy it out from under the reader, and resolving it is the
+      // pop's drain-verify / recovery's job (CWE-362). Only a blob absent from BOTH
+      // blobs/ and claims/ is genuinely missing.
+      let blobPath = join(blobDir, id);
+      let claimed = false;
       let blobStat;
       try {
-        blobStat = await lstat(join(blobDir, id));
+        blobStat = await lstat(blobPath);
       } catch (err) {
         _absent(err); // absent from blobs/ (ENOENT); any other errno propagates
-        // Either genuinely missing, or a pop/apply claimed the blob into claims/
-        // AFTER this walk began. Re-check claims/ LIVE (the way stats() does),
-        // never a stale top-of-walk snapshot: a claimed blob is a live entry
-        // mid-read, and condemning it would destroy the sidecar out from under the
-        // reader (CWE-362). Only a blob absent from BOTH blobs/ and claims/ is
-        // missing.
-        if (!(await this.#isPresent(join(await this.#containedDir("claims"), id)))) {
+        blobPath = join(await this.#containedDir("claims"), id);
+        try {
+          blobStat = await lstat(blobPath);
+        } catch (err2) {
+          _absent(err2); // absent from claims/ too -> genuinely missing
           findings.push({ kind: "missing-blob", id });
           if (opts.repair) await this.#condemn(id, "missing-blob", repaired);
+          continue;
         }
-        continue;
+        claimed = true;
       }
       if (blobStat.size !== entry.size) {
         findings.push({ kind: "size-mismatch", id });
-        if (opts.repair) await this.#condemn(id, "size-mismatch", repaired);
+        if (opts.repair && !claimed) await this.#condemn(id, "size-mismatch", repaired);
         continue;
       }
       let got;
       try {
-        got = await this.#hashBlob(join(blobDir, id));
+        got = await this.#hashBlob(blobPath);
       } catch (err) {
-        if (err instanceof RefNotFound) continue; // vanished mid-walk
+        if (err instanceof RefNotFound) continue; // vanished mid-walk (a claim committed / a drop)
         if (err instanceof IntegrityError) { // a symlink / non-regular blob, refused
           findings.push({ kind: "digest-mismatch", id });
-          if (opts.repair) await this.#condemn(id, "digest-mismatch", repaired);
+          if (opts.repair && !claimed) await this.#condemn(id, "digest-mismatch", repaired);
           continue;
         }
         throw err;
       }
       if (!constantTimeEqual(got.digest, entry.digest)) {
         findings.push({ kind: "digest-mismatch", id });
-        if (opts.repair) await this.#condemn(id, "digest-mismatch", repaired);
+        if (opts.repair && !claimed) await this.#condemn(id, "digest-mismatch", repaired);
       }
     }
 

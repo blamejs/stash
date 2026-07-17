@@ -1346,6 +1346,21 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     assert.equal(existsSync(join(root, "claims", ref)), true, "the claimed bytes stay -- deleting a restorable claim would be data loss");
   });
 
+  test("verify digest-checks a CLAIMED blob and reports its corruption, but NEVER condemns it (mid-pop; recovery owns it)", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("claimed bytes");
+    plantClaim(root, ref, { ageMs: 0 }); // a LIVE claim (not stale): blob in claims/, sidecar intact
+    const claimPath = join(root, "claims", ref);
+    const buf = readFileSync(claimPath); buf[0] ^= 0xff; writeFileSync(claimPath, buf); // corrupt the claimed blob (same size)
+    const dry = await stash.verify();
+    assert.ok(dry.findings.some((f) => f.kind === "digest-mismatch" && f.id === ref), "the corrupt claimed blob IS digest-checked and reported");
+    assert.ok(!dry.findings.some((f) => f.kind === "stale-claim"), "a fresh claim is not stale");
+    const rep = await stash.verify({ repair: true });
+    assert.deepEqual(rep.repaired, [], "a claimed entry is NEVER condemned -- the pop's drain-verify / recovery owns it");
+    assert.equal(existsSync(claimPath), true, "the claimed blob is left in place");
+    assert.equal(existsSync(mp(root, ref)), true, "the sidecar is left in place");
+  });
+
   test("verify() on a fresh store's FIRST op does NOT run crash recovery: a stale claim is reported, never restored (a dry run stays read-only, SPEC.md 6)", async () => {
     const root = freshRoot();
     const setup = new Stash({ backend: new DiskBackend({ root }) });
