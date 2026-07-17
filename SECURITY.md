@@ -119,7 +119,14 @@ exception, a hang -- is reported as a crash. The harness lives in
   legitimately slow reader's claim looks abandoned and gets reclaimed out from
   under it -- the once-only read gone. A non-positive `claimTimeout` is refused at
   construction (it would reclaim an active pop instantly). A claim survives a
-  crash on disk only; the memory backend is process-lifetime by definition.
+  crash on disk only; the memory backend is process-lifetime by definition. The
+  `stashjs` CLI is a SECOND process opening a disk root, so the same rule binds it:
+  point it only at a stash whose owning process is stopped, or a cold-standby
+  replica -- every command except `verify` runs the crash-recovery scan and can
+  reclaim a claim a live app is mid-read on. The CLI exposes only the query and
+  maintenance verbs (it never moves bytes, hands out no capability, and keeps its
+  errors capability-free), and runs under the same `--permission` grant as the
+  library.
 
 - **Replication cannot resurrect a destroyed entry -- if `tombstoneTtl` is set
   right.** Every early destruction leaves a tombstone, and `store()` refuses a

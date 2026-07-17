@@ -579,11 +579,16 @@ test("spdx-header -- every source file opens with the SPDX pair", () => {
   for (const file of files) {
     const rel = _relPath(file);
     const lines = _lines(_read(file));
-    if ((lines[0] || "").trim() !== SPDX_LINE_1 || (lines[1] || "").trim() !== SPDX_LINE_2) {
+    // A file may open with a single `#!` shebang (an executable entry point, e.g.
+    // a bin), which the SPDX pair then follows. The license stays mandatory -- the
+    // shebang only shifts where it begins, it never waives it, so a shebang'd file
+    // with no SPDX still fails.
+    const offset = (lines[0] || "").startsWith("#!") ? 1 : 0;
+    if ((lines[offset] || "").trim() !== SPDX_LINE_1 || (lines[offset + 1] || "").trim() !== SPDX_LINE_2) {
       bad.push({
         file: rel,
         line: 1,
-        content: "missing/incorrect SPDX + copyright preamble (first two lines)",
+        content: "missing/incorrect SPDX + copyright preamble (the first two lines, after an optional #! shebang)",
       });
     }
   }

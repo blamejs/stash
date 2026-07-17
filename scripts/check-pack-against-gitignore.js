@@ -40,6 +40,7 @@ const INTERNAL_ONLY = [
   "test/",
   "scripts/",
   "examples/",
+  "bench/",
   "api-snapshot.json",
   "release-notes/",
 ];

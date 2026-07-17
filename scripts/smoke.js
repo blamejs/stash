@@ -68,6 +68,7 @@ const RUNTIME_STAGES = [
   { name: "node-test", args: ["--test"] },
   { name: "sandboxed", args: ["scripts/run-sandboxed.js"] },
   { name: "fuzz-smoke", args: [".clusterfuzzlite/local-smoke.js"] },
+  { name: "bench-smoke", args: ["bench/smoke.js"] },
   { name: "examples", args: ["scripts/run-examples.js"] },
 ];
 

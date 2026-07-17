@@ -19,7 +19,10 @@ import { IntegrityError, InvalidRef, RefClaimed, RefNotFound } from "../errors.j
 import { assertValid, constantTimeEqual, isValid } from "../ref.js";
 import { options } from "../validate.js";
 
-const SUBDIRS = ["blobs", "meta", "claims", "tombstones"];
+// The disk layout's required directories, in one place: #init creates every one,
+// and a consumer that must recognize a real stash root (the CLI's layout pre-check)
+// validates against THIS set, so a new layout directory extends both at once.
+export const SUBDIRS = ["blobs", "meta", "claims", "tombstones"];
 
 // A sidecar is one Entry's JSON: id + counters + caller meta. Far above
 // any legitimate sidecar, far below a parser-DoS payload -- a sidecar

@@ -1,0 +1,11 @@
+{
+  "version": "0.1.14",
+  "date": "2026-07-18",
+  "headline": "A `stashjs` command-line tool: inspect and maintain a disk-backed stash from the shell -- verify, stats, prune, list, tombstones, has -- without writing a Node program.",
+  "summary": "The store gains its first executable entry point. `npx @blamejs/stash <command>` (or the `stashjs` command from a global install) exposes the query and maintenance verbs: `verify` (audit for damage, `--repair` to remove condemned entries, orphans, and corrupt graves), `stats`, `prune`, `list` (`--include-expired` to reveal lapsed entries), `tombstones`, and `has <ref>`. Add `--json` to any command for a machine-readable document, for cron and scripting. The root comes from `--root <dir>`, else `$STASH_ROOT`, else `./.stash`; a missing root is refused rather than conjured into an empty store from a typo. The CLI composes only already-shipped verbs -- it never moves bytes (no push/apply/pop/store) and never destroys by ref (no drop/clear), so it hands out no capability and streams no blob. It runs under `node --permission` with read/write scoped to the root exactly as the library does, fails closed with stable exit codes, and never echoes a ref, a metadata value, or a filesystem path in an error. Point it at a stash whose owning process is stopped, or a cold-standby replica: like every access to a disk root, it is single-writer, and every command except `verify` runs the crash-recovery scan first.",
+  "sections": {
+    "Added": [
+      "The `stashjs` CLI (`npx @blamejs/stash <command>`): `verify [--repair]`, `stats`, `prune`, `list [--include-expired]`, `tombstones`, and `has <ref>`, each a thin adapter over the matching Stash verb. `--json` on any command emits the raw object for scripting; the default is a human table (which omits opaque per-entry metadata). The root is taken from `--root`, `$STASH_ROOT`, or `./.stash`, and must already exist. Exit codes are stable and distinct: clean, damage-found, usage error, malformed ref, integrity fault, or I/O fault. It exposes only the query and maintenance verbs -- never the bytes-moving or destroy-by-ref verbs -- and holds the library's permission-model and capability-free-error posture."
+    ]
+  }
+}
