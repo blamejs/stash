@@ -315,10 +315,13 @@ export class Stash {
   #maxEntries = null;
   #onPopFailure = "restore";
   #claimTimeoutMs = 0;
-  // The lazy crash-recovery scan, memoized: resolved once on the first public
-  // verb (never in the constructor -- constructors do no I/O), mirroring the
-  // disk backend's #init retry-on-failure memo.
+  // The lazy crash-recovery scan, memoized: resolved on the first public verb
+  // (never in the constructor -- constructors do no I/O), mirroring the disk
+  // backend's #init retry-on-failure memo. The memo is re-run once a claim it
+  // skipped for being younger than the lease would have aged past it -- #nextRecoverAt
+  // is the earliest such deadline (Infinity when the scan resolved everything).
   #recovered = null;
+  #nextRecoverAt = 0;
 
   constructor(opts) {
     options(opts, "new Stash", {
@@ -438,53 +441,66 @@ export class Stash {
   }
 
   // #recover() -- the lazy crash-recovery scan (SPEC.md 6). Memoized so it runs
-  // ONCE, on the first public verb -- never in the constructor (no I/O there),
-  // never per operation. It resolves every STALE claim: one older than
-  // claimTimeout was abandoned by a prior run, while a younger claim is another
-  // live process's pop and is left untouched. A claim whose sidecar is gone is an
+  // on the first public verb -- never in the constructor (no I/O there) -- and
+  // re-runs only once a claim it skipped for being too young would have aged past
+  // the lease (see #nextRecoverAt below), not per operation. It resolves every
+  // STALE claim: one older than claimTimeout was abandoned by a prior run, while a
+  // younger one may be a live pop and is left, then re-checked once it ages. A
+  // claim whose sidecar is gone is an
   // interrupted commit -- recovery FINISHES the deletion (never restores a
   // sidecar-less blob into the store, fragile area 6); otherwise the entry is
   // resolved per onPopFailure ('burn' destroys, 'restore' returns it). It drives
   // backend methods only, so it cannot recurse into a public verb. A failed scan
   // clears the memo so the next verb retries, mirroring the disk backend's #init.
   #recover() {
-    if (this.#recovered === null) {
-      this.#recovered = (async () => {
-        const claims = await this.#backend.listClaims();
-        const now = Date.now();
-        for (const { id, claimedAt } of claims) {
-          if (now - claimedAt < this.#claimTimeoutMs) continue; // a live pop, not ours to resolve
-          let hasSidecar = true;
-          try {
-            await this.#backend.stat(id);
-          } catch (err) {
-            if (err instanceof RefNotFound) hasSidecar = false;
-            else throw err;
-          }
-          // Resolve the stale claim, tolerating one that ANOTHER process's
-          // recovery over the same root already resolved between our listClaims
-          // and here: two simultaneous starts can list the same stale claim, and
-          // the loser's restore then finds it gone (RefNotFound) or its target
-          // already restored (IntegrityError). Recovery's contract is only that
-          // no stale claim REMAINS, so the verdict is the claim's presence: if it
-          // is gone the work is done -- swallow the fault; a claim still standing
-          // after a failed restore/commit is a real fault, propagated to clear
-          // the memo for a retry.
-          try {
-            if (!hasSidecar || this.#onPopFailure === "burn") {
-              await this.#backend.commit(id);
-            } else {
-              await this.#backend.restore(id);
-            }
-          } catch (err) {
-            if (await this.#backend.isClaimed(id)) throw err;
-          }
+    // Re-run once a claim a prior scan skipped for being younger than the lease
+    // would have aged past it: memoizing forever would strand a claim that looked
+    // live at the first op (a crash within claimTimeout) as ECLAIMED until a
+    // restart. The memo stays shared until #nextRecoverAt, so concurrent ops still
+    // run one scan; a scan that resolves everything sets the deadline to Infinity.
+    if (this.#recovered !== null && Date.now() < this.#nextRecoverAt) return this.#recovered;
+    this.#nextRecoverAt = Infinity; // claim this re-scan for concurrent ops to share
+    this.#recovered = (async () => {
+      const claims = await this.#backend.listClaims();
+      const now = Date.now();
+      let nextAt = Infinity;
+      for (const { id, claimedAt } of claims) {
+        const staleAt = claimedAt + this.#claimTimeoutMs;
+        if (now < staleAt) { // still within the lease -- maybe a live pop; leave it,
+          nextAt = Math.min(nextAt, staleAt); // but re-scan once it would age past the lease
+          continue;
         }
-      })().catch((err) => {
-        this.#recovered = null;
-        throw err;
-      });
-    }
+        let hasSidecar = true;
+        try {
+          await this.#backend.stat(id);
+        } catch (err) {
+          if (err instanceof RefNotFound) hasSidecar = false;
+          else throw err;
+        }
+        // Resolve the stale claim, tolerating one that ANOTHER process's recovery
+        // over the same root already resolved between our listClaims and here: two
+        // simultaneous starts can list the same stale claim, and the loser's
+        // restore then finds it gone (RefNotFound) or its target already restored
+        // (IntegrityError). Recovery's contract is only that no stale claim REMAINS,
+        // so the verdict is the claim's presence: if it is gone the work is done --
+        // swallow the fault; a claim still standing after a failed restore/commit is
+        // a real fault, propagated to clear the memo for a retry.
+        try {
+          if (!hasSidecar || this.#onPopFailure === "burn") {
+            await this.#backend.commit(id);
+          } else {
+            await this.#backend.restore(id);
+          }
+        } catch (err) {
+          if (await this.#backend.isClaimed(id)) throw err;
+        }
+      }
+      this.#nextRecoverAt = nextAt;
+    })().catch((err) => {
+      this.#recovered = null;
+      this.#nextRecoverAt = 0;
+      throw err;
+    });
     return this.#recovered;
   }
 

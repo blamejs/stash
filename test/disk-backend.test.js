@@ -988,6 +988,26 @@ suite("disk: crash recovery (SPEC 6)", () => {
     assert.equal(existsSync(join(root, "claims", ref)), false, "prune recovered the stale claim");
     assert.deepEqual(await drain(await next.apply(ref)), Buffer.from("survivor"), "the recovered entry is live");
   });
+
+  test("recovery re-runs after the grace period -- a claim young at the first op is reclaimed once it ages, no restart", { timeout: 5000 }, async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("survivor");
+    plantClaim(root, ref, { ageMs: 0 }); // a fresh claim: younger than the lease at the first op
+    const next = new Stash({ backend: new DiskBackend({ root }), claimTimeout: 50 });
+    await assert.rejects(next.apply(ref), RefClaimed); // the first op leaves the young claim alone
+    // Once the claim ages past the 50ms lease, a LATER op must re-run recovery and
+    // restore it -- without a restart. Poll that later op (memoizing recovery
+    // forever would spin here until the test times out).
+    let bytes;
+    for (;;) {
+      try { bytes = await drain(await next.apply(ref)); break; }
+      catch (err) {
+        if (!(err instanceof RefClaimed)) throw err;
+        await new Promise((r) => setImmediate(r));
+      }
+    }
+    assert.deepEqual(bytes, Buffer.from("survivor"), "recovery re-ran after the grace period and the entry serves");
+  });
 });
 
 suite("disk: drop races the claim lifecycle (SPEC 4.2)", () => {
