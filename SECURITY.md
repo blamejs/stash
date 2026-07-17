@@ -60,15 +60,24 @@ exception, a hang -- is reported as a crash. The harness lives in
 
 ## Hardening a deployment
 
-- **Run under the Node permission model.** The store is designed to run with
-  filesystem grants scoped to its root and nothing else:
+- **Run under the Node permission model.** The store is designed to run with the
+  WRITE grant scoped to its root. The read grant must also cover the app's own
+  source, since Node loads its module graph (your code and `node_modules`) from
+  disk, so it spans the app directory; only the store's directory is writable.
+  Create that directory first -- under the sandbox the backend fills it but cannot
+  create it (that would need write on its parent):
 
   ```
-  node --permission --allow-fs-read=./.stash/* --allow-fs-write=./.stash/* app.js
+  mkdir -p .stash
+  node --permission --allow-fs-read=. --allow-fs-write=./.stash app.js
   ```
 
   Note that `--permission` does not gate the network on Node 24.x; StashJS
-  opens no sockets regardless.
+  opens no sockets regardless. This is a process-level filesystem allowlist, not
+  per-module isolation: it bounds what the whole process -- StashJS and every
+  dependency loaded in it -- can touch, so a compromised dependency cannot escape
+  to the wider filesystem, but code sharing the process can still read the stash
+  root. Run the store in its own process to isolate it from other in-process code.
 
 - **Let the store own its directory.** The disk backend creates its layout
   `0700`/`0600` and enforces realpath containment itself -- a symlink

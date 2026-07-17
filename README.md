@@ -149,23 +149,87 @@ The M1 + M2 + M3 + M4 + M5 + M6 + M7 surface (see `SPEC.md` section 12 for the f
 Every option `SPEC.md` defines is now accepted and enforced; an unknown option is a
 config-time `TypeError`.
 
-Next up: documentation polish and runnable examples (`ROADMAP.md` M8). `SPEC.md`
-is the contract.
+The `SPEC.md` section 12 delivery plan is complete; the store is feature-complete
+pre-1.0. `SPEC.md` is the contract.
+
+## The verbs
+
+The moving verbs are `git stash`'s, with the same mental model; the rest are
+queries and janitorial work. Every verb runs against either backend, unmodified.
+
+| Verb | Does | Destroys? |
+|---|---|---|
+| `push(source, opts?)` | Store bytes; mint a random-capability ref. | no |
+| `store(entry, source)` | File an already-created entry, identity preserved (replication). | no |
+| `apply(ref)` | Stream an entry, digest-verified; a read budget spends one credit. | only on the budget-exhausting read |
+| `pop(ref)` | Stream an entry, then destroy it the instant it drains cleanly. | yes |
+| `show(ref)` | Resolve a ref to its metadata (never the bytes). | no |
+| `has(ref)` | Boolean existence check. | no |
+| `list(opts?)` | Every live entry's metadata (expired hidden by default). | no |
+| `stats()` | `{ entries, bytes, claimed }` for the whole store. | no |
+| `tombstones()` | The graves `{ id, destroyedAt, cause }`, for reconciliation. | no |
+| `verify(opts?)` | Audit physical integrity; `{ repair: true }` removes only what it condemns. | only under `repair` |
+| `drop(ref)` | Delete an entry (and tombstone the id). | yes |
+| `clear()` | Drop everything; return the count. | yes |
+| `prune()` | Reap expired entries on demand. | yes (expired only) |
+| `close()` | Stop the background sweep (also `await using`). | no |
+
+## Error codes
+
+Every OPERATIONAL failure -- a bad ref, a missing entry, a corrupt blob, a full
+store -- is a typed `StashError` with a frozen `.code`: branch on the code, never
+the message (messages improve between patches; codes do not, `SPEC.md` section 10),
+and no message ever contains a ref, a `meta` value, or a path. Configuration
+mistakes are separate: an unknown option or a source that isn't a supported type
+throws a native `TypeError` at the call, before any storage is touched.
+
+<!-- BEGIN error-codes (generated from src/errors.js by scripts/regen-readme.js) -->
+
+| Code | Class | Raised when |
+|---|---|---|
+| `ENOREF` | `RefNotFound` | Unknown or expired ref. |
+| `ECLAIMED` | `RefClaimed` | A concurrent pop already claimed the entry. |
+| `EINTEGRITY` | `IntegrityError` | Blob bytes no longer match the recorded digest. |
+| `E2BIG` | `SizeExceeded` | maxSize crossed mid-stream. |
+| `EFULL` | `StashFull` | maxEntries / maxTotal reached; the push was refused. |
+| `EBADREF` | `InvalidRef` | Malformed ref string; refused before any storage access. |
+
+<!-- END error-codes -->
+
+## Runnable examples
+
+Each is a plain-node script, zero dependencies, runnable straight from a clone:
+
+```
+node examples/lifecycle.js         # push -> show -> apply -> pop -> gone; budgets; expiry
+node examples/cold-standby.js      # replicate a store without resurrecting the dead
+node examples/permission-flags.js  # run under --permission; prove the grant is scoped
+```
+
+They assert every step and run in CI, so a broken example fails the build.
 
 ## Run it sandboxed
 
-StashJS is designed to run under the Node permission model, with filesystem
-grants scoped to the store and nothing else:
+StashJS is designed to run under the Node permission model, with the WRITE grant
+scoped to the store. The read grant spans the app directory -- Node loads its
+module graph (your code and `node_modules`) from disk -- while only the store's
+directory is writable. Create that directory first: under the sandbox the backend
+can fill it but not create it (creating it would need write on its parent).
 
 ```
-node --permission --allow-fs-read=./.stash/* --allow-fs-write=./.stash/* app.js
+mkdir -p .stash
+node --permission --allow-fs-read=. --allow-fs-write=./.stash app.js
 ```
 
-A compromised dependency elsewhere in your tree cannot read the stash, and
-StashJS cannot read anything else. (On Node 24.x `--permission` does not gate
-the network; StashJS opens no sockets regardless.) The store never spawns
-child processes, never starts worker threads, and never accepts a file
-descriptor as input, so no wider grant is ever needed.
+The Node permission model is a process-level filesystem allowlist, not per-module
+isolation: it confines the whole process -- StashJS and every dependency loaded
+alongside it -- to the granted paths, so a compromised dependency cannot reach
+the wider filesystem (your keys, other apps' data), only the stash root and the
+app's own source. Code sharing the process can still read the stash root; run the
+stash in its own process to isolate it from other code in the tree. (On Node 24.x
+`--permission` does not gate the network; StashJS opens no sockets regardless.)
+The store never spawns child processes, never starts worker threads, and never
+accepts a file descriptor as input, so no wider grant is ever needed.
 
 ## Documentation
 

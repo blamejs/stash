@@ -86,10 +86,18 @@ each id to a replica's `drop()` converges two stores with no resurrection.
 the window, riding the existing sweep. The backend contract gains `writeTombstone`,
 `hasTombstone`, `listTombstones`, and `removeTombstone`.
 
-## M8 -- Docs -- NEXT
+## M8 -- Docs -- SHIPPED (0.1.10)
 
-README polish, runnable examples (cold-standby sync sketch, the permission
-flags), JSDoc across the public surface.
+Three runnable, self-asserting examples under `examples/` -- a lifecycle
+walkthrough, a cold-standby replication sketch, and a permission-model grant
+demonstration that re-execs itself under `--permission` and proves an
+out-of-scope write is denied -- all run in CI, so a broken example fails the
+build. The README
+gains a verb table mapped to the git-stash mental model and an error-code table
+generated from `src/errors.js` (a drift check keeps it in sync). The public
+surface is documented in full through the source comment blocks the wiki
+renders. No library surface changes -- the `SPEC.md` section 12 delivery plan is
+complete and the store is feature-complete pre-1.0.
 
 ## Standing constraints
 
