@@ -814,6 +814,13 @@ export class Stash {
    *   const reaped = await stash.prune(); // number of expired entries destroyed
    */
   async prune() {
+    // prune is a public verb AND the background sweep's operation, so it carries
+    // the same first-operation recovery every other verb does: a sweep-only
+    // deployment must still resolve a prior run's stale claims (restore/burn per
+    // onPopFailure), not leave claimed bytes occupying the store until some other
+    // verb happens to run. #recover drives backend methods only, so this cannot
+    // recurse into prune; it is memoized, so the sweep runs it just once.
+    await this.#recover();
     const entries = await this.#backend.list();
     const now = Date.now();
     let destroyed = 0;

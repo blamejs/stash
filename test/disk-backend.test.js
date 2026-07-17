@@ -975,6 +975,19 @@ suite("disk: crash recovery (SPEC 6)", () => {
     assert.equal(existsSync(join(root, "claims", ref)), false, "the redundant claim name was dropped");
     assert.equal(existsSync(join(root, "blobs", ref)), true, "the entry stays live at blobs/");
   });
+
+  test("prune alone recovers stale claims -- a sweep-only deployment resolves an abandoned pop", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("survivor");
+    plantClaim(root, ref); // stale claim, sidecar intact
+    // prune is the ONLY operation a sweep-only deployment runs; it must carry the
+    // first-operation recovery, resolving the stale claim rather than deferring it
+    // until some other verb happens to run.
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    await next.prune();
+    assert.equal(existsSync(join(root, "claims", ref)), false, "prune recovered the stale claim");
+    assert.deepEqual(await drain(await next.apply(ref)), Buffer.from("survivor"), "the recovered entry is live");
+  });
 });
 
 suite("disk: drop races the claim lifecycle (SPEC 4.2)", () => {
