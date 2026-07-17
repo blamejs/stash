@@ -949,7 +949,14 @@ export class Stash extends EventEmitter {
     try {
       entry = await this.#backend.stat(ref);
     } catch (err) {
-      if (err instanceof RefNotFound) return false;
+      if (err instanceof RefNotFound) {
+        // The ref names no live entry -- but a crash mid-remove (sidecar first, then
+        // blob) can strand an orphaned blob under this id. drop deletes without
+        // reading, so it still removes to clean that orphan (as it did before it
+        // stat'd for the event payload); the ref named nothing live, so -> false.
+        await this.#backend.remove(ref);
+        return false;
+      }
       // A sidecar too corrupt to parse must not make the entry un-droppable: drop
       // deletes without reading (unlike show/has, which surface the corruption).
       // Destroy it and report the removal; there is no whole Entry to carry, so no

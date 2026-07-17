@@ -448,23 +448,31 @@ export class DiskBackend {
     if (this.#reaped.has(id)) return false; // this instance already removed it (the fs name may still linger)
     this.#reaped.add(id); // claim BEFORE any await: atomic vs a concurrent remove of the same id
     if (this.#reaped.size > REAP_MEMO) this.#reaped.delete(this.#reaped.values().next().value); // evict oldest
-    // Each directory is contained immediately before its own op, not both up front:
-    // a resolve-early/use-late gap is the same directory time-of-check/time-of-use
-    // window write() closes. unlink never follows a final-component symlink, so the
-    // sidecar's existence and its deletion are one op, not a check-then-use a swap
-    // could redirect (CWE-367).
-    const metaDir = await this.#containedDir("meta");
-    let had = true;
+    // ANY failure after the claim un-claims the marker, so a retry (once the fault
+    // clears) re-attempts rather than being told "already removed" and skipping a
+    // still-present entry -- the claim is only authoritative once the removal lands.
     try {
-      // _retryTransient absorbs a Windows EPERM against a lingering sidecar handle.
-      await _retryTransient(() => unlink(join(metaDir, id + ".json")));
+      // Each directory is contained immediately before its own op, not both up
+      // front: a resolve-early/use-late gap is the same directory time-of-check/
+      // time-of-use window write() closes. unlink never follows a final-component
+      // symlink, so the sidecar's existence and its deletion are one op, not a
+      // check-then-use a swap could redirect (CWE-367).
+      const metaDir = await this.#containedDir("meta");
+      let had = true;
+      try {
+        // _retryTransient absorbs a Windows EPERM against a lingering sidecar handle.
+        await _retryTransient(() => unlink(join(metaDir, id + ".json")));
+      } catch (err) {
+        if (_absent(err)) had = false; // already gone (an external / cross-process removal) -- not us
+        else throw err;
+      }
+      const blobDir = await this.#containedDir("blobs");
+      await rm(join(blobDir, id), { force: true });
+      return had;
     } catch (err) {
-      if (_absent(err)) had = false; // already gone (an external / cross-process removal) -- not us
-      else { this.#reaped.delete(id); throw err; } // a real fault: un-claim so a retry can re-attempt
+      this.#reaped.delete(id); // a real fault anywhere above: roll the claim back for a retry
+      throw err;
     }
-    const blobDir = await this.#containedDir("blobs");
-    await rm(join(blobDir, id), { force: true });
-    return had;
   }
 
   // stat(id) -> Entry, strictly validated: bounded read, JSON.parse under

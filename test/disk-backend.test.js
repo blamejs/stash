@@ -1289,6 +1289,15 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     assert.deepEqual(events, [], "no lifecycle event -- there is no whole Entry to carry");
   });
 
+  test("drop cleans an orphaned blob when the sidecar is already gone (a crashed remove), still returning false", async () => {
+    const { root, stash } = freshStash();
+    const ref = await stash.push("entry");
+    rmSync(mp(root, ref)); // sidecar gone, blob orphaned -- the state a crash between remove()'s two deletes leaves
+    assert.equal(existsSync(bp(root, ref)), true, "the orphan blob is present");
+    assert.equal(await stash.drop(ref), false, "the ref names no live entry -> false");
+    assert.equal(existsSync(bp(root, ref)), false, "but drop cleans the orphaned blob (it deletes without reading)");
+  });
+
   test("verify SPARES a blob claimed DURING the walk -- the missing-blob check re-reads claims/ LIVE, never a stale snapshot (CWE-362)", async () => {
     const root = freshRoot();
     // A probe backend that, on the target's per-entry stat (verify's own read),
@@ -1463,6 +1472,21 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     assert.ok(dry.findings.some((f) => f.kind === "orphan-tmp"), "a stale claims/ .tmp is an orphan too, not skipped");
     await stash.verify({ repair: true });
     assert.equal(existsSync(stale), false, "repair reaps it");
+  });
+
+  test("remove() rolls back the in-process reap marker on a failed removal, so a retry re-attempts (not silently 'already removed')", { skip: CANNOT_FAULT }, async () => {
+    const root = freshRoot();
+    const backend = new DiskBackend({ root });
+    const ref = await new Stash({ backend }).push("survive the fault");
+    chmodSync(root, 0o600); // deny traverse: remove's #containedDir realpath faults AFTER it claimed the reap marker
+    try {
+      await assert.rejects(backend.remove(ref), (e) => e.code === "EACCES" || e.code === "EPERM");
+    } finally {
+      chmodSync(root, 0o700); // restore so the retry (and cleanup) can proceed
+    }
+    // If the marker stuck, the retry would see "already removed" and skip the still-present entry.
+    assert.equal(await backend.remove(ref), true, "the retry removes the intact entry -- the marker rolled back");
+    assert.equal(existsSync(mp(root, ref)), false, "the sidecar is gone after the successful retry");
   });
 
   test("verify FAULTS on an I/O error, never resolves a clean report", { skip: CANNOT_FAULT }, async () => {
