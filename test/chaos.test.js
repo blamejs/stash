@@ -253,6 +253,28 @@ for (const { name, create } of BACKENDS) {
       await stash.close();
     });
 
+    test("a faulted claim resolution schedules its OWN recovery re-scan, so an orphan with no concurrent claim is still reclaimed (SPEC.md 6)", { timeout: 10000 }, async () => {
+      // A resolution fault (here an early-expiry restore) leaves the on-disk claim an
+      // orphan. Unlike the sibling tests there is NO other claim to have scheduled a
+      // re-scan, so the faulted path must schedule one itself -- otherwise the orphan is
+      // stranded ECLAIMED until restart (a scan whose only claims were live, or a fault
+      // with no concurrent claim, both leave #nextRecoverAt at Infinity).
+      const inner = create();
+      let failRestore = false;
+      const backend = wrapBackend(inner, {
+        claim: async (...a) => { const r = await inner.claim(...a); return { ...r, entry: { ...r.entry, expiresAt: 1 } }; },
+        restore: (...a) => { if (failRestore) throw new Error("restore boom"); return inner.restore(...a); },
+      });
+      const stash = new Stash({ backend, sweepInterval: null, onPopFailure: "burn", claimTimeout: 40 });
+      const leakRef = await stash.push("expires", { reads: 1 });
+      failRestore = true;
+      await assert.rejects(stash.apply(leakRef)); // early-expiry restore faults, no other claim exists
+      failRestore = false;
+      await pollUntil(async () => { await stash.prune(); return !(await inner.isClaimed(leakRef)); }, { timeout: 4000 });
+      assert.equal(await inner.isClaimed(leakRef), false, "orphan from a faulted restore with no concurrent claim is still reclaimed");
+      await stash.close();
+    });
+
     test("a claim age-reclaimed DURING acquisition (before its guard is recorded) cannot resurrect a once-only entry for a second reader (SPEC.md 6)", { timeout: 10000 }, async () => {
       // backend.claim() moves the blob into claims/ during its own awaits, BEFORE the
       // reader records the live-holder guard. If a #recover fires in that window -- a

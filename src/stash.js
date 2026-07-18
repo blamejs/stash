@@ -410,6 +410,14 @@ export class Stash extends EventEmitter {
     if (n > 0) this.#liveClaims.set(ref, n);
     else this.#liveClaims.delete(ref);
   }
+  // Force the next public verb to re-run #recover. Called when a claim resolution
+  // FAULTS (restore / commit / burn threw): the on-disk claim may still stand as an
+  // orphan, and the scan that would reclaim it may not be scheduled -- a scan whose
+  // only claims were live leaves #nextRecoverAt at Infinity, and a fault with no
+  // concurrent claim never scheduled one at all. Without this, such an orphan is
+  // stranded ECLAIMED until restart. A due deadline is harmless when nothing orphaned
+  // (the next scan finds no stale claim and reschedules).
+  #scheduleRecover() { this.#nextRecoverAt = 0; }
 
   constructor(opts) {
     super();
@@ -702,6 +710,9 @@ export class Stash extends EventEmitter {
       try {
         await this.#backend.restore(ref);
         if (await this.#backend.remove(ref)) this.#emit("expired", entry); // lazy-drop, witnessed; expiry writes NO grave
+      } catch (err) {
+        this.#scheduleRecover(); // a faulted restore leaves the claim an orphan -- ensure a re-scan reclaims it
+        throw err;
       } finally {
         // Drop the guard whether the restore/remove resolved OR faulted: a faulted
         // restore leaves the claim standing as an ORPHAN, and #recover can only
@@ -721,6 +732,7 @@ export class Stash extends EventEmitter {
       // latch), so exactly one branch runs and drops the id.
       onCommit: async () => {
         try { await onCommit(entry); }
+        catch (err) { this.#scheduleRecover(); throw err; } // a faulted commit leaves an interrupted destruction orphan
         finally { this.#unguardClaim(ref); }
       },
       // 'burn' destroys the entry the read could not consume: it runs the SAME
@@ -733,7 +745,8 @@ export class Stash extends EventEmitter {
           await (this.#onPopFailure === "burn"
             ? this.#destroy(ref, entry, destruction.cause, destruction.event)
             : this.#backend.restore(ref));
-        } finally { this.#unguardClaim(ref); }
+        } catch (err) { this.#scheduleRecover(); throw err; } // a faulted burn/restore leaves the claim an orphan
+        finally { this.#unguardClaim(ref); }
       },
     });
   }
