@@ -214,5 +214,43 @@ for (const { name, create } of BACKENDS) {
       assert.ok((await stash.tombstones()).some((g) => g.id === liveRef), "the reader's own pop destroyed it exactly once");
       await stash.close();
     });
+
+    test("a FAULTED expired-restore in the claim window releases the live-claim guard, so recovery still reclaims the orphan (SPEC.md 6)", { timeout: 10000 }, async () => {
+      // The early-expiry path in a claimed read (an entry live at the advisory #statLive
+      // but lapsed by the time the claim is won -- fragile area 4) restores the claim and
+      // drops the live-claim guard. If that restore FAULTS, the guard must still be
+      // released -- otherwise the now-orphaned claim is pinned in the live set forever and
+      // #recover can never reclaim it. A young crash-orphan schedules the re-scan that
+      // goes on to reclaim the leaked claim.
+      const inner = create();
+      const setup = new Stash({ backend: inner, sweepInterval: null });
+      const orphanRef = await setup.push("orphan"); // the young crash-orphan that bootstraps the re-scan
+      const oc = await inner.claim(orphanRef);
+      oc.source.on("error", () => {});
+      oc.source.destroy();
+
+      let failRestore = false;
+      const backend = wrapBackend(inner, {
+        // Reproduce the TOCTOU deterministically: the entry is LIVE at the advisory
+        // #statLive but the claim resolves it as already lapsed, so #claimedRead takes
+        // the early-expiry branch -- no clock racing.
+        claim: async (...a) => { const r = await inner.claim(...a); return { ...r, entry: { ...r.entry, expiresAt: 1 } }; },
+        restore: (...a) => { if (failRestore) throw new Error("restore boom"); return inner.restore(...a); },
+      });
+      const stash = new Stash({ backend, sweepInterval: null, onPopFailure: "burn", claimTimeout: 120 });
+      const leakRef = await stash.push("expires", { reads: 1 }); // budgeted -> routes through #claimedRead
+
+      failRestore = true;
+      // apply claims leakRef, the wrapped claim reports it expired, the early-expiry
+      // restore FAULTS -- which must still release the live-claim guard.
+      await assert.rejects(stash.apply(leakRef));
+      failRestore = false;
+
+      // Past the lease, a verb re-runs #recover. It must reclaim leakRef's orphan (the
+      // reader is gone, not live). A leaked guard would pin it and it would stay claimed.
+      await pollUntil(async () => { await stash.prune(); return !(await inner.isClaimed(leakRef)); }, { timeout: 6000 });
+      assert.equal(await inner.isClaimed(leakRef), false, "the faulted expired-restore did not pin leakRef in the live-claim guard");
+      await stash.close();
+    });
   });
 }

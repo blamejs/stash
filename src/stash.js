@@ -673,9 +673,17 @@ export class Stash extends EventEmitter {
     this.#liveClaims.add(ref);
     if (isExpired(entry, Date.now())) {
       _dispose(source);
-      await this.#backend.restore(ref);
-      this.#liveClaims.delete(ref); // the claim is resolved -- drop the live-holder guard
-      if (await this.#backend.remove(ref)) this.#emit("expired", entry); // lazy-drop, witnessed; expiry writes NO grave
+      try {
+        await this.#backend.restore(ref);
+        if (await this.#backend.remove(ref)) this.#emit("expired", entry); // lazy-drop, witnessed; expiry writes NO grave
+      } finally {
+        // Drop the guard whether the restore/remove resolved OR faulted: a faulted
+        // restore leaves the claim standing as an ORPHAN, and #recover can only
+        // reclaim it if this process is no longer flagged as its live holder --
+        // leaving the guard set would pin the orphan forever (the same `finally`
+        // discipline the onCommit/onFail verdicts use).
+        this.#liveClaims.delete(ref);
+      }
       throw new RefNotFound();
     }
     return _verifiedStream(entry, source, {

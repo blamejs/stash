@@ -587,7 +587,18 @@ export class DiskBackend {
         entry = await this.stat(id);
       } catch (err) {
         if (err instanceof RefNotFound) continue; // removed between readdir and stat -- no longer listed
-        if (collectCorrupt && err instanceof IntegrityError) { corrupt.push(id); continue; } // reported, never swallowed
+        if (collectCorrupt && err instanceof IntegrityError) {
+          // A per-entry corrupt sidecar is collected and the walk continues -- but a
+          // STRUCTURAL layout fault (stat's own containment check throwing IntegrityError,
+          // e.g. the meta directory swapped for a symlink out of the root mid-scan) must
+          // stay loud even in this face. Re-resolve the layout: if it is now damaged, this
+          // was not a per-entry corruption -- rethrow; if it is intact, the fault was this
+          // one sidecar -- collect it. verify() reads this same {entries, corrupt}, so a
+          // vanished or swapped layout dir surfaces there too, never masked as corruption.
+          await this.#containedDir("meta"); // throws (loud) if the layout is damaged
+          corrupt.push(id);
+          continue;
+        }
         throw err; // list()'s loud-not-lossy contract, and every fs fault, in both faces
       }
       entries.push(entry);

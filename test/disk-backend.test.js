@@ -523,6 +523,27 @@ suite("disk: layout and atomicity", () => {
     await assert.rejects(stash.reconcilable(), IntegrityError);
     await assert.rejects(stash.list(), IntegrityError);
   });
+
+  test("reconcilable() re-throws a STRUCTURAL fault raised by a per-entry stat mid-scan, never filing it under corrupt", async () => {
+    // Distinct from the foreign-file case above (which throws before the per-entry walk):
+    // a per-entry stat() can itself raise a STRUCTURAL IntegrityError when its own
+    // containment check finds the layout compromised mid-scan. The reconciliation face must
+    // stay loud on that, not collect the id as a corrupt sidecar. Injected deterministically:
+    // the first stat removes meta/ (so the scan's re-resolve of #containedDir fails) and
+    // raises the layout fault; with the fix, reconcilable() re-throws instead of collecting.
+    const root = freshRoot();
+    const backend = new DiskBackend({ root });
+    const stash = new Stash({ backend, sweepInterval: null });
+    await stash.push("a");
+    await stash.push("b");
+    const realStat = backend.stat.bind(backend);
+    let first = true;
+    backend.stat = async (id) => {
+      if (first) { first = false; rmSync(join(root, "meta"), { recursive: true, force: true }); throw new IntegrityError("store layout is damaged"); }
+      return realStat(id);
+    };
+    await assert.rejects(stash.reconcilable(), IntegrityError);
+  });
 });
 
 suite("disk: containment", () => {
