@@ -252,5 +252,65 @@ for (const { name, create } of BACKENDS) {
       assert.equal(await inner.isClaimed(leakRef), false, "the faulted expired-restore did not pin leakRef in the live-claim guard");
       await stash.close();
     });
+
+    test("a claim age-reclaimed DURING acquisition (before its guard is recorded) cannot resurrect a once-only entry for a second reader (SPEC.md 6)", { timeout: 10000 }, async () => {
+      // backend.claim() moves the blob into claims/ during its own awaits, BEFORE the
+      // reader records the live-holder guard. If a #recover fires in that window -- a
+      // young-orphan re-scan crossing a forward clock step -- it sees the fresh claim
+      // with no live holder and age-reclaims it: under the default restore policy the
+      // once-only entry becomes readable again while the acquiring reader still holds
+      // its open stream, so a SECOND reader can drain the same bytes. Reproduced with the
+      // same forward-step mechanism as the mid-drain case above, but the reader is parked
+      // INSIDE acquisition (after the on-disk claim, before the guard): a young orphan
+      // schedules the re-scan, and once the lease passes the re-scan reports the fresh
+      // claim aged (a forward step) so recovery restores it mid-acquisition.
+      const CLAIM_TIMEOUT = 30;
+      const inner = create();
+      const setup = new Stash({ backend: inner, sweepInterval: null });
+      const victim = Buffer.alloc(64 * C.BYTES.KIB, 0x67);
+      const victimRef = await setup.push(victim, { reads: 1 }); // via setup, so `stash`'s first verb is the apply
+      const orphanRef = await setup.push("orphan");
+      const orphanClaimedAt = Date.now();
+      const oc = await inner.claim(orphanRef); // young orphan: schedules the recovery re-scan
+      oc.source.on("error", () => {});
+      oc.source.destroy();
+
+      let injected = false;
+      let reportVictimStale = false;
+      let stash;
+      const backend = wrapBackend(inner, {
+        claim: async (ref) => {
+          const r = await inner.claim(ref); // ref's on-disk claim now exists
+          if (ref === victimRef && !injected) {
+            injected = true;
+            // Park inside acquisition until the lease passes so the pending re-scan will
+            // fire (a bounded poll on the wall clock, the forward-step condition -- not a
+            // sleep-as-wait): the guard has NOT been recorded at this point.
+            const deadline = orphanClaimedAt + CLAIM_TIMEOUT + 20;
+            while (Date.now() <= deadline) await new Promise((res) => setImmediate(res));
+            reportVictimStale = true;
+            await stash.list(); // #recover re-runs past the lease and reclaims the fresh, unguarded claim
+          }
+          return r;
+        },
+        listClaims: async () => {
+          const claims = await inner.listClaims();
+          if (!reportVictimStale) return claims;
+          // a forward clock step: the fresh claim reads as aged past the lease
+          return claims.map((c) => (c.id === victimRef ? { ...c, claimedAt: c.claimedAt - 10 * 60_000 } : c));
+        },
+      });
+      stash = new Stash({ backend, sweepInterval: null, claimTimeout: CLAIM_TIMEOUT }); // default restore policy
+
+      const stream1 = await stash.apply(victimRef); // the injection fires during this acquisition
+      stream1.on("error", () => {});
+      // With the guard recorded only AFTER the claim, the injected #recover restored
+      // victimRef, so this second reader claims and would drain the SAME once-only bytes.
+      // With the guard recorded BEFORE acquisition, #recover skips it, the entry stays
+      // claimed by stream1, and this second apply is refused.
+      await assert.rejects(stash.apply(victimRef), "a second reader must not acquire a once-only entry another read holds");
+      await drain(stream1).catch(() => {}); // stream1's own bytes + commit; tolerate a post-resurrection commit fault
+      await stash.close();
+    });
   });
 }

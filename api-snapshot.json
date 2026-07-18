@@ -312,7 +312,7 @@
     "stash.tombstones": "0.1.9",
     "stash.verify": "0.1.8",
     "stash.list": "0.1.0",
-    "stash.reconcilable": "0.1.14",
+    "stash.reconcilable": "0.1.15",
     "stash.drop": "0.1.0",
     "stash.clear": "0.1.0",
     "stash.prune": "0.1.5",

@@ -392,12 +392,24 @@ export class Stash extends EventEmitter {
   // ORPHAN (a claim with no live holder), and the wall clock is meaningful only
   // there. Single-writer-per-root (SPEC.md 6) makes this process the sole claimant,
   // so membership is authoritative -- a held claim is never another writer's. The id
-  // is added the instant the claim is taken and dropped the instant it resolves
-  // (destroy, restore, or burn), so the set mirrors exactly the on-disk claims this
-  // process is actively draining. A crash starts the next process with an EMPTY set,
+  // is guarded the instant acquisition BEGINS (before backend.claim writes the on-disk
+  // record, so a concurrent #recover crossing a forward clock step in the acquisition
+  // window cannot see the fresh claim as an orphan) and dropped the instant the claim
+  // resolves (destroy, restore, or burn), so it mirrors exactly the on-disk claims this
+  // process is actively draining. A crash starts the next process with an EMPTY map,
   // so a genuine prior-run orphan is still reclaimed purely by age -- recovery is not
-  // weakened, only kept off a claim a live drain still owns.
-  #liveClaims = new Set();
+  // weakened, only kept off a claim a live drain still owns. REFCOUNTED: two readers
+  // can pass the advisory #rejectIfClaimed before either writes the on-disk claim and
+  // both begin acquisition; the one that loses the backend.claim race releases its
+  // guard, and a refcount keeps that release from clearing the winner's.
+  #liveClaims = new Map(); // id -> live-holder count
+
+  #guardClaim(ref) { this.#liveClaims.set(ref, (this.#liveClaims.get(ref) ?? 0) + 1); }
+  #unguardClaim(ref) {
+    const n = (this.#liveClaims.get(ref) ?? 0) - 1;
+    if (n > 0) this.#liveClaims.set(ref, n);
+    else this.#liveClaims.delete(ref);
+  }
 
   constructor(opts) {
     super();
@@ -443,13 +455,12 @@ export class Stash extends EventEmitter {
     const claimTimeout = opts.claimTimeout === undefined ? DEFAULT_CLAIM_TIMEOUT : opts.claimTimeout;
     this.#claimTimeoutMs = parse(claimTimeout, "claimTimeout");
     // Strictly POSITIVE: with a zero (or negative) lease staleAt == claimedAt, so
-    // recovery would treat EVERY orphan as abandoned the instant it appears, and a
-    // just-taken claim in the window before its #liveClaims guard is recorded along
-    // with it -- collapsing the orphan grace to nothing. A live in-process reader's
-    // own claim is guarded regardless (it never age-reclaims), but a non-positive
-    // lease is still a broken configuration, refused rather than silently applied.
-    // The lease must exceed the longest pop a deployment can run (see the
-    // constructor docs).
+    // recovery would treat EVERY orphan as abandoned the instant it appears --
+    // collapsing the orphan grace to nothing. A live in-process reader's own claim is
+    // guarded from the start of acquisition regardless (#recover never age-reclaims
+    // it), but a non-positive lease is still a broken configuration, refused rather
+    // than silently applied. The lease must exceed the longest pop a deployment can
+    // run (see the constructor docs).
     if (this.#claimTimeoutMs === null || this.#claimTimeoutMs <= 0) {
       throw new TypeError("new Stash: claimTimeout must be a positive duration");
     }
@@ -663,14 +674,21 @@ export class Stash extends EventEmitter {
   // onPopFailure: 'burn'. pop and budgeted apply differ only in onCommit, so the
   // destruction/restore machinery has exactly one home.
   async #claimedRead(ref, onCommit, destruction) {
-    const { entry, source } = await this.#backend.claim(ref);
-    // This process now holds a LIVE claim on ref. Record it synchronously here --
-    // before any further await -- so a concurrent #recover never age-reclaims a claim
-    // this drain still owns: a forward wall-clock step that ages this young claim past
-    // claimTimeout can no longer burn or restore it out from under the reader. The id
-    // is dropped the instant the claim RESOLVES (below), so the guard's lifetime
-    // matches the on-disk claim's exactly.
-    this.#liveClaims.add(ref);
+    // Guard BEFORE acquisition, not after: backend.claim writes the on-disk claim
+    // during its own awaits, so a concurrent #recover racing this drain would see a
+    // fresh claim with no live holder and -- a forward wall-clock step aging it past
+    // claimTimeout -- restore or burn it out from under the reader, handing the same
+    // once-only bytes to a second reader. Recording the guard first closes that
+    // acquisition window; if the claim FAILS (RefClaimed to a loser, RefNotFound),
+    // this drain never became the holder, so the guard is released.
+    this.#guardClaim(ref);
+    let entry, source;
+    try {
+      ({ entry, source } = await this.#backend.claim(ref));
+    } catch (err) {
+      this.#unguardClaim(ref);
+      throw err;
+    }
     if (isExpired(entry, Date.now())) {
       _dispose(source);
       try {
@@ -682,7 +700,7 @@ export class Stash extends EventEmitter {
         // reclaim it if this process is no longer flagged as its live holder --
         // leaving the guard set would pin the orphan forever (the same `finally`
         // discipline the onCommit/onFail verdicts use).
-        this.#liveClaims.delete(ref);
+        this.#unguardClaim(ref);
       }
       throw new RefNotFound();
     }
@@ -692,10 +710,10 @@ export class Stash extends EventEmitter {
       // fault still releases it: the read is over, and a claim a faulted commit left
       // standing is exactly the still-standing orphan #recover resolves later (the
       // _verifiedStream contract). The verdict fires exactly once (the `resolved`
-      // latch), so exactly one branch runs and deletes the id.
+      // latch), so exactly one branch runs and drops the id.
       onCommit: async () => {
         try { await onCommit(entry); }
-        finally { this.#liveClaims.delete(ref); }
+        finally { this.#unguardClaim(ref); }
       },
       // 'burn' destroys the entry the read could not consume: it runs the SAME
       // grave-then-commit-then-emit terminal a successful drain runs (a burned
@@ -707,7 +725,7 @@ export class Stash extends EventEmitter {
           await (this.#onPopFailure === "burn"
             ? this.#destroy(ref, entry, destruction.cause, destruction.event)
             : this.#backend.restore(ref));
-        } finally { this.#liveClaims.delete(ref); }
+        } finally { this.#unguardClaim(ref); }
       },
     });
   }
@@ -1320,7 +1338,7 @@ export class Stash extends EventEmitter {
   /**
    * @primitive  stash.reconcilable
    * @signature  stash.reconcilable() -> Promise<{ entries: Entry[], corrupt: string[] }>
-   * @since      0.1.14
+   * @since      0.1.15
    * @status     experimental
    * @spec       SPEC.md 4, SPEC.md 4.4
    * @related    stash.list, stash.tombstones, stash.store, stash.verify
