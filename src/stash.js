@@ -358,6 +358,15 @@ function _positiveCount(value, label) {
  *
  *   const stash = new Stash({ backend: new MemoryBackend(), ttl: "24h" });
  */
+// Process-wide live-claim guards, keyed by backend identity (SPEC.md 6 single-writer-per-
+// root). Two Stash over the SAME store share ONE guard map, so one instance's crash
+// recovery never age-reclaims a claim ANOTHER instance's live reader still holds (which
+// would restore/burn a once-only read out from under it). A backend that declares no
+// identity -- a test wrapper, a custom backend -- gets a private guard. Refcounted:
+// dropped from the registry when its last holder calls close(), so a long-lived process
+// creating transient stores does not accrete empty maps.
+const CLAIM_GUARDS = new Map(); // identity -> { guard: Map<id, count>, holders: number }
+
 export class Stash extends EventEmitter {
   #backend;
   #ttlMs = null;
@@ -391,23 +400,26 @@ export class Stash extends EventEmitter {
   // in-process gate is the whole concurrency domain; a key is dropped once nothing
   // further is chained behind it, so the map is bounded by live same-id races.
   #storeChains = new Map();
-  // The claims THIS process currently holds via a live pop / budgeted-read drain
+  // The claims currently held over THIS store via a live pop / budgeted-read drain
   // (#claimedRead), by id. #recover consults it to NEVER age-reclaim a claim a live
-  // in-process reader holds: recovery's clock/mtime staleness test exists for an
-  // ORPHAN (a claim with no live holder), and the wall clock is meaningful only
-  // there. Single-writer-per-root (SPEC.md 6) makes this process the sole claimant,
-  // so membership is authoritative -- a held claim is never another writer's. The id
-  // is guarded the instant acquisition BEGINS (before backend.claim writes the on-disk
-  // record, so a concurrent #recover crossing a forward clock step in the acquisition
-  // window cannot see the fresh claim as an orphan) and dropped the instant the claim
-  // resolves (destroy, restore, or burn), so it mirrors exactly the on-disk claims this
-  // process is actively draining. A crash starts the next process with an EMPTY map,
-  // so a genuine prior-run orphan is still reclaimed purely by age -- recovery is not
-  // weakened, only kept off a claim a live drain still owns. REFCOUNTED: two readers
-  // can pass the advisory #rejectIfClaimed before either writes the on-disk claim and
-  // both begin acquisition; the one that loses the backend.claim race releases its
-  // guard, and a refcount keeps that release from clearing the winner's.
-  #liveClaims = new Map(); // id -> live-holder count
+  // reader holds: recovery's clock/mtime staleness test exists for an ORPHAN (a claim
+  // with no live holder), and the wall clock is meaningful only there. The map is SHARED
+  // per store (keyed by backend identity in the module CLAIM_GUARDS registry), so two Stash over the same
+  // root -- single-writer-per-root (SPEC.md 6) is the contract, but the guard still has
+  // to hold when a caller creates two instances -- see one another's live reads and
+  // neither age-reclaims the other's mid-drain claim. The id is guarded the instant
+  // acquisition BEGINS (before backend.claim writes the on-disk record, so a concurrent
+  // #recover crossing a forward clock step in the acquisition window cannot see the fresh
+  // claim as an orphan) and dropped the instant the claim resolves (destroy, restore, or
+  // burn), so it mirrors exactly the on-disk claims being drained. A crash starts the
+  // next process with an EMPTY map, so a genuine prior-run orphan is still reclaimed
+  // purely by age -- recovery is not weakened, only kept off a claim a live drain still
+  // owns. REFCOUNTED per id: two readers can pass the advisory #rejectIfClaimed before
+  // either writes the on-disk claim and both begin acquisition; the one that loses the
+  // backend.claim race releases its guard, and a refcount keeps that release from
+  // clearing the winner's.
+  #liveClaims; // id -> live-holder count; assigned from the per-store shared registry in the constructor
+  #guardIdentity; // the backend-identity key this instance holds in #GUARDS (undefined -> a private guard)
 
   #guardClaim(ref) { this.#liveClaims.set(ref, (this.#liveClaims.get(ref) ?? 0) + 1); }
   #unguardClaim(ref) {
@@ -439,6 +451,22 @@ export class Stash extends EventEmitter {
       }
     }
     this.#backend = backend;
+    // Bind the per-store live-claim guard (SPEC.md 6). Two Stash over the same store
+    // (same backend identity) share ONE guard so neither's recovery age-reclaims the
+    // other's live read; a backend that declares no identity gets a private guard.
+    const identity = backend.identity;
+    if (identity === undefined) {
+      this.#liveClaims = new Map();
+    } else {
+      let shared = CLAIM_GUARDS.get(identity);
+      if (shared === undefined) {
+        shared = { guard: new Map(), holders: 0 };
+        CLAIM_GUARDS.set(identity, shared);
+      }
+      shared.holders += 1;
+      this.#guardIdentity = identity;
+      this.#liveClaims = shared.guard;
+    }
     this.#ttlMs = parse(opts.ttl, "ttl");
     // A ttl can be a valid duration yet place expiresAt (createdAt + ttl) past
     // the safe integer range, which make() refuses at push. Catch an unusable
@@ -1625,6 +1653,14 @@ export class Stash extends EventEmitter {
    *   }
    */
   async close() {
+    // Release this instance's hold on the per-store shared guard; drop the registry
+    // entry when the last holder closes. Idempotent (a second close() is a no-op): the
+    // identity is cleared once decremented, so holders never double-count.
+    if (this.#guardIdentity !== undefined) {
+      const shared = CLAIM_GUARDS.get(this.#guardIdentity);
+      if (shared !== undefined && (shared.holders -= 1) <= 0) CLAIM_GUARDS.delete(this.#guardIdentity);
+      this.#guardIdentity = undefined;
+    }
     if (this.#sweepTimer !== null) {
       clearInterval(this.#sweepTimer);
       this.#sweepTimer = null;

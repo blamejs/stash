@@ -345,6 +345,36 @@ for (const { name, create } of BACKENDS) {
       await stash.close();
     });
 
+    test("two Stash over one store share the live-claim guard: one instance's recovery never reclaims the other's mid-drain read (SPEC.md 6)", { timeout: 10000 }, async () => {
+      // Single-writer-per-root is the contract, but if a caller creates two Stash over the
+      // same store the guard must still hold: instance B's crash recovery must not
+      // age-reclaim a claim instance A's live reader holds -- otherwise a forward clock
+      // step (here a claim parked past the lease) lets B restore/burn a once-only read A is
+      // still draining. The guard is shared per backend identity, so B sees A's live claim.
+      const CLAIM_TIMEOUT = 50;
+      const backend = create();
+      const a = new Stash({ backend, sweepInterval: null, claimTimeout: CLAIM_TIMEOUT });
+      const b = new Stash({ backend, sweepInterval: null, claimTimeout: CLAIM_TIMEOUT }); // SAME store
+      const big = Buffer.alloc(256 * C.BYTES.KIB, 0x6b);
+      const ref = await a.push(big);
+      const claimedAt = Date.now();
+      const stream = await a.pop(ref); // A holds a live claim (the shared guard), mid-drain
+      stream.on("error", () => {});
+
+      // Past the lease, B's recovery scans A's now-aged claim. It must SKIP it (A holds it
+      // live in the shared guard), not reclaim it. A bounded wall-clock poll on the lease.
+      const deadline = claimedAt + CLAIM_TIMEOUT + 30;
+      while (Date.now() <= deadline) await new Promise((r) => setImmediate(r));
+      await b.prune(); // B's first #recover
+      assert.equal(await backend.isClaimed(ref), true, "B's recovery did not reclaim A's live mid-drain claim");
+
+      // And A's read completes intact and destroys the entry exactly once.
+      assert.deepEqual(await drain(stream), big, "A's mid-drain read completes with the full bytes");
+      await pollUntil(async () => !(await backend.isClaimed(ref)));
+      await a.close();
+      await b.close();
+    });
+
     test("a claim age-reclaimed DURING acquisition (before its guard is recorded) cannot resurrect a once-only entry for a second reader (SPEC.md 6)", { timeout: 10000 }, async () => {
       // backend.claim() moves the blob into claims/ during its own awaits, BEFORE the
       // reader records the live-holder guard. If a #recover fires in that window -- a

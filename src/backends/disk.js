@@ -234,6 +234,13 @@ export class DiskBackend {
     this.#root = resolve(opts.root);
   }
 
+  // The store's process-wide identity: its resolved root path. The policy layer keys its
+  // single-writer-per-root guard on it (SPEC.md 6), so two Stash over the SAME root --
+  // even via distinct DiskBackend instances -- coordinate as one writer and never
+  // age-reclaim each other's live reads. Synchronous, no I/O (the resolve ran in the
+  // constructor); realpath would be more canonical but needs I/O the constructor forbids.
+  get identity() { return "disk:" + this.#root; }
+
   // Lazy, memoized layout creation (constructors do no I/O). A failed
   // init clears the memo so the next operation retries instead of
   // poisoning the instance forever.

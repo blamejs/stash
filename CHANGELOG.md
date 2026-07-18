@@ -57,15 +57,18 @@ references left over from digest agility.
   already-stored entry's own size; an oversized replica under an existing id
   is reported as an `IntegrityError` byte conflict, never a limit error.
 - The claimed-read path (`pop` and budgeted `apply`) is hardened around crash
-  recovery, which never age-reclaims a claim a live in-process reader holds
-  -- only orphan claims from a crashed prior run. The live-holder guard now
-  protects a claim across its whole life: from the moment acquisition begins,
-  through the drain, until it resolves. So a forward wall-clock step past
+  recovery, which never age-reclaims a claim a live reader holds -- only
+  orphan claims from a crashed prior run. The live-holder guard now protects
+  a claim across its whole life: from the moment acquisition begins, through
+  the drain, until it resolves. So a forward wall-clock step past
   `claimTimeout` can neither resurrect a once-only entry for a second reader
   during acquisition nor reclaim/burn the read a consumer is still mid-drain
   on; and a claim orphaned by a faulted resolution (a restore, commit, or
   burn that throws) is always reclaimed by recovery on the next operation,
-  rather than stranded `ECLAIMED` until the process restarts.
+  rather than stranded `ECLAIMED` until the process restarts. The guard is
+  shared per store (keyed by backend identity), so even two `Stash` instances
+  constructed over one store -- single-writer-per-root is the contract, but
+  the guard holds regardless -- never age-reclaim each other's live reads.
 - A crash during a budgeted read that leaves a claimed entry with a corrupt
   sidecar no longer wedges the entire store. Because crash recovery runs
   before every operation, one such entry previously made every call --
