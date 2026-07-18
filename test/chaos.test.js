@@ -167,5 +167,52 @@ for (const { name, create } of BACKENDS) {
       assert.ok((await stash.tombstones()).some((g) => g.id === ref), "a burned entry leaves a grave -- no resurrection");
       await stash.close();
     });
+
+    // A forward wall-clock step (NTP correction, VM resume) ages a young claim past
+    // claimTimeout, so a live reader's claim looks abandoned to recovery -- which
+    // would burn (or restore) a once-only read the reader is still draining (SPEC.md
+    // 6). Recovery reclaims ONLY orphans (no live in-process holder); a claim a live
+    // drain holds is never age-reclaimed. Simulated with a small claimTimeout and a
+    // reader parked mid-drain past the lease -- the same age-past-lease condition a
+    // forward step produces. A young orphan claim from a "crashed prior run" schedules
+    // the recovery re-scan and proves crash recovery is untouched: it IS reclaimed.
+    test("recovery never reclaims a claim a live reader is mid-drain on; an orphan still is (SPEC.md 6)", { timeout: 10000 }, async () => {
+      const inner = create();
+      // A prior process pushed both entries, then "crashed" holding a claim on the
+      // orphan (crash residue the new process must recover). Claiming through the raw
+      // backend leaves a claim the process Stash never tracked -- a genuine orphan.
+      const setup = new Stash({ backend: inner, sweepInterval: null });
+      const orphanRef = await setup.push("orphan-data");
+      const big = Buffer.alloc(256 * C.BYTES.KIB, 0x65); // large enough that verify backpressures with no consumer -> genuinely mid-drain
+      const liveRef = await setup.push(big);
+      const orphanClaim = await inner.claim(orphanRef); // the crashed prior run's abandoned claim
+      orphanClaim.source.on("error", () => {});
+      orphanClaim.source.destroy(); // close the read handle; the claim file itself remains
+
+      // The new process. A short lease + a reader parked past it reproduces the
+      // forward-step condition (a live claim aged past claimTimeout).
+      const stash = new Stash({ backend: inner, sweepInterval: null, onPopFailure: "burn", claimTimeout: 50 });
+      let ended = false;
+      const stream = await stash.pop(liveRef); // pop's first #recover sees the young orphan -> schedules a re-scan
+      stream.on("error", () => {});
+      stream.on("end", () => { ended = true; });
+      // Deliberately do NOT consume the stream: the reader holds the claim mid-drain,
+      // longer than the lease, exactly as a slow drain crossing a forward step would.
+
+      // Wait past the lease for recovery to re-run, and confirm it fired by the orphan's
+      // grave. Crash recovery is untouched: the orphan (no live holder) IS reclaimed.
+      await pollUntil(async () => (await stash.tombstones()).some((g) => g.id === orphanRef));
+      assert.equal(ended, false, "the live reader has not completed -- its claim is genuinely mid-drain");
+      assert.equal(await inner.isClaimed(liveRef), true, "the live reader's claim survived the recovery re-scan");
+      assert.equal((await stash.tombstones()).some((g) => g.id === liveRef), false,
+        "recovery did NOT burn a claim a live reader still holds");
+
+      // And the parked read still completes: bytes out once, then the entry is gone --
+      // the once-only read is intact, not lost to a spurious reclaim.
+      assert.deepEqual(await drain(stream), big, "the mid-drain read completes with the full, correct bytes");
+      await pollUntil(async () => !(await present(stash, liveRef)));
+      assert.ok((await stash.tombstones()).some((g) => g.id === liveRef), "the reader's own pop destroyed it exactly once");
+      await stash.close();
+    });
   });
 }

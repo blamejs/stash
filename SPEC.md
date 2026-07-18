@@ -366,13 +366,24 @@ construction, `Stash` scans for claims older than `claimTimeout` (default `10m`)
 each per `onPopFailure`. The scan is lazy — it runs on first use, not in the constructor,
 because constructors don't do I/O.
 
-Recovery reclaims a claim purely by age, and cannot tell a crashed reader's claim from a
-legitimately slow live one. This is a **single-writer-per-root** model: one process opens a
-disk root at a time, and `claimTimeout` must exceed the longest `pop`/budgeted read that
-process can run, so a live reader's claim is never mistaken for abandoned. A non-positive
-`claimTimeout` is refused at construction — it would make recovery reclaim an active pop
-instantly. Concurrent writers over one root, or a lease that survives a slow reader, are not in
-scope here (they would need a heartbeat/lease that the monotone rule’s "no touch" forbids).
+This is a **single-writer-per-root** model: one process opens a disk root at a time, so that
+process is the sole claimant and knows which claims its own live `pop`/budgeted reads currently
+hold. Recovery uses that. A claim a live in-process reader is still draining is **never**
+age-reclaimed; the age of a claim — its file mtime measured against the wall clock — is consulted
+only for an **orphan**, a claim with no live holder, which under the single-writer model can only
+be a crashed prior run's. This matters because the wall clock is not monotonic: a forward step (an
+NTP correction, a VM-snapshot resume) can age a young claim past `claimTimeout`, and without the
+live-holder rule that step would let recovery burn or restore a once-only read out from under an
+active drain. A crashed process leaves its live-claim set behind with it, so the next process
+starts empty and still reclaims every genuine orphan purely by age — crash recovery is unchanged.
+
+`claimTimeout` bounds how long an orphan sits before recovery resolves it; set it to comfortably
+exceed the longest `pop`/budgeted read, since across an unclean restart a claim's age is the only
+signal that it was abandoned. A non-positive `claimTimeout` is refused at construction — it would
+collapse the orphan grace to nothing. Concurrent writers over one root are out of scope (they
+would need a heartbeat/lease that the monotone rule's "no touch" forbids); the live-holder rule
+is not a lease — it writes nothing and never extends an entry's terms, it only keeps recovery off
+a claim this process is actively draining.
 
 ---
 
