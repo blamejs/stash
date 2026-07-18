@@ -1189,7 +1189,15 @@ export class Stash extends EventEmitter {
     // without consulting maxSize.
     if (entry.size !== existing.size) throw new IntegrityError();
     const hash = digestHash(existingAlgo);
-    for await (const buf of _verifiedInbound(_boundedSource(chunks, existing.size, null), entry)) {
+    let seen = 0;
+    for await (const buf of _verifiedInbound(chunks, entry)) {
+      seen += buf.length;
+      // A stream longer than the stored bytes cannot be identical: bound the drain to the
+      // existing size (so a hostile replica cannot stream unboundedly) and treat any
+      // overflow as a byte CONFLICT -- IntegrityError, never SizeExceeded. A reconcile
+      // enforces no write limit, so an oversized cross-digest replica under this id is
+      // different bytes (step 5), not a maxSize violation.
+      if (seen > existing.size) throw new IntegrityError();
       hash.update(buf);
     }
     // Self-consistent incoming bytes (verified above) that reproduce the stored entry's

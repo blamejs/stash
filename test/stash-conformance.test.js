@@ -1255,8 +1255,13 @@ for (const { name, create } of BACKENDS) {
       assert.equal(await tight.store(storedEntryUnder(id, bytes, "sha3-512"), bytes), false, "identical bytes, different algorithm -> idempotent no-op, NOT SizeExceeded");
       assert.equal((await tight.list()).length, 1, "still exactly one entry -- nothing rewritten");
       assert.equal((await tight.show(id)).digest, storedEntryUnder(id, bytes, "sha256").digest, "the stored entry keeps its original algorithm");
-      // A genuinely different, over-limit replica under the same id is still a conflict.
+      // A genuinely different, over-limit replica under the same id is still a conflict
+      // (a declared size that already differs -- no re-read).
       await assert.rejects(tight.store(storedEntryUnder(id, bytes + "X", "sha3-512"), bytes + "X"), IntegrityError);
+      // And a replica that DECLARES the stored size but streams MORE bytes (a manifest lie
+      // whose actual stream overruns the stored size) is a byte CONFLICT -- IntegrityError,
+      // never SizeExceeded: a reconcile enforces no write limit.
+      await assert.rejects(tight.store(storedEntryUnder(id, bytes, "sha3-512"), bytes + "EXTRA"), IntegrityError);
     });
 
     test("store() still flags a CROSS-algorithm digest conflict as IntegrityError (step 5): different bytes never masquerade as idempotent", async () => {
