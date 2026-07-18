@@ -2,6 +2,64 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 0.1.15 — 2026-07-18
+
+A batch of replication- and recovery-correctness fixes. `reconcilable()` is a
+new resilient query for the anti-entropy loop: `list()` stays loud on a
+corrupt sidecar (right for an audit), but one damaged entry no longer halts
+the replication of every healthy one -- `reconcilable()` returns the healthy
+entries and reports the corrupt ids separately, so a sync keeps flowing and
+surfaces the damage instead of stopping. `store()` now reconciles on byte
+identity rather than the algorithm-tagged digest string, so two stores
+holding the same bytes under different digest algorithms (a mixed-algorithm
+topology, first-class since digest agility) reconcile idempotently instead of
+throwing a spurious integrity conflict -- verified byte-for-byte, so
+genuinely different bytes and a lying replica still fail closed. The disk
+backend's blob rename -- the one mutation rename that was not retried -- now
+rides out a transient filesystem fault (a briefly-held handle on Windows)
+exactly as the sidecar and claim renames already do, so a legitimate push is
+not lost. And crash recovery no longer reclaims a claim that a live
+in-process reader is still draining when the wall clock steps forward past
+the claim timeout: recovery age-reclaims only orphan claims with no live
+holder, never the read a consumer is mid-stream on. Documentation was also
+swept for stale single-algorithm digest references left over from digest
+agility.
+
+### Added
+
+- `reconcilable()` -- a resilient reconciliation query returning `{ entries,
+  corrupt }`: the healthy entries to replicate plus the ids of entries whose
+  sidecars are too damaged to read. It is the source read for the documented
+  anti-entropy loop, so one corrupt sidecar can no longer halt replication of
+  the healthy entries; `list()` remains loud over corruption (an audit must
+  be), and the corrupt ids are surfaced for `verify({ repair: true })`, never
+  silently skipped.
+
+### Fixed
+
+- `store()` reconciles a replicated entry on BYTE IDENTITY, not the
+  algorithm-tagged digest string. Two stores holding the same bytes under
+  different digest algorithms carried different `"<algo>:<hex>"` strings, so
+  an identical-bytes replica was rejected as a digest conflict and could
+  never reconcile. It now settles the idempotent/conflict verdict on the
+  bytes -- identical bytes reconcile as a no-op, genuinely different bytes
+  still fail closed with `IntegrityError`, and a lying replica is caught --
+  nothing is written and no id is resurrected.
+- Disk backend: the blob `.tmp`->final rename now retries a transient
+  filesystem fault (a briefly-lingering handle, e.g. on Windows under
+  contention) instead of failing an otherwise-valid push and destroying the
+  already-streamed bytes -- the one mutation rename that was not yet wrapped
+  in the transient-fault retry every sibling rename uses.
+- Crash recovery no longer reclaims -- or burns -- a claim that a live
+  in-process reader is mid-drain on when the wall clock steps forward past
+  `claimTimeout`. Recovery age-reclaims only orphan claims (no live holder
+  from a crashed prior run); a claim the current process is actively reading
+  is never destroyed, so a forward clock step can't cost a once-only read.
+- Documentation and code comments no longer describe the integrity digest as
+  fixed to sha256: prose and `@spec` references now reflect the
+  construct-time algorithm choice (sha256 by default) and the full FIPS
+  coverage (180-4 for sha2, 202 for sha3/shake).
+
 ## 0.1.14 — 2026-07-18
 
 The store gains its first executable entry point. `npx @blamejs/stash
