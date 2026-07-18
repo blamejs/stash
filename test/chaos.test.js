@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 
 import { Stash, IntegrityError } from "../src/index.js";
+import { MemoryBackend } from "../src/backends/memory.js";
 import { generate } from "../src/ref.js";
 import { C } from "../src/constants.js";
 import { BACKENDS, drain, makeStoredEntry, wrapBackend, pollUntil } from "./_helpers.js";
@@ -572,3 +573,35 @@ for (const { name, create } of BACKENDS) {
     });
   });
 }
+
+// A Stash dropped without draining/closing a pop -- a leaked stream -- can be garbage-
+// collected while its guard still holds the claim. When that last holder is collected the
+// whole guard entry must go, INCLUDING the stale claim: otherwise a later Stash over the
+// same store reuses it and never reclaims the abandoned claim (stuck ECLAIMED). GC-driven,
+// so this needs --expose-gc; the memory backend keeps no fd that would pin the leaked
+// stream, so its Stash is collectable. Skipped when gc is not exposed.
+suite("chaos: guard reclamation on GC", () => {
+  test("a Stash GC'd while holding a leaked pop clears its stale guard, so a later Stash reclaims the claim (SPEC.md 6)", { skip: typeof global.gc !== "function", timeout: 15000 }, async () => {
+    const CLAIM_TIMEOUT = 40;
+    const backend = new MemoryBackend();
+    const big = Buffer.alloc(64 * C.BYTES.KIB, 0x70);
+    const ref = await (async () => {
+      const a = new Stash({ backend, sweepInterval: null, claimTimeout: CLAIM_TIMEOUT });
+      const r = await a.push(big);
+      const s = await a.pop(r); // claim taken; LEAK the stream -- never drained, never destroyed
+      s.on("error", () => {});
+      return r; // `a` and `s` fall out of scope -> eligible for collection
+    })();
+    assert.equal(await backend.isClaimed(ref), true, "the leaked pop left the claim held");
+
+    // Force collection until the guard entry is reaped (the finalizer runs after gc).
+    for (let i = 0; i < 100; i += 1) { global.gc(); await new Promise((r) => setImmediate(r)); }
+
+    // A later Stash over the same store: past the lease, its recovery must reclaim the
+    // abandoned claim -- the stale guard did not pin it.
+    const b = new Stash({ backend, sweepInterval: null, claimTimeout: CLAIM_TIMEOUT });
+    await pollUntil(async () => { await b.prune(); return !(await backend.isClaimed(ref)); }, { timeout: 6000 });
+    assert.equal(await backend.isClaimed(ref), false, "the abandoned claim from a collected Stash is reclaimable, not pinned");
+    await b.close();
+  });
+});

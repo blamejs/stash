@@ -42,7 +42,7 @@
     "SPEC.md"
   ],
   "scripts": {
-    "test": "node --test",
+    "test": "node --expose-gc --test",
     "test:sandboxed": "node scripts/run-sandboxed.js",
     "gates": "node test/codebase-patterns.test.js && node scripts/validate-source-comment-blocks.js && node scripts/check-api-snapshot.js && node scripts/check-status-lifecycle.js",
     "coverage": "node --test --experimental-test-coverage",

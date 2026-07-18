@@ -371,7 +371,13 @@ function _positiveCount(value, label) {
 const CLAIM_GUARDS = new Map(); // key -> { guard: Map<id, count>, holders: number }
 const GUARD_REAP = new FinalizationRegistry((key) => {
   const shared = CLAIM_GUARDS.get(key);
-  if (shared !== undefined && (shared.holders -= 1) <= 0 && shared.guard.size === 0) CLAIM_GUARDS.delete(key);
+  // Once the LAST holder over a store is collected, the whole entry goes -- INCLUDING any
+  // claims still in the map. A Stash dropped without draining/closing a pop leaves its
+  // claim guarded, but with its holder gone that claim is stale: keeping it would make a
+  // subsequent Stash over the same store treat the abandoned backend claim as live and
+  // never reclaim it (stuck ECLAIMED). A concurrent binder that raced this collection has already
+  // re-incremented `holders`, so a live guard is not dropped.
+  if (shared !== undefined && (shared.holders -= 1) <= 0) CLAIM_GUARDS.delete(key);
 });
 
 export class Stash extends EventEmitter {

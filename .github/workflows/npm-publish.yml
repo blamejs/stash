@@ -164,7 +164,9 @@ jobs:
           npm ci --dry-run --ignore-scripts --no-audit --no-fund
 
       - name: Suite
-        run: node --test
+        # --expose-gc: the guard-reclamation-on-GC vector forces a collection to prove a
+        # dropped Stash's stale claim guard is reaped.
+        run: node --expose-gc --test
 
       - name: Suite under --permission (SPEC.md 13.1 invariant 2)
         run: node scripts/run-sandboxed.js
