@@ -47,6 +47,12 @@
     "reviewedAt": "0.1.0",
     "reviewBy": "0.2.0"
   },
+  "stash.reconcilable": {
+    "decision": "keep-experimental",
+    "reason": "The resilient anti-entropy source read: it returns healthy entries plus the ref ids of corrupt sidecars so one damaged entry cannot stall replication. The { entries, corrupt } shape rests on the replication surface (store, tombstones) still soaking pre-1.0; graduate once that surface freezes for 1.0.",
+    "reviewedAt": "0.1.14",
+    "reviewBy": "0.2.0"
+  },
   "stash.has": {
     "decision": "keep-experimental",
     "reason": "Ships at M6. Existence query with the settled expired-as-false / InvalidRef-on-hostile / IntegrityError-not-absorbed contract; pre-1.0 the whole surface stays experimental until frozen for 1.0.",

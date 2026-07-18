@@ -59,8 +59,8 @@ claim is monotone. The backend contract gains the claim lifecycle: `claim`,
 
 ## M6 -- Audit -- SHIPPED (0.1.8)
 
-`verify(opts?)` audits physical integrity: it streams a `sha256` over every blob
-and reports damage -- `digest-mismatch`, `size-mismatch`, `corrupt-sidecar`,
+`verify(opts?)` audits physical integrity: it re-hashes every blob with the
+entry's own algorithm and reports damage -- `digest-mismatch`, `size-mismatch`, `corrupt-sidecar`,
 `missing-blob`, `orphan-blob`, `orphan-tmp`, `foreign-file`, `stale-claim` -- as
 `{ scanned, findings, repaired }`. Dry-run by default; `{ repair: true }` removes
 only what it condemns, sparing healthy entries, a live push's in-flight `.tmp`,

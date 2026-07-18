@@ -323,6 +323,64 @@ suite("disk: layout and atomicity", () => {
   const CANNOT_FAULT = process.platform === "win32" ||
     (typeof process.getuid === "function" && process.getuid() === 0);
 
+  // A TRANSIENT rename fault on the blob tmp->final move must be absorbed by the
+  // backend's retry, exactly as the sidecar (#writeAtomic) and claim-lifecycle
+  // renames are: a just-closed tmp whose handle briefly lingers (Windows
+  // antivirus / indexer / lazy release) fails the rename with EPERM/EACCES/EBUSY
+  // while a LEGITIMATE push races that window -- the push must not die on it.
+  // Simulated on POSIX by denying write on blobs/ across the FIRST rename attempt
+  // (EACCES, a transient code), then restoring it so an in-flight retry lands.
+  // Without the retry the push rejects on the first attempt and cleanup destroys
+  // the streamed bytes (RED); with it the push rides the fault out (GREEN).
+  test("a transient blob-rename fault is retried, not fatal to a legitimate push", { skip: CANNOT_FAULT, timeout: 15000 }, async () => {
+    const { root, stash } = freshStash();
+    const blobsDir = join(root, "blobs");
+    const payload = Buffer.from("bytes that must survive a transient rename fault");
+
+    // Pause the source at end-of-stream: by then write() has opened blobs/<id>.tmp
+    // and written the bytes, but has NOT yet renamed it into place. Denying writes
+    // to blobs/ here (never before the tmp open) faults the rename specifically --
+    // the op under test -- rather than the tmp create.
+    let reached;
+    const atStreamEnd = new Promise((r) => { reached = r; });
+    let release;
+    const resume = new Promise((r) => { release = r; });
+    async function* gatedSource() {
+      yield payload;
+      reached();    // the tmp now holds the bytes; write() sits between the stream and the rename
+      await resume; // hold until the test has armed the fault, then let write() rename
+    }
+
+    const pushed = stash.push(gatedSource());
+    let settled = false;
+    pushed.then(() => { settled = true; }, () => { settled = true; });
+
+    await atStreamEnd;
+    chmodSync(blobsDir, 0o500); // deny writes: the next rename into blobs/ EACCES-faults
+    release();                  // let write() close the tmp and attempt the rename
+
+    // Poll for the push to SETTLE, bounded by a window well inside the backend's
+    // retry budget, then restore the directory. This is the drift-6b poll-for-an-
+    // event / passive-absence form, and it makes both directions deterministic:
+    //   - unretried backend: the first rename fails and the push REJECTS within a
+    //     few ms; the poll observes that settle and only THEN restores -- so the
+    //     rejection (proof the rename attempt already failed) is locked in first.
+    //   - retrying backend: the push stays pending (each 4ms attempt re-faults on
+    //     the still-0500 dir); the poll's window elapses WITHOUT a settle -- that
+    //     absence is the retry working -- and the restore lets the next in-flight
+    //     attempt land, resolving the push.
+    // The window exceeds close+first-rename (sub-ms on the scratch tmpfs) yet stays
+    // far under the retry ceiling, so neither a slow settle nor an exhausted retry
+    // can flip the verdict.
+    const deadline = Date.now() + 80;
+    while (!settled && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+    chmodSync(blobsDir, 0o700);
+
+    const ref = await pushed; // RED (no retry): rejected here; GREEN (retry): resolves
+    assert.deepEqual(await drain(await stash.apply(ref)), payload, "the pushed bytes survived the transient fault");
+    assert.deepEqual(readdirSync(blobsDir).filter((n) => n.endsWith(".tmp")), [], "no .tmp partial left behind");
+  });
+
   test("a filesystem fault that is not absence propagates loudly", { skip: CANNOT_FAULT }, async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("guarded");
@@ -412,6 +470,79 @@ suite("disk: layout and atomicity", () => {
     writeFileSync(join(root, "meta", ref + ".json"), "{ not valid json");
     const backend = new DiskBackend({ root });
     await assert.rejects(backend.list(), IntegrityError);
+  });
+
+  test("reconcilable() replicates the healthy entries and surfaces a corrupt sidecar's id without halting", async () => {
+    // Issue #42: the documented anti-entropy loop reads the source with list(),
+    // which is loud over ONE corrupt sidecar -- so a single damaged entry aborts
+    // enumeration and stalls replication of EVERY healthy entry. reconcilable() is
+    // the resilient source read: it lists the healthy entries and surfaces the
+    // corrupt id separately, so a rotten sidecar no longer blocks the sync of sound
+    // entries AND the corruption is reported, never silently skipped.
+    const { root, stash: from } = freshStash();
+    const { stash: to } = freshStash();
+    const wire = new Map();
+    const put = async (bytes) => {
+      const ref = await from.push(bytes);
+      wire.set(ref, Buffer.from(bytes));
+      return ref;
+    };
+    const a = await put("alpha bytes");
+    const rotten = await put("bravo bytes");
+    const c = await put("charlie bytes");
+    const d = await put("delta bytes");
+    // Corrupt ONE sidecar into invalid JSON (the disk corruption fixture pattern).
+    writeFileSync(join(root, "meta", rotten + ".json"), "{ not valid json");
+
+    // list() stays loud over the corrupt sidecar -- the audit contract is intact.
+    await assert.rejects(from.list(), IntegrityError);
+
+    // reconcilable() enumerates the healthy entries and surfaces the corrupt id.
+    const { entries, corrupt } = await from.reconcilable();
+    assert.deepEqual(entries.map((e) => e.id).sort(), [a, c, d].sort(), "every healthy entry is listed");
+    assert.deepEqual(corrupt, [rotten], "the corrupt id is surfaced, not swallowed");
+
+    // The documented anti-entropy loop, resilient: every healthy entry replicates
+    // despite the corrupt sidecar the old loop would have halted on.
+    for (const grave of await from.tombstones()) await to.drop(grave.id);
+    for (const entry of entries) await to.store(entry, wire.get(entry.id));
+    assert.deepEqual(
+      (await to.list()).map((e) => e.id).sort(),
+      [a, c, d].sort(),
+      "all three healthy entries replicated across one corrupt sidecar",
+    );
+  });
+
+  test("reconcilable() stays loud over structural layout damage and fs faults, as list() does", async () => {
+    // A corrupt SIDECAR (a ref-named entry whose contents are damaged) is surfaced
+    // in `corrupt`; a FOREIGN file in meta/ is not a per-entry corruption with a
+    // ref to report -- it is structural layout damage, and stays loud in both faces.
+    const { root, stash } = freshStash();
+    await stash.push("healthy");
+    writeFileSync(join(root, "meta", "not-a-ref.json"), JSON.stringify({ id: "x" }));
+    await assert.rejects(stash.reconcilable(), IntegrityError);
+    await assert.rejects(stash.list(), IntegrityError);
+  });
+
+  test("reconcilable() re-throws a STRUCTURAL fault raised by a per-entry stat mid-scan, never filing it under corrupt", async () => {
+    // Distinct from the foreign-file case above (which throws before the per-entry walk):
+    // a per-entry stat() can itself raise a STRUCTURAL IntegrityError when its own
+    // containment check finds the layout compromised mid-scan. The reconciliation face must
+    // stay loud on that, not collect the id as a corrupt sidecar. Injected deterministically:
+    // the first stat removes meta/ (so the scan's re-resolve of #containedDir fails) and
+    // raises the layout fault; with the fix, reconcilable() re-throws instead of collecting.
+    const root = freshRoot();
+    const backend = new DiskBackend({ root });
+    const stash = new Stash({ backend, sweepInterval: null });
+    await stash.push("a");
+    await stash.push("b");
+    const realStat = backend.stat.bind(backend);
+    let first = true;
+    backend.stat = async (id) => {
+      if (first) { first = false; rmSync(join(root, "meta"), { recursive: true, force: true }); throw new IntegrityError("store layout is damaged"); }
+      return realStat(id);
+    };
+    await assert.rejects(stash.reconcilable(), IntegrityError);
   });
 });
 
@@ -941,6 +1072,83 @@ suite("disk: crash recovery (SPEC 6)", () => {
     await assert.rejects(next.apply(ref), RefNotFound, "one credit remained and is now spent -- not two");
   });
 
+  test("a corrupt sidecar on a stale claim is reaped by recovery, never left to wedge every verb", async () => {
+    // A crash mid consumeRead -- truncate(0) then death before the write-back --
+    // leaves a 0-byte, unparsable sidecar while the blob stands in claims/. On the
+    // next run recovery ages the orphan claim past the lease and stats it, which
+    // throws IntegrityError on the corrupt sidecar. Recovery must RESOLVE the damaged
+    // entry (finish the destruction -- the physical cleanup verify() defers here for a
+    // CLAIMED corrupt sidecar), never rethrow: a rethrow poisons the memoized #recover,
+    // and every verb runs it first, so one corrupt claimed entry becomes a permanent
+    // store-wide EINTEGRITY denial that verify({ repair }) cannot clear (it leaves a
+    // claimed corrupt sidecar to recovery). The entry is unreadable, so restore is
+    // meaningless and recovery reaps it.
+    const { root, stash } = freshStash();
+    const ref = await stash.push("budgeted", { reads: 2 });
+    plantClaim(root, ref); // blob -> claims/, stale mtime, sidecar left in meta/
+    truncateSync(join(root, "meta", ref + ".json"), 0); // the crash-mid-rewrite corruption
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    // A verb succeeds: recovery resolved the damaged claim rather than poisoning itself.
+    assert.deepEqual(await next.list(), [], "recovery reaped the corrupt claimed entry; the store is not wedged");
+    for (const dir of ["claims", "meta", "blobs"]) {
+      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ holds no residue of the reaped corrupt entry`);
+    }
+    // Corrupt-entry cleanup is damage repair, not a lifecycle destruction, so it leaves
+    // NO grave (verify's model) -- a healthy replica may legitimately reconcile the id back.
+    assert.equal((await next.tombstones()).length, 0, "the corrupt-entry cleanup writes no grave");
+    // And the store is fully live: it accepts new writes and serves them.
+    const fresh = await next.push("healthy");
+    assert.deepEqual(await drain(await next.apply(fresh)), Buffer.from("healthy"), "the store still round-trips after the reap");
+  });
+
+  test("a DIRECTORY-shaped corrupt sidecar on a stale claim is reaped by recovery, not left to wedge on EISDIR", async () => {
+    // A rarer sidecar corruption: the sidecar PATH is a directory, not a truncated file.
+    // stat() still throws IntegrityError (its shape check rejects a non-file), so recovery
+    // takes the same corrupt-entry cleanup -- but commit() must remove the directory-shaped
+    // sidecar RECURSIVELY, exactly as verify's repair does, or it throws EISDIR, leaves the
+    // claim standing, and re-wedges every verb on the same permanent EINTEGRITY denial.
+    const { root, stash } = freshStash();
+    const ref = await stash.push("budgeted", { reads: 2 });
+    plantClaim(root, ref); // blob -> claims/, stale mtime, sidecar left in meta/
+    rmSync(join(root, "meta", ref + ".json")); // replace the sidecar file...
+    mkdirSync(join(root, "meta", ref + ".json")); // ...with a directory (the corruption)
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    assert.deepEqual(await next.list(), [], "recovery reaped the directory-shaped corrupt sidecar; the store is not wedged");
+    for (const dir of ["claims", "meta", "blobs"]) {
+      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ holds no residue of the reaped corrupt entry`);
+    }
+    assert.equal((await next.tombstones()).length, 0, "the corrupt-entry cleanup writes no grave");
+    const fresh = await next.push("healthy");
+    assert.deepEqual(await drain(await next.apply(fresh)), Buffer.from("healthy"), "the store still round-trips after the reap");
+  });
+
+  test("two DiskBackend over aliased roots (real dir + a symlink to it) share the live-claim guard (SPEC.md 6)", { skip: !FILE_SYMLINKS, timeout: 10000 }, async () => {
+    // The same store opened through two path spellings -- the real directory and a symlink
+    // to it -- must key ONE guard: the identity canonicalizes via realpath, so B (the
+    // alias) never age-reclaims a pop A (the real path) is still draining.
+    const CLAIM_TIMEOUT = 50;
+    const realRoot = freshRoot();
+    mkdirSync(realRoot, { recursive: true });
+    const linkRoot = realRoot + "-alias";
+    symlinkSync(realRoot, linkRoot, "dir");
+    const a = new Stash({ backend: new DiskBackend({ root: realRoot }), sweepInterval: null, claimTimeout: CLAIM_TIMEOUT });
+    const bBackend = new DiskBackend({ root: linkRoot });
+    const b = new Stash({ backend: bBackend, sweepInterval: null, claimTimeout: CLAIM_TIMEOUT });
+    const big = Buffer.alloc(256 * 1024, 0x6e);
+    const ref = await a.push(big);
+    const claimedAt = Date.now();
+    const stream = await a.pop(ref); // A holds a live claim, mid-drain
+    stream.on("error", () => {});
+    const deadline = claimedAt + CLAIM_TIMEOUT + 30;
+    while (Date.now() <= deadline) await new Promise((r) => setImmediate(r)); // bounded wait on the lease
+    await b.prune(); // B (the alias) must SKIP A's live claim
+    assert.equal(await bBackend.isClaimed(ref), true, "B (symlink alias) did not reclaim A's live claim -- the guard key is the canonical root");
+    assert.deepEqual(await drain(stream), big, "A's read completes with the full bytes");
+    for (let i = 0; i < 400 && (await bBackend.isClaimed(ref)); i += 1) await new Promise((r) => setImmediate(r)); // bounded: A's commit lands
+    await a.close();
+    await b.close();
+  });
+
   test("a planted symlink at claims/<id> is never followed off the store", { skip: !FILE_SYMLINKS }, async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("real");
@@ -1023,7 +1231,7 @@ suite("disk: crash recovery (SPEC 6)", () => {
     const inner = new DiskBackend({ root });
     let raced = false;
     const backend = {};
-    for (const m of ["write", "read", "remove", "stat", "list", "stats", "verify", "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed", "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone"]) {
+    for (const m of ["write", "read", "remove", "stat", "list", "listReconcilable", "stats", "verify", "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed", "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone"]) {
       backend[m] = (...a) => inner[m](...a);
     }
     backend.stat = async (id) => {

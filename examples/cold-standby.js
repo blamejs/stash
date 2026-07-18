@@ -55,13 +55,24 @@ const readAll = async (store, ref) => {
 
 // One direction of a full-scan anti-entropy pass: propagate graves FIRST (so a
 // store can never re-file an id the other side buried), then store each live entry
-// with the bytes from the transport. store() preserves the entry's identity -- id,
-// expiry, read budget, meta -- verbatim and verifies the bytes against the supplied
-// digest as they stream, so a repeated pass is a free no-op and transfer corruption
-// is caught on the way in.
+// with the bytes from the transport. The source read is reconcilable(), NOT list():
+// list() fails the whole listing on a single corrupt sidecar (right for an audit,
+// wrong for a sync), so one damaged entry would stall replication of every healthy
+// one -- an availability failure where one rotten sidecar holds the store hostage.
+// reconcilable() returns the healthy { entries } to copy plus the { corrupt } ref
+// ids whose sidecars are unreadable -- surfaced, never swallowed, so a damaged entry
+// cannot halt the sync of the sound ones; route the corrupt ids to
+// verify({ repair: true }). store() preserves each entry's identity -- id, expiry,
+// read budget, meta -- verbatim and verifies the bytes against the supplied digest as
+// they stream, so a repeated pass is a free no-op and transfer corruption is caught
+// on the way in.
 async function syncOnce(from, to) {
   for (const grave of await from.tombstones()) await to.drop(grave.id);
-  for (const entry of await from.list()) await to.store(entry, wire.get(entry.id));
+  const { entries, corrupt } = await from.reconcilable();
+  for (const entry of entries) await to.store(entry, wire.get(entry.id));
+  // A corrupt sidecar on the source cannot be replicated -- its metadata is
+  // unreadable -- but it must never halt the healthy entries: surface it for repair.
+  if (corrupt.length) log(`  ${corrupt.length} corrupt sidecar(s) skipped; run verify({ repair: true }) on the source`);
 }
 
 // --- seed the primary and replicate to the standby ----------------------------

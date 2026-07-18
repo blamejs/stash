@@ -32,6 +32,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { freshScratchDir } from "./_scratch.js";
+import { DIGESTS } from "../src/digest.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -182,6 +183,7 @@ const VALID_ALLOW_CLASSES = {
   "guard-shape-reinlined": 1,
   "validator-shape-reinlined": 1,
   "forbidden-crypto-token": 1,
+  "digest-algo-hardcode": 1,
   "sandbox-widening-import": 1,
   "permission-probe-branch": 1,
   "error-event-emit": 1,
@@ -202,6 +204,7 @@ const VALID_ALLOW_CLASSES = {
   "constant-time-compare-short-circuited": 1,
   "wiki-port-cross-artifact-drift": 1,
   "wiki-runtime-file-uncopied": 1,
+  "unretried-fs-mutation": 1,
 };
 
 // Drop matches suppressed by a file-level
@@ -300,6 +303,35 @@ test("forbidden-crypto-token -- no cipher machinery, sqlite, or password surface
   let bad = _scanLines(_srcFiles(), re);
   bad = _filterMarkers(bad, "forbidden-crypto-token");
   _report("SPEC.md 13.1: zero hits for cipher / sqlite / password tokens in src/ (raw, comments included)", bad);
+});
+
+// ---------------------------------------------------------------------------
+// (1a) digest-algo-hardcode -- src/digest.js owns the algorithm set
+// ---------------------------------------------------------------------------
+
+test("digest-algo-hardcode -- no algorithm literal outside the digest registry", () => {
+  // reason: src/digest.js is the ONE place a digest algorithm is named as a
+  // code token -- the registry rows, the createHash factory, and the
+  // "<algo>:<hex>" stored form all derive from it, and a read verifies with
+  // the algorithm the entry names for ITSELF (SPEC.md 5). A `createHash("sha256")`
+  // call or a "<algo>:" stored-digest prefix LITERAL anywhere else in src/
+  // re-inlines that set: it pins one algorithm where the entry's own must
+  // decide, so an entry written under sha3-512 would be hashed or verified with
+  // the wrong function -- a silent integrity hole. The algorithm names are read
+  // OFF the registry (DIGESTS) at scan time, so a new row extends the gate with
+  // no edit here; comments are stripped and string literals kept, so prose like
+  // "sha256 by default" is untouched while a real literal is caught. digest.js
+  // is the owner and is excluded.
+  const algos = Object.keys(DIGESTS)
+    .map((a) => a.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&"))
+    .join("|");
+  const re = new RegExp(
+    "createHash\\s*\\(\\s*[\"'](?:" + algos + ")[\"']|[\"'](?:" + algos + "):"
+  );
+  const files = _srcFiles().filter((f) => _relPath(f) !== "src/digest.js");
+  let bad = _scanLines(files, re, { prepare: _stripComments });
+  bad = _filterMarkers(bad, "digest-algo-hardcode");
+  _report("SPEC.md 5: no createHash(\"<algo>\") or \"<algo>:\" literal outside src/digest.js (the registry owns the algorithm set)", bad);
 });
 
 // ---------------------------------------------------------------------------
@@ -872,6 +904,51 @@ test("npm-shim-bare-spawn -- npm/npx runs through a shell, never a bare spawn", 
 });
 
 // ---------------------------------------------------------------------------
+// unretried-fs-mutation -- every disk-backend rename/link is transient-retried
+// ---------------------------------------------------------------------------
+
+test("unretried-fs-mutation -- every disk-backend rename/link routes through the transient-fault retry", () => {
+  // reason: a rename or link on the disk backend can fail with a TRANSIENT
+  // EPERM/EACCES/EBUSY on Windows while a just-closed handle lingers (antivirus,
+  // indexer, or the OS lazily releasing it) -- a legitimate operation racing
+  // that window, not a real fault. Every mutating rename/link therefore routes
+  // through _retryTransient, which re-attempts on exactly those codes and is
+  // inert on POSIX (first-try success); a BARE call dies on the first transient
+  // hit, and for a write the cleanup then destroys the just-streamed bytes.
+  // Anchored on the Node fs API names (rename/link/unlink -- a frozen contract,
+  // like the createReadStream / realpath guards) and the retry-wrapper routing
+  // shape, so it is rename-proof: a bare mutation fires wherever it appears
+  // (including a not-yet-written line), and the retried form stays silent. rm
+  // is deliberately NOT scanned -- its many cleanup calls are force-removes
+  // whose ENOENT is a witness, not a mutation that must survive contention. A
+  // genuinely-immediate rename/link carries an allow:unretried-fs-mutation
+  // marker with its reason.
+  const diskPath = path.join(REPO_ROOT, "src", "backends", "disk.js");
+  const src = _read(diskPath);
+  const callRe = /(?<![\w$])(?:rename|link|unlink)\s*\(/;
+  const routedRe = /_retryTransient\s*\(\s*\(\s*\)\s*=>\s*(?:rename|link|unlink)\s*\(/;
+  const stripped = _lines(_stripComments(src));
+  // Floor: the scan must see real mutation calls, or a moved/renamed backend
+  // file would green this gate vacuously.
+  assert.ok(
+    stripped.some((l) => callRe.test(l)),
+    "no rename/link/unlink calls found in src/backends/disk.js -- detector vacuous (file moved?)"
+  );
+  let bad = [];
+  for (let i = 0; i < stripped.length; i++) {
+    if (callRe.test(stripped[i]) && !routedRe.test(stripped[i])) {
+      bad.push({
+        file: _relPath(diskPath),
+        line: i + 1,
+        content: "bare fs rename/link/unlink -- route through _retryTransient (absorbs a transient Windows EPERM/EACCES/EBUSY): " + stripped[i].trim().slice(0, 100),
+      });
+    }
+  }
+  bad = _filterMarkers(bad, "unretried-fs-mutation");
+  _report("every disk-backend rename/link routes through _retryTransient (transient-fault retry)", bad);
+});
+
+// ---------------------------------------------------------------------------
 // Allow-marker audit -- every allow:<class> names a registered class
 // ---------------------------------------------------------------------------
 
@@ -1130,6 +1207,55 @@ test("wiki port agrees across the Dockerfile, composes, Caddyfile, and release-c
 
   const filtered = _filterMarkers(bad, "wiki-port-cross-artifact-drift");
   _report("wiki port agrees across examples/wiki/Dockerfile + composes + Caddyfile + release-container.yml", filtered);
+});
+
+test("every workflow action is github-owned or in the allow-list mirror (else the workflow silently startup_fails)", () => {
+  // class: workflow-action-not-allowlisted
+  // reason: the repository's GitHub Actions policy is `selected` -- an action a
+  // workflow `uses:` that is NOT permitted by the repo's
+  // actions/permissions/selected-actions setting is rejected BEFORE the workflow
+  // can start, producing a `startup_failure` with no job logs. A gate that never
+  // runs is worse than a failing one: it looks absent, not broken, and can lapse
+  // for months unnoticed (the fuzz + release-container workflows did exactly that).
+  // ALLOW mirrors that repo setting: github-owned actions (actions/*, github/*) are
+  // always permitted; every OTHER `uses:` must match a pattern here AND the repo
+  // setting -- keep the two in sync. Adding an action to a workflow means adding it
+  // here and to the repo Actions allow-list, or CI silently stops running it.
+  const ALLOW = [
+    /^ossf\/scorecard-action(\/|@)/,
+    /^google\/clusterfuzzlite\/actions\//,
+    /^docker\//,
+    /^aquasecurity\/trivy-action(\/|@)/,
+    /^sigstore\/cosign-installer(\/|@)/,
+    /^hadolint\/hadolint-action(\/|@)/,
+    /^ludeeus\/action-shellcheck(\/|@)/,
+  ];
+  const dir = path.join(REPO_ROOT, ".github", "workflows");
+  let files;
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml")); }
+  catch (_e) { return; } // no workflows dir: nothing to check
+  const bad = [];
+  for (const f of files) {
+    const lines = _lines(_read(path.join(dir, f)));
+    for (let i = 0; i < lines.length; i++) {
+      const m = /^\s*(?:-\s*)?uses:\s*(['"]?)([^\s'"@]+(?:@[^\s#'"]+)?)/.exec(lines[i]);
+      if (m === null) continue;
+      const ref = m[2];
+      // Only a real GitHub Action reference is owner/repo[/path]@ref -- it always
+      // contains a slash. A bare `uses:` value (a CodeQL query-suite like
+      // `security-extended`) is not an action and the Actions policy never gates it.
+      if (!ref.includes("/")) continue;
+      if (/^\.\//.test(ref)) continue; // a local composite action in this repo
+      if (/^(?:actions|github)\//.test(ref)) continue; // github-owned: always allowed
+      if (ALLOW.some((re) => re.test(ref))) continue;
+      bad.push({
+        file: ".github/workflows/" + f,
+        line: i + 1,
+        content: "action not in the allow-list mirror (would startup_fail under the repo Actions policy): " + ref,
+      });
+    }
+  }
+  _report("every workflow action is github-owned or allow-listed (mirror the repo Actions allow-list setting)", bad);
 });
 
 test("every repo-root file the wiki reads at runtime is COPYed by the wiki Dockerfile", () => {

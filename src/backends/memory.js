@@ -11,8 +11,9 @@
  *   The storage layer, behind one contract (SPEC.md 9): the backend holds
  *   bytes; `Stash` holds policy. A backend never validates lifecycle,
  *   never interprets `meta`, and never decides destruction -- it stores
- *   what it is handed under the id it is handed, computes size and sha256
- *   digest as the bytes stream through, and reports what it holds. The
+ *   what it is handed under the id it is handed, computes size and the
+ *   digest as the bytes stream through (with the algorithm named by the
+ *   entry's self-describing digest), and reports what it holds. The
  *   same conformance suite runs against every backend, unmodified.
  *
  *   Two implementations ship. The memory backend is Map-backed -- no
@@ -53,6 +54,14 @@ import { assertValid, constantTimeEqual } from "../ref.js";
  *   const stash = new Stash({ backend: new MemoryBackend() });
  *   const ref = await stash.push("hello");
  */
+// A per-process counter tagging each MemoryBackend instance with a stable, unique
+// identity. Each instance is its OWN store (its Maps live on the object), so the
+// identity is per-instance: two Stash over the SAME instance share one store and must
+// coordinate their single-writer recovery (SPEC.md 6), two over different instances are
+// independent. A counter, not a random id -- uniqueness within the process is all the
+// policy layer's guard registry needs, and it stays allocation-free and deterministic.
+let MEMORY_INSTANCE_SEQ = 0;
+
 export class MemoryBackend {
   #entries = new Map();
   // Tombstones: id -> { destroyedAt, cause }. A grave (SPEC.md 4.4) outlives the
@@ -68,6 +77,12 @@ export class MemoryBackend {
   // the id already claimed. A backend never interprets expiry or budgets; it
   // holds bytes and moves them between states the policy layer directs.
   #claims = new Map();
+
+  // The store's process-wide identity. The policy layer keys its single-writer-per-root
+  // guard on it (SPEC.md 6) so two Stash over one store never age-reclaim each other's
+  // live reads. Per-instance for MemoryBackend (each instance is a separate store).
+  #identity = "mem:" + (MEMORY_INSTANCE_SEQ += 1);
+  get identity() { return this.#identity; }
 
   // write(id, source, entry) -> Entry. Consumes the async-iterable source chunk by
   // chunk, computing size and the digest as bytes pass. The algorithm rides IN the
@@ -134,6 +149,17 @@ export class MemoryBackend {
     for (const held of this.#entries.values()) out.push(structuredClone(held.entry));
     for (const held of this.#claims.values()) out.push(structuredClone(held.entry));
     return out;
+  }
+
+  // listReconcilable() -> { entries, corrupt }. The reconciliation-grade listing
+  // (SPEC.md 4.4). On the disk backend list() aborts the whole readdir walk on one
+  // corrupt sidecar, stalling replication of every healthy entry, so the contract
+  // offers this resilient face: the healthy entries plus the ref ids whose
+  // metadata could not be read. A Map holds no corrupt sidecars by construction --
+  // stat never throws IntegrityError here -- so `corrupt` is always empty and this
+  // is list() with the parallel shape. Defensive copies, like list().
+  async listReconcilable() {
+    return { entries: await this.list(), corrupt: [] };
   }
 
   // claim(id) -> { entry, source }. Atomically move the entry from live to

@@ -36,7 +36,7 @@ assert.equal(entry.meta.kind, "drop");
 log("show   ->", { size: entry.size, meta: entry.meta });
 
 // --- apply: a digest-verified read that does NOT destroy ----------------------
-// apply streams the bytes and verifies the sha256 as it drains; the entry
+// apply streams the bytes and verifies the digest as it drains; the entry
 // survives, so you can apply again.
 const readOnce = async () => {
   const chunks = [];

@@ -189,7 +189,9 @@ async function shrink(create, seq) {
   return seq;
 }
 
-const SEED = 0x5715ca7; // fixed for a deterministic CI; a failure reproduces from it.
+// Fixed for a deterministic CI; a failure reproduces from it. Override with
+// STASH_MODEL_SEED to explore (a divergence under any seed is a real store bug).
+const SEED = Number(process.env.STASH_MODEL_SEED) || 0x5715ca7;
 const SEQ_LENGTH = 200;
 
 for (const { name, create } of BACKENDS) {

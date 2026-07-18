@@ -1,6 +1,6 @@
 {
   "generator": "scripts/refresh-api-snapshot.js",
-  "packageVersion": "0.1.14",
+  "packageVersion": "0.1.15",
   "surface": {
     "index": {
       "kind": "object",
@@ -69,6 +69,10 @@
             "push": {
               "kind": "function",
               "arity": 1
+            },
+            "reconcilable": {
+              "kind": "function",
+              "arity": 0
             },
             "show": {
               "kind": "function",
@@ -139,6 +143,10 @@
               "arity": 0
             },
             "listClaims": {
+              "kind": "function",
+              "arity": 0
+            },
+            "listReconcilable": {
               "kind": "function",
               "arity": 0
             },
@@ -221,6 +229,10 @@
               "kind": "function",
               "arity": 0
             },
+            "listReconcilable": {
+              "kind": "function",
+              "arity": 0
+            },
             "listTombstones": {
               "kind": "function",
               "arity": 0
@@ -300,6 +312,7 @@
     "stash.tombstones": "0.1.9",
     "stash.verify": "0.1.8",
     "stash.list": "0.1.0",
+    "stash.reconcilable": "0.1.15",
     "stash.drop": "0.1.0",
     "stash.clear": "0.1.0",
     "stash.prune": "0.1.5",

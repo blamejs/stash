@@ -234,6 +234,18 @@ export class DiskBackend {
     this.#root = resolve(opts.root);
   }
 
+  // The store's process-wide identity: its CANONICAL root path, so the policy layer's
+  // single-writer-per-root guard (SPEC.md 6) coordinates two Stash over the SAME store --
+  // even via distinct DiskBackend instances, and even through different path spellings (a
+  // symlink to the root, a case variant on a case-insensitive fs) -- as one writer, so
+  // neither's recovery age-reclaims the other's live read. #init realpaths the root ONCE
+  // and caches it (#realRoot), so this getter is STABLE and does NO I/O: the policy layer
+  // binds the guard LAZILY, after the first operation has run #init, so it always reads the
+  // canonical value. The resolved path is only a placeholder for a read before init (which
+  // the lazy binding avoids). This is a coordination KEY only -- never the containment
+  // realpath (#containedDir); no operation trusts a path from here.
+  get identity() { return "disk:" + (this.#realRoot ?? this.#root); }
+
   // Lazy, memoized layout creation (constructors do no I/O). A failed
   // init clears the memo so the next operation retries instead of
   // poisoning the instance forever.
@@ -392,7 +404,12 @@ export class DiskBackend {
       } finally {
         await fh.close();
       }
-      await rename(tmpPath, blobPath);
+      // The just-closed tmp's handle can linger on Windows (antivirus, indexer,
+      // or the OS lazily releasing it), failing this rename with a transient
+      // EPERM/EACCES/EBUSY while a legitimate push races that window.
+      // _retryTransient absorbs it exactly as the sidecar (#writeAtomic) and the
+      // claim-lifecycle renames do; POSIX lands on the first attempt, inert.
+      await _retryTransient(() => rename(tmpPath, blobPath));
     } catch (err) {
       await rm(tmpPath, { force: true });
       throw err;
@@ -555,17 +572,24 @@ export class DiskBackend {
     return parsed;
   }
 
-  // list() -> Entry[]. Loud, not lossy: a sidecar that fails validation
-  // fails the listing -- silently skipping corruption would hide it.
-  // In-flight .tmp files are invisible by design. The scan is readdir-then-stat,
-  // so an entry can be removed (a concurrent drop, or the sweeper reaping an
-  // expired one) between the two steps: a sidecar seen by readdir is gone by the
-  // stat. That entry has simply left the listing, so a RefNotFound for it is
-  // skipped -- but corruption and every other fault still fail loudly, since a
-  // damaged sidecar must never be silently dropped from a listing.
-  async list() {
+  // #scanEntries(collectCorrupt) -> { entries, corrupt }. The single meta/ walk
+  // behind both list() and listReconcilable(): readdir, then a per-name stat.
+  // In-flight .tmp files are invisible by design. The scan is readdir-then-stat, so
+  // an entry can be removed (a concurrent drop, or the sweeper reaping an expired
+  // one) between the two steps: a sidecar seen by readdir is gone by the stat. That
+  // entry has simply left the listing, so a RefNotFound for it is skipped in BOTH
+  // faces. The ONE difference is a CORRUPT sidecar (an IntegrityError from stat):
+  // list() (collectCorrupt false) is loud -- it rethrows, because silently dropping
+  // a damaged sidecar from a listing would hide corruption; the reconciliation face
+  // (collectCorrupt true) COLLECTS the id into `corrupt` and keeps walking, so one
+  // rotten sidecar cannot halt replication of the healthy entries -- the damage is
+  // SURFACED, never swallowed. Structural layout damage (a foreign name,
+  // an invalid ref name) and every fs FAULT stay loud in BOTH faces: neither is a
+  // per-entry corruption with a ref to report.
+  async #scanEntries(collectCorrupt) {
     const metaDir = await this.#containedDir("meta");
-    const out = [];
+    const entries = [];
+    const corrupt = [];
     for (const name of await readdir(metaDir)) {
       if (name.endsWith(".tmp")) continue;
       const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
@@ -575,11 +599,46 @@ export class DiskBackend {
         entry = await this.stat(id);
       } catch (err) {
         if (err instanceof RefNotFound) continue; // removed between readdir and stat -- no longer listed
-        throw err;
+        if (collectCorrupt && err instanceof IntegrityError) {
+          // A per-entry corrupt sidecar is collected and the walk continues -- but a
+          // STRUCTURAL layout fault (stat's own containment check throwing IntegrityError,
+          // e.g. the meta directory swapped for a symlink out of the root mid-scan) must
+          // stay loud even in this face. Re-resolve the layout: if it is now damaged, this
+          // was not a per-entry corruption -- rethrow; if it is intact, the fault was this
+          // one sidecar -- collect it. verify() reads this same {entries, corrupt}, so a
+          // vanished or swapped layout dir surfaces there too, never masked as corruption.
+          await this.#containedDir("meta"); // throws (loud) if the layout is damaged
+          corrupt.push(id);
+          continue;
+        }
+        throw err; // list()'s loud-not-lossy contract, and every fs fault, in both faces
       }
-      out.push(entry);
+      entries.push(entry);
     }
-    return out;
+    return { entries, corrupt };
+  }
+
+  // list() -> Entry[]. Loud, not lossy: a sidecar that fails validation fails the
+  // listing -- silently skipping corruption would hide it. A RefNotFound for a
+  // sidecar removed between the readdir and its stat is skipped (it has left the
+  // listing); corruption and every other fault fail loudly. #scanEntries owns the
+  // walk; list() is its loud face.
+  async list() {
+    return (await this.#scanEntries(false)).entries;
+  }
+
+  // listReconcilable() -> { entries, corrupt }. The reconciliation-grade listing
+  // (SPEC.md 4.4): the healthy entries a full-scan anti-entropy pass can replicate,
+  // plus the ref ids whose sidecars are too damaged to read. Where list() is loud
+  // over a corrupt sidecar -- one damaged entry would abort the whole readdir walk
+  // and stall replication of every healthy entry -- this face reports the corrupt
+  // id in `corrupt` and keeps enumerating, so a single rotten sidecar
+  // never blocks the sync of sound entries. Corruption is SURFACED, never silently
+  // skipped: the caller replicates `entries` and routes `corrupt` to
+  // verify({ repair: true }). Structural layout damage and fs faults stay loud, as
+  // in list(). #scanEntries owns the walk; this is its resilient face.
+  async listReconcilable() {
+    return this.#scanEntries(true);
   }
 
   // stats() -> { entries, bytes, claimed }. The stash-wide limit pre-check reads
@@ -1220,12 +1279,19 @@ export class DiskBackend {
   async commit(id) {
     assertValid(id);
     const metaDir = await this.#containedDir("meta");
-    await rm(join(metaDir, id + ".json"), { force: true });
+    // recursive: a corrupt sidecar can be DIRECTORY-shaped (or a symlink), not the normal
+    // regular file -- recovery finishing a destruction over such corruption must still
+    // reap it (matching verify's repair, which uses the same recursive rm), or commit
+    // throws EISDIR, the claim stands, and every later verb re-runs recovery and re-fails.
+    // `rm` removes a final-component symlink ITSELF, never following it (CWE-59/367);
+    // recursive is inert on a regular file.
+    await rm(join(metaDir, id + ".json"), { force: true, recursive: true });
     const claimsDir = await this.#containedDir("claims");
     // The claimed blob's read stream may have only just closed; on Windows its
     // handle can linger, so absorb the transient EPERM rather than fail the
-    // commit (force already makes an already-gone blob a no-op -- idempotent).
-    await _retryTransient(() => rm(join(claimsDir, id), { force: true }));
+    // commit (force already makes an already-gone blob a no-op -- idempotent). recursive
+    // for the same directory-shaped-corruption tolerance as the sidecar above.
+    await _retryTransient(() => rm(join(claimsDir, id), { force: true, recursive: true }));
   }
 
   // listClaims() -> { id, claimedAt }[]. The recovery scan's input. Same

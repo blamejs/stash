@@ -23,6 +23,17 @@ import {
 
 after(() => cleanupScratch());
 
+// storedEntryUnder(id, bytes, algo, overrides) -- a complete replicated Entry whose
+// self-describing digest is computed under `algo` (makeStoredEntry pins sha256). The
+// cross-algorithm reconciliation cases need the SAME id + SAME bytes to carry digests
+// under DIFFERENT algorithms (a store may hold entries under mixed algorithms, SPEC.md 5).
+function storedEntryUnder(id, bytes, algo, overrides = {}) {
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  return {
+    ...makeStoredEntry(id, buf, overrides),
+    digest: finalize(digestHash(algo).update(buf), algo),
+  };
+}
 for (const { name, create } of BACKENDS) {
   suite("conformance: " + name, () => {
     test("round-trips a Buffer", async () => {
@@ -1203,6 +1214,83 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual(await drain(await stash.apply(id)), Buffer.from("original"), "the existing entry still applies to the original bytes");
     });
 
+    test("store() reconciles identical bytes under a DIFFERENT algorithm as an idempotent no-op (step 4 by byte identity)", async () => {
+      // SPEC.md 4.4 step 4 no-ops "same id, same digest" and step 5 conflicts on "same
+      // id, different BYTES"; SPEC.md 5 makes mixed-algorithm stores first-class. Two
+      // entries with IDENTICAL bytes but different algorithms carry different digest
+      // STRINGS -- so reconciliation keys on byte identity, not the algo-tagged string,
+      // or an identical-bytes replica wedges permanently on a spurious digest conflict.
+      const stash = new Stash({ backend: create() });
+      const bytes = "content that outlives its algorithm";
+      const id = generate();
+      assert.equal(await stash.store(storedEntryUnder(id, bytes, "sha256"), bytes), true, "first store lands under sha256");
+      const sha3 = storedEntryUnder(id, bytes, "sha3-512");
+      assert.equal(await stash.store(sha3, bytes), false, "identical bytes, different algorithm -> idempotent no-op");
+      assert.equal(await stash.store(sha3, bytes), false, "and the retry is still free -- reconciliation never wedges");
+      assert.equal((await stash.list()).length, 1, "exactly one entry -- no duplicate");
+      assert.equal((await stash.show(id)).digest, storedEntryUnder(id, bytes, "sha256").digest, "the stored entry keeps its ORIGINAL algorithm -- nothing was rewritten");
+      assert.deepEqual(await drain(await stash.apply(id)), Buffer.from(bytes), "and the bytes still round-trip");
+      // Symmetric: existing under sha3-512, incoming under sha256 -- the existing entry's
+      // OWN algorithm decides byte identity, so it reconciles in either direction.
+      const id2 = generate();
+      assert.equal(await stash.store(storedEntryUnder(id2, bytes, "sha3-512"), bytes), true);
+      assert.equal(await stash.store(storedEntryUnder(id2, bytes, "sha256"), bytes), false, "existing sha3-512, incoming sha256 -> idempotent");
+    });
+
+    test("store() no-ops a same-bytes cross-algorithm duplicate even when maxSize now sits below the entry (a lowered limit / tighter replica must not wedge anti-entropy)", async () => {
+      // The cross-algorithm reconcile re-hashes the incoming bytes to prove identity. If
+      // that re-hash is bounded by the CURRENT maxSize, an entry already present -- stored
+      // when the limit was higher, or on a replica with a looser limit -- is rejected with
+      // SizeExceeded before the byte-identity no-op can return false, while same-algorithm
+      // duplicates no-op on the digest string without re-reading. A reconcile writes
+      // nothing, so it must bound by the EXISTING entry's own size, never the write-path
+      // maxSize; otherwise mixed-algorithm anti-entropy fails permanently for valid entries
+      // solely because the limit changed.
+      const backend = create();
+      const bytes = "content that comfortably exceeds a tightened byte ceiling";
+      const id = generate();
+      const seeder = new Stash({ backend }); // no maxSize -- the entry lands as it did when first stored
+      assert.equal(await seeder.store(storedEntryUnder(id, bytes, "sha256"), bytes), true, "the entry is already present under sha256");
+      const tight = new Stash({ backend, maxSize: 10 }); // bytes.length >> 10
+      assert.equal(await tight.store(storedEntryUnder(id, bytes, "sha3-512"), bytes), false, "identical bytes, different algorithm -> idempotent no-op, NOT SizeExceeded");
+      assert.equal((await tight.list()).length, 1, "still exactly one entry -- nothing rewritten");
+      assert.equal((await tight.show(id)).digest, storedEntryUnder(id, bytes, "sha256").digest, "the stored entry keeps its original algorithm");
+      // A genuinely different, over-limit replica under the same id is still a conflict
+      // (a declared size that already differs -- no re-read).
+      await assert.rejects(tight.store(storedEntryUnder(id, bytes + "X", "sha3-512"), bytes + "X"), IntegrityError);
+      // And a replica that DECLARES the stored size but streams MORE bytes (a manifest lie
+      // whose actual stream overruns the stored size) is a byte CONFLICT -- IntegrityError,
+      // never SizeExceeded: a reconcile enforces no write limit.
+      await assert.rejects(tight.store(storedEntryUnder(id, bytes, "sha3-512"), bytes + "EXTRA"), IntegrityError);
+    });
+
+    test("store() still flags a CROSS-algorithm digest conflict as IntegrityError (step 5): different bytes never masquerade as idempotent", async () => {
+      // The fail-open trap: a naive fix ("different algorithm -> false") would silently
+      // accept genuinely different bytes as a no-op, masking the very conflict step 5
+      // exists to surface. Different bytes is a conflict regardless of algorithm.
+      const stash = new Stash({ backend: create() });
+      const id = generate();
+      await stash.store(storedEntryUnder(id, "the original content", "sha256"), "the original content");
+      const conflicting = storedEntryUnder(id, "a genuinely different payload", "sha3-512"); // different bytes AND algorithm
+      await assert.rejects(stash.store(conflicting, "a genuinely different payload"),
+        (e) => e instanceof IntegrityError && e.code === "EINTEGRITY");
+      assert.deepEqual(await drain(await stash.apply(id)), Buffer.from("the original content"), "the existing entry is untouched");
+      assert.equal((await stash.show(id)).digest, storedEntryUnder(id, "the original content", "sha256").digest, "and keeps its original algorithm/digest");
+    });
+
+    test("store() catches a lying CROSS-algorithm entry (digest disagrees with its own bytes) -> IntegrityError, nothing changes", async () => {
+      // Reconciling cross-algorithm still verifies the incoming bytes against the
+      // incoming entry's OWN manifest -- an untrusted replica that lies about its own
+      // digest is caught exactly as the write path catches it, never trusted into a no-op.
+      const stash = new Stash({ backend: create() });
+      const id = generate();
+      await stash.store(storedEntryUnder(id, "stored content", "sha256"), "stored content");
+      const lie = storedEntryUnder(id, "stored content", "sha3-512"); // digest over "stored content"...
+      await assert.rejects(stash.store(lie, "STORED CONTENT"), // ...but streams different (same-length) bytes
+        (e) => e instanceof IntegrityError && e.code === "EINTEGRITY");
+      assert.deepEqual(await drain(await stash.apply(id)), Buffer.from("stored content"), "the existing entry is untouched");
+    });
+
     test("store() order is normative: step 2 (tombstoned) beats step 5 (digest conflict) -> false, not IntegrityError", async () => {
       const stash = new Stash({ backend: create() });
       const id = await stash.push("held"); await stash.drop(id); // grave for id
@@ -1249,6 +1337,7 @@ for (const { name, create } of BACKENDS) {
         { ...good, size: -1 },                       // negative size
         { ...good, reads: 2, readsLeft: null },      // budget incoherence
         { ...good, reads: 1, readsLeft: 5 },         // readsLeft > reads
+        { ...good, reads: 3, readsLeft: 0 },         // exhausted budget -- a live entry never has readsLeft 0
         { ...good, meta: [1, 2] },                   // non-plain meta
       ];
       for (const h of hostiles) await assert.rejects(stash.store(h, "x"), IntegrityError);
@@ -1363,6 +1452,36 @@ for (const { name, create } of BACKENDS) {
       assert.equal(graves[0].cause, "pop", "the grave records how it died");
       await syncOnce(A, B, bytesOf);                        // and A's grave propagates to B
       assert.deepEqual(await B.list(), [], "both stores converge to empty");
+    });
+
+    test("reconcilable() is the resilient source read: healthy entries plus an empty corrupt set, a clean drop-in for the sync loop", async () => {
+      // The reconciliation-grade listing (SPEC.md 4.4). On an uncorrupted store it
+      // returns every healthy entry (expired filtered, exactly as list()) and an
+      // empty corrupt set -- so it is a byte-for-byte drop-in for the documented
+      // anti-entropy source read. The disk-only corrupt-sidecar vector proves it
+      // keeps enumerating past damage; this cross-backend case pins the clean shape.
+      const from = new Stash({ backend: create() });
+      const to = new Stash({ backend: create() });
+      const wire = new Map();
+      const put = async (bytes, opts) => {
+        const ref = await from.push(bytes, opts);
+        wire.set(ref, Buffer.from(bytes));
+        return ref;
+      };
+      const a = await put("alpha");
+      const budgeted = await put("read me twice", { reads: 2 });
+      const c = await put("charlie");
+      await put("already dead", { ttl: 0 }); // expired -> filtered, exactly as list()
+
+      const { entries, corrupt } = await from.reconcilable();
+      assert.deepEqual(corrupt, [], "no corruption -> an empty corrupt set");
+      assert.deepEqual(entries.map((e) => e.id).sort(), [a, budgeted, c].sort(), "the expired entry is filtered, the live ones listed");
+
+      // Drives the documented loop end to end; the read budget survives the copy.
+      for (const grave of await from.tombstones()) await to.drop(grave.id);
+      for (const entry of entries) await to.store(entry, wire.get(entry.id));
+      assert.equal((await to.list()).length, 3, "every healthy entry replicated");
+      assert.equal((await to.show(budgeted)).readsLeft, 2, "the budget rode through reconcilable() -> store() intact");
     });
 
     test("a grave propagates through an EMPTY replica: a node that never held the id adopts the grave, refusing a later resurrection", async () => {
