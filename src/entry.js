@@ -72,7 +72,12 @@ export function assertShape(value, ErrorClass) {
   if (budgeted !== (value.readsLeft !== null)) {
     throw new ErrorClass("stored entry rejected: read budget coherence");
   }
-  if (budgeted && (!_isCount(value.readsLeft) || value.readsLeft > value.reads)) {
+  // A LIVE budgeted entry has readsLeft in [1, reads]: the read that spends the last
+  // credit destroys the entry, so 0 (or below) never persists -- an entry that carries
+  // it is exhausted-but-undestroyed, a malformed shape a replica must not be able to
+  // smuggle in (store() would otherwise accept it, and applying it streams the bytes
+  // then throws a bare TypeError from the debit and orphans the claim). Reject it here.
+  if (budgeted && (!(Number.isSafeInteger(value.readsLeft) && value.readsLeft > 0) || value.readsLeft > value.reads)) {
     throw new ErrorClass("stored entry rejected: readsLeft");
   }
   if (!_isPlainObject(value.meta)) throw new ErrorClass("stored entry rejected: meta");

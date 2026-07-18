@@ -275,7 +275,80 @@ for (const { name, create } of BACKENDS) {
       await stash.close();
     });
 
+    test("a faulted resolution's forced re-scan is not erased by an in-flight recovery scan writing back a stale deadline (SPEC.md 6)", { timeout: 15000 }, async () => {
+      // The forced re-scan (deadline 0) a faulted resolution schedules must survive a
+      // recovery scan that was ALREADY in flight when the fault fired: that scan listed
+      // claims before the orphan existed, so its snapshotted deadline (here a live claim's
+      // far-future lease) must NOT overwrite the forced 0. The scan is parked mid-resolve
+      // via a backend barrier so the fault lands during it, deterministically.
+      const CLAIM_TIMEOUT = 800; // large so the scan's stale deadline (now + lease) sits far beyond the reclaim poll
+      const inner = create();
+      const setup = new Stash({ backend: inner, sweepInterval: null });
+      const orphanRef = await setup.push("orphan");
+      const orphanClaimedAt = Date.now();
+      const oc = await inner.claim(orphanRef); // young orphan: schedules the re-scan we will park
+      oc.source.on("error", () => {});
+      oc.source.destroy();
+      const big = Buffer.alloc(256 * C.BYTES.KIB, 0x6a);
+      const victimRef = await setup.push(big);
+
+      let releaseScan;
+      const scanGate = new Promise((r) => { releaseScan = r; });
+      let parkInRestore = false;
+      let scanParked = false;
+      let failVictimCommit = false;
+      const backend = wrapBackend(inner, {
+        // Deterministic scan order: the live victim FIRST (skipped while guarded, before
+        // the fault drops its guard), the stale orphan we park on LAST -- so the resumed
+        // scan never revisits victim, and only the buggy end-of-scan deadline write can
+        // decide whether the forced re-scan survives.
+        listClaims: async () => {
+          const claims = await inner.listClaims();
+          const v = claims.find((c) => c.id === victimRef);
+          const o = claims.find((c) => c.id === orphanRef);
+          return [...(v ? [v] : []), ...claims.filter((c) => c.id !== victimRef && c.id !== orphanRef), ...(o ? [o] : [])];
+        },
+        restore: async (id) => {
+          if (id === orphanRef && parkInRestore) { parkInRestore = false; scanParked = true; await scanGate; } // park the in-flight scan mid-resolve
+          return inner.restore(id);
+        },
+        commit: async (id) => {
+          if (id === victimRef && failVictimCommit) { failVictimCommit = false; throw new Error("commit boom"); }
+          return inner.commit(id);
+        },
+      });
+      const stash = new Stash({ backend, sweepInterval: null, claimTimeout: CLAIM_TIMEOUT }); // default restore policy
+      const stream = await stash.pop(victimRef); // guards victim; pop's #recover scheduled a deadline from the young orphan
+      stream.on("error", () => {});
+
+      // Past the orphan's lease, the next verb re-runs #recover: it resolves the now-stale
+      // orphan (parking there) and, skipping the live victim, snapshots a FUTURE deadline.
+      const leaseDeadline = orphanClaimedAt + CLAIM_TIMEOUT + 40;
+      while (Date.now() <= leaseDeadline) await new Promise((r) => setImmediate(r)); // bounded wait on the lease, not a sleep
+
+      parkInRestore = true;
+      const inflight = stash.list().catch(() => {}); // the in-flight scan; parks resolving the orphan
+      await pollUntil(async () => scanParked);
+
+      // With the scan parked mid-resolve, the pop's commit faults -> forced re-scan (deadline 0).
+      failVictimCommit = true;
+      await drain(stream).catch(() => {});
+
+      releaseScan(); // the parked scan completes and would write back its stale future deadline
+      await inflight;
+
+      // The forced deadline must have survived, so the next verb reclaims victim's orphan
+      // at once -- within this bounded poll, far shorter than the lease the stale deadline
+      // would have imposed.
+      await pollUntil(async () => { await stash.prune(); return !(await inner.isClaimed(victimRef)); }, { timeout: 200 });
+      assert.equal(await inner.isClaimed(victimRef), false, "the in-flight scan did not erase the faulted resolution's forced re-scan");
+      await stash.close();
+    });
+
     test("a claim age-reclaimed DURING acquisition (before its guard is recorded) cannot resurrect a once-only entry for a second reader (SPEC.md 6)", { timeout: 10000 }, async () => {
+      // backend.claim() moves the blob into claims/ during its own awaits, BEFORE the
+      // reader records the live-holder guard. If a #recover fires in that window -- a
+      // young-orphan re-scan crossing a forward clock step -- it sees the fresh claim
       // backend.claim() moves the blob into claims/ during its own awaits, BEFORE the
       // reader records the live-holder guard. If a #recover fires in that window -- a
       // young-orphan re-scan crossing a forward clock step -- it sees the fresh claim

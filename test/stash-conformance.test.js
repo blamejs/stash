@@ -1310,6 +1310,7 @@ for (const { name, create } of BACKENDS) {
         { ...good, size: -1 },                       // negative size
         { ...good, reads: 2, readsLeft: null },      // budget incoherence
         { ...good, reads: 1, readsLeft: 5 },         // readsLeft > reads
+        { ...good, reads: 3, readsLeft: 0 },         // exhausted budget -- a live entry never has readsLeft 0
         { ...good, meta: [1, 2] },                   // non-plain meta
       ];
       for (const h of hostiles) await assert.rejects(stash.store(h, "x"), IntegrityError);

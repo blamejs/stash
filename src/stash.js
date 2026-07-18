@@ -380,6 +380,11 @@ export class Stash extends EventEmitter {
   // is the earliest such deadline (Infinity when the scan resolved everything).
   #recovered = null;
   #nextRecoverAt = 0;
+  // Monotone counter bumped by every scan start AND every forced reschedule. A scan
+  // publishes its computed next-deadline only if the counter is unchanged since it
+  // began; a #scheduleRecover (a faulted resolution) that races an in-flight scan bumps
+  // it, so the scan's stale deadline cannot overwrite the forced re-scan.
+  #recoverGen = 0;
   // In-flight store() chains, keyed by id: store() serializes concurrent inserts
   // of the SAME id so two replicas cannot both pass the reconcile and race the
   // write (SPEC.md 4.4 write-once). The store is single-writer-per-root, so this
@@ -417,7 +422,7 @@ export class Stash extends EventEmitter {
   // concurrent claim never scheduled one at all. Without this, such an orphan is
   // stranded ECLAIMED until restart. A due deadline is harmless when nothing orphaned
   // (the next scan finds no stale claim and reschedules).
-  #scheduleRecover() { this.#nextRecoverAt = 0; }
+  #scheduleRecover() { this.#nextRecoverAt = 0; this.#recoverGen++; }
 
   constructor(opts) {
     super();
@@ -600,6 +605,7 @@ export class Stash extends EventEmitter {
     // run one scan; a scan that resolves everything sets the deadline to Infinity.
     if (this.#recovered !== null && Date.now() < this.#nextRecoverAt) return this.#recovered;
     this.#nextRecoverAt = Infinity; // claim this re-scan for concurrent ops to share
+    const gen = ++this.#recoverGen; // this scan's generation; a forced reschedule during it bumps this
     this.#recovered = (async () => {
       const claims = await this.#backend.listClaims();
       const now = Date.now();
@@ -685,7 +691,11 @@ export class Stash extends EventEmitter {
           if (await this.#backend.isClaimed(id)) throw err;
         }
       }
-      this.#nextRecoverAt = nextAt;
+      // Publish this scan's deadline ONLY if no forced reschedule raced it: a
+      // #scheduleRecover during the scan bumped the generation and set the deadline due,
+      // for an orphan this scan (which listed claims before it existed) could not have
+      // seen -- its stale nextAt must not overwrite that forced re-scan.
+      if (gen === this.#recoverGen) this.#nextRecoverAt = nextAt;
     })().catch((err) => {
       this.#recovered = null;
       this.#nextRecoverAt = 0;
