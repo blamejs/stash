@@ -32,6 +32,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { freshScratchDir } from "./_scratch.js";
+import { DIGESTS } from "../src/digest.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -182,6 +183,7 @@ const VALID_ALLOW_CLASSES = {
   "guard-shape-reinlined": 1,
   "validator-shape-reinlined": 1,
   "forbidden-crypto-token": 1,
+  "digest-algo-hardcode": 1,
   "sandbox-widening-import": 1,
   "permission-probe-branch": 1,
   "error-event-emit": 1,
@@ -301,6 +303,35 @@ test("forbidden-crypto-token -- no cipher machinery, sqlite, or password surface
   let bad = _scanLines(_srcFiles(), re);
   bad = _filterMarkers(bad, "forbidden-crypto-token");
   _report("SPEC.md 13.1: zero hits for cipher / sqlite / password tokens in src/ (raw, comments included)", bad);
+});
+
+// ---------------------------------------------------------------------------
+// (1a) digest-algo-hardcode -- src/digest.js owns the algorithm set
+// ---------------------------------------------------------------------------
+
+test("digest-algo-hardcode -- no algorithm literal outside the digest registry", () => {
+  // reason: src/digest.js is the ONE place a digest algorithm is named as a
+  // code token -- the registry rows, the createHash factory, and the
+  // "<algo>:<hex>" stored form all derive from it, and a read verifies with
+  // the algorithm the entry names for ITSELF (SPEC.md 5). A `createHash("sha256")`
+  // call or a "<algo>:" stored-digest prefix LITERAL anywhere else in src/
+  // re-inlines that set: it pins one algorithm where the entry's own must
+  // decide, so an entry written under sha3-512 would be hashed or verified with
+  // the wrong function -- a silent integrity hole. The algorithm names are read
+  // OFF the registry (DIGESTS) at scan time, so a new row extends the gate with
+  // no edit here; comments are stripped and string literals kept, so prose like
+  // "sha256 by default" is untouched while a real literal is caught. digest.js
+  // is the owner and is excluded.
+  const algos = Object.keys(DIGESTS)
+    .map((a) => a.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&"))
+    .join("|");
+  const re = new RegExp(
+    "createHash\\s*\\(\\s*[\"'](?:" + algos + ")[\"']|[\"'](?:" + algos + "):"
+  );
+  const files = _srcFiles().filter((f) => _relPath(f) !== "src/digest.js");
+  let bad = _scanLines(files, re, { prepare: _stripComments });
+  bad = _filterMarkers(bad, "digest-algo-hardcode");
+  _report("SPEC.md 5: no createHash(\"<algo>\") or \"<algo>:\" literal outside src/digest.js (the registry owns the algorithm set)", bad);
 });
 
 // ---------------------------------------------------------------------------

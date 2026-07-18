@@ -670,14 +670,15 @@ export class Stash extends EventEmitter {
    * @signature  stash.push(source, opts) -> Promise<string>
    * @since      0.1.0
    * @status     experimental
-   * @spec       SPEC.md 4, SPEC.md 5, FIPS 180-4, RFC 4648, RFC 8259
+   * @spec       SPEC.md 4, SPEC.md 5, FIPS 180-4, FIPS 202, RFC 4648, RFC 8259
    * @defends    CWE-330
    * @related    stash.apply, stash.show, stash.drop
    *
    * Store bytes; resolve to the entry's ref. The source may be a Buffer, a
    * Uint8Array, a UTF-8 string, a Readable, or any AsyncIterable of chunks;
-   * it streams through to the backend, which computes size and sha256
-   * digest as the bytes pass. `opts.meta` is a caller-owned plain object,
+   * it streams through to the backend, which computes size and the
+   * digest as the bytes pass -- with the algorithm chosen at construction
+   * (`sha256` by default). `opts.meta` is a caller-owned plain object,
    * round-tripped verbatim as JSON and never interpreted. `opts.ttl` overrides
    * the constructor default for this entry (`null` overrides a default back to
    * no expiry); an absent `ttl` inherits the default. `opts.reads` is a read
@@ -769,7 +770,7 @@ export class Stash extends EventEmitter {
    * @signature  stash.apply(ref) -> Promise<Readable>
    * @since      0.1.0
    * @status     experimental
-   * @spec       SPEC.md 4, FIPS 180-4
+   * @spec       SPEC.md 4, FIPS 180-4, FIPS 202
    * @defends    CWE-354, CWE-208
    * @related    stash.push, stash.show
    *
@@ -836,7 +837,7 @@ export class Stash extends EventEmitter {
    * @signature  stash.pop(ref) -> Promise<Readable>
    * @since      0.1.7
    * @status     experimental
-   * @spec       SPEC.md 4, SPEC.md 6, FIPS 180-4
+   * @spec       SPEC.md 4, SPEC.md 6, FIPS 180-4, FIPS 202
    * @defends    CWE-362, CWE-367, CWE-354
    * @related    stash.apply, stash.drop
    *
@@ -871,7 +872,7 @@ export class Stash extends EventEmitter {
    * @signature  stash.store(entry, source) -> Promise<boolean>
    * @since      0.1.9
    * @status     experimental
-   * @spec       SPEC.md 4, SPEC.md 4.4, FIPS 180-4, RFC 8259
+   * @spec       SPEC.md 4, SPEC.md 4.4, FIPS 180-4, FIPS 202, RFC 8259
    * @defends    CWE-345, CWE-354, CWE-20
    * @related    stash.push, stash.tombstones, stash.drop
    *
@@ -904,8 +905,8 @@ export class Stash extends EventEmitter {
    * `store` emits NO event: a sync daemon that heard its own writes would echo them
    * back forever, so the silence removes that bug class here rather than in every
    * caller. The replicated entry is untrusted input -- a shape violation, a digest
-   * that is not sha256-hex, an incoherent read budget, or a non-plain `meta` is an
-   * `IntegrityError`, never a partial write.
+   * that is not a well-formed `<algo>:<hex>` for a registry algorithm, an incoherent
+   * read budget, or a non-plain `meta` is an `IntegrityError`, never a partial write.
    *
    * A read budget is enforced per store, so two replicas of a `reads: 1` entry can
    * each serve one full read before their tombstones converge -- exactly-once
@@ -1175,7 +1176,7 @@ export class Stash extends EventEmitter {
    * @signature  stash.verify(opts?) -> Promise<Report>
    * @since      0.1.8
    * @status     experimental
-   * @spec       SPEC.md 4, FIPS 180-4
+   * @spec       SPEC.md 4, FIPS 180-4, FIPS 202
    * @related    stash.stats, stash.prune
    *
    * Audit the store's physical integrity. Dry-run by default: it digest-checks

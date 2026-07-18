@@ -11,8 +11,9 @@
  *   The storage layer, behind one contract (SPEC.md 9): the backend holds
  *   bytes; `Stash` holds policy. A backend never validates lifecycle,
  *   never interprets `meta`, and never decides destruction -- it stores
- *   what it is handed under the id it is handed, computes size and sha256
- *   digest as the bytes stream through, and reports what it holds. The
+ *   what it is handed under the id it is handed, computes size and the
+ *   digest as the bytes stream through (with the algorithm named by the
+ *   entry's self-describing digest), and reports what it holds. The
  *   same conformance suite runs against every backend, unmodified.
  *
  *   Two implementations ship. The memory backend is Map-backed -- no

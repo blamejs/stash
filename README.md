@@ -80,7 +80,8 @@ The M1 + M2 + M3 + M4 + M5 + M6 + M7 surface (see `SPEC.md` section 12 for the f
 
 - `push` / `pop` / `apply` / `show` / `has` / `list` / `reconcilable` / `stats` /
   `verify` / `store` / `tombstones` / `drop` / `clear` over either backend, with size
-  and `sha256` digest computed as the bytes stream through and digest-verified reads.
+  and a self-describing digest computed as the bytes stream through and
+  digest-verified reads (algorithm chosen at construction; `sha256` by default).
 - **Pop & read budgets**: `pop(ref)` streams an entry and destroys it the
   instant the stream drains cleanly -- bytes out once, then gone -- with two
   concurrent pops racing on an atomic claim so exactly one drains and the other
@@ -101,7 +102,7 @@ The M1 + M2 + M3 + M4 + M5 + M6 + M7 surface (see `SPEC.md` section 12 for the f
   store is judged full, and every rejected push leaves no partial behind.
 - **Audit & events**: `verify()` walks the store and reports physical damage --
   a bit-flipped blob, a corrupt sidecar, an orphaned blob or half-written
-  `.tmp`, a foreign file, a stale claim, a corrupt tombstone -- streaming a `sha256` over every blob;
+  `.tmp`, a foreign file, a stale claim, a corrupt tombstone -- re-hashing every blob with its own algorithm;
   it is a dry run by default, and `verify({ repair: true })` removes only what it
   condemns, sparing healthy entries, an in-flight `.tmp`, and a claim recovery
   owns. A `Stash` is an `EventEmitter` -- `'pushed'` / `'popped'` / `'dropped'` /
