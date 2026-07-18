@@ -247,10 +247,12 @@ export class DiskBackend {
     try {
       return "disk:" + realpathSync(this.#root);
     } catch (err) {
-      // Not created yet (the lazy #init makes it): fall back to the resolved path -- both
-      // openers canonicalize to the same key once the dir exists. Any OTHER fault deriving
-      // the key (e.g. a permission error on the path) is a real fault, surfaced not hidden.
-      if (err && err.code === "ENOENT") return "disk:" + this.#root;
+      // Any filesystem reason the root cannot be canonicalized YET -- it does not exist (the
+      // lazy #init creates it), a parent component is a file (ENOTDIR), a permission wall
+      // (EACCES/EPERM) -- falls back to the resolved path for this coordination KEY; the
+      // real fault surfaces at first use when #init runs. Construction must not throw over a
+      // guard key. A non-filesystem error (no `code`) is genuinely unexpected -- surfaced.
+      if (err && typeof err.code === "string") return "disk:" + this.#root;
       throw err;
     }
   }
