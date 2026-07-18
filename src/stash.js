@@ -419,13 +419,25 @@ export class Stash extends EventEmitter {
   // backend.claim race releases its guard, and a refcount keeps that release from
   // clearing the winner's.
   #liveClaims; // id -> live-holder count; assigned from the per-store shared registry in the constructor
-  #guardIdentity; // the backend-identity key this instance holds in #GUARDS (undefined -> a private guard)
+  #guardIdentity; // the backend-identity key this instance holds in CLAIM_GUARDS (undefined -> a private guard)
+  #guardReleased = false; // this instance has dropped its holder count (idempotent close())
 
   #guardClaim(ref) { this.#liveClaims.set(ref, (this.#liveClaims.get(ref) ?? 0) + 1); }
   #unguardClaim(ref) {
     const n = (this.#liveClaims.get(ref) ?? 0) - 1;
-    if (n > 0) this.#liveClaims.set(ref, n);
-    else this.#liveClaims.delete(ref);
+    if (n > 0) { this.#liveClaims.set(ref, n); return; }
+    this.#liveClaims.delete(ref);
+    this.#dropSharedGuardIfIdle(); // a claim settling after the last close() may empty the store's guard
+  }
+  // Drop the store's shared guard from the registry ONLY once it is fully idle -- no
+  // holders (every Stash over the store closed) AND no live claims outstanding. A close()
+  // that races an undrained pop/apply must NOT delete the entry: a later Stash over the
+  // same store would then get an empty guard and its recovery would reclaim the still-
+  // draining claim. So the last of {last close, last claim settling} performs the cleanup.
+  #dropSharedGuardIfIdle() {
+    if (this.#guardIdentity === undefined) return;
+    const shared = CLAIM_GUARDS.get(this.#guardIdentity);
+    if (shared !== undefined && shared.holders <= 0 && shared.guard.size === 0) CLAIM_GUARDS.delete(this.#guardIdentity);
   }
   // Force the next public verb to re-run #recover. Called when a claim resolution
   // FAULTS (restore / commit / burn threw): the on-disk claim may still stand as an
@@ -1653,13 +1665,17 @@ export class Stash extends EventEmitter {
    *   }
    */
   async close() {
-    // Release this instance's hold on the per-store shared guard; drop the registry
-    // entry when the last holder closes. Idempotent (a second close() is a no-op): the
-    // identity is cleared once decremented, so holders never double-count.
-    if (this.#guardIdentity !== undefined) {
+    // Release this instance's hold on the per-store shared guard. Idempotent via
+    // #guardReleased (a second close() must not double-decrement). The registry entry is
+    // dropped only once the store is fully idle -- no holders AND no live claims: closing
+    // while a pop/apply stream is still draining keeps the guard registered so a later
+    // Stash over the same store still sees the live claim (#dropSharedGuardIfIdle, also
+    // reached when that last claim settles). #guardIdentity is kept for that late cleanup.
+    if (this.#guardIdentity !== undefined && !this.#guardReleased) {
+      this.#guardReleased = true;
       const shared = CLAIM_GUARDS.get(this.#guardIdentity);
-      if (shared !== undefined && (shared.holders -= 1) <= 0) CLAIM_GUARDS.delete(this.#guardIdentity);
-      this.#guardIdentity = undefined;
+      if (shared !== undefined) shared.holders -= 1;
+      this.#dropSharedGuardIfIdle();
     }
     if (this.#sweepTimer !== null) {
       clearInterval(this.#sweepTimer);

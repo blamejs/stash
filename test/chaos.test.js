@@ -375,6 +375,33 @@ for (const { name, create } of BACKENDS) {
       await b.close();
     });
 
+    test("closing a Stash while its pop stream is still draining keeps the store's guard, so a later Stash's recovery does not reclaim the live claim (SPEC.md 6)", { timeout: 10000 }, async () => {
+      // close() must not drop the shared guard while a claim is still live: a pop handed
+      // back a stream, then close() was called before it drained. If the registry entry is
+      // deleted, a later Stash over the same store gets an EMPTY guard and its recovery
+      // reclaims the still-draining claim. The entry stays registered until the claim
+      // settles, not merely until the last instance closes.
+      const CLAIM_TIMEOUT = 50;
+      const backend = create();
+      const a = new Stash({ backend, sweepInterval: null, claimTimeout: CLAIM_TIMEOUT });
+      const big = Buffer.alloc(256 * C.BYTES.KIB, 0x6c);
+      const ref = await a.push(big);
+      const claimedAt = Date.now();
+      const stream = await a.pop(ref); // live claim, stream NOT drained
+      stream.on("error", () => {});
+      await a.close(); // closed while the claim is still live -- the guard must persist
+
+      const b = new Stash({ backend, sweepInterval: null, claimTimeout: CLAIM_TIMEOUT }); // a LATER Stash over the same store
+      const deadline = claimedAt + CLAIM_TIMEOUT + 30;
+      while (Date.now() <= deadline) await new Promise((r) => setImmediate(r)); // bounded wait on the lease
+      await b.prune(); // B's recovery must SKIP A's still-live claim
+      assert.equal(await backend.isClaimed(ref), true, "the live claim survived a later Stash's recovery after close()");
+
+      assert.deepEqual(await drain(stream), big, "A's read still completes with the full bytes");
+      await pollUntil(async () => !(await backend.isClaimed(ref)));
+      await b.close();
+    });
+
     test("a claim age-reclaimed DURING acquisition (before its guard is recorded) cannot resurrect a once-only entry for a second reader (SPEC.md 6)", { timeout: 10000 }, async () => {
       // backend.claim() moves the blob into claims/ during its own awaits, BEFORE the
       // reader records the live-holder guard. If a #recover fires in that window -- a
