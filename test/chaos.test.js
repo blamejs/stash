@@ -312,5 +312,51 @@ for (const { name, create } of BACKENDS) {
       await drain(stream1).catch(() => {}); // stream1's own bytes + commit; tolerate a post-resurrection commit fault
       await stash.close();
     });
+
+    test("a live claim SKIPPED by a recovery scan keeps recovery scheduled, so a later faulted resolution leaving an orphan is still reclaimed (SPEC.md 6)", { timeout: 10000 }, async () => {
+      // When a recovery scan skips a claim because a live reader holds it, it must still
+      // schedule a re-scan for when that claim would age out. Otherwise a scan whose only
+      // remaining claims are live ends with #nextRecoverAt = Infinity, and if the reader's
+      // terminal commit/restore later FAULTS -- dropping the guard but leaving the on-disk
+      // claim as an orphan -- no scan is ever pending and the ref is stranded ECLAIMED
+      // until restart. A young orphan triggers the mid-drain scan that skips the live
+      // reader; the reader's commit then faults once, leaving an interrupted destruction.
+      const CLAIM_TIMEOUT = 40;
+      const inner = create();
+      const setup = new Stash({ backend: inner, sweepInterval: null });
+      const orphanRef = await setup.push("orphan");
+      const oc = await inner.claim(orphanRef); // young orphan: triggers the mid-drain re-scan
+      oc.source.on("error", () => {});
+      oc.source.destroy();
+      const big = Buffer.alloc(256 * C.BYTES.KIB, 0x68);
+      const victimRef = await setup.push(big);
+
+      let failCommitOnce = false;
+      const backend = wrapBackend(inner, {
+        commit: async (id) => {
+          if (id === victimRef && failCommitOnce) { failCommitOnce = false; throw new Error("commit boom"); }
+          return inner.commit(id);
+        },
+      });
+      const stash = new Stash({ backend, sweepInterval: null, onPopFailure: "burn", claimTimeout: CLAIM_TIMEOUT });
+      const stream = await stash.pop(victimRef); // guards victim + claims; pop's #recover saw the young orphan
+      stream.on("error", () => {});
+
+      // Past the orphan's lease, a verb fires the mid-drain scan: it reclaims the orphan
+      // and SKIPS victim (live-guarded). Without rescheduling that skip, the scan ends
+      // with #nextRecoverAt = Infinity.
+      await pollUntil(async () => { await stash.prune(); return (await stash.tombstones()).some((g) => g.id === orphanRef); });
+
+      // The reader now finishes, but its terminal commit FAULTS once, leaving victim an
+      // orphan (grave written, claim not committed); the finally drops the guard.
+      failCommitOnce = true;
+      await drain(stream).catch(() => {});
+
+      // A scheduled re-scan must finish victim's interrupted destruction. Stranded (poll
+      // times out) without the reschedule; reclaimed with it.
+      await pollUntil(async () => { await stash.prune(); return !(await inner.isClaimed(victimRef)); }, { timeout: 6000 });
+      assert.equal(await inner.isClaimed(victimRef), false, "a skipped live claim that later orphans via a faulted commit is still reclaimed");
+      await stash.close();
+    });
   });
 }

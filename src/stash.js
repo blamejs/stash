@@ -597,17 +597,25 @@ export class Stash extends EventEmitter {
       const now = Date.now();
       let nextAt = Infinity;
       for (const { id, claimedAt } of claims) {
+        const staleAt = claimedAt + this.#claimTimeoutMs;
         // A claim a LIVE in-process reader holds is NEVER reclaimed by age: single-
         // writer-per-root (SPEC.md 6) makes this process the sole claimant, so a claim
         // in #liveClaims is a live drain here, not a crashed prior run's orphan. The
         // age/mtime test is for ORPHANS (no live holder) -- and consulting the wall
         // clock for a held claim is exactly what a forward clock step corrupts: a young
         // claim ages past the lease and recovery burns or restores a once-only read
-        // mid-drain. Skipping it never defers a re-scan (the reader resolves the claim
-        // itself) and never weakens crash recovery: a prior process's orphans are absent
-        // from THIS process's set and still age-reclaimed below.
-        if (this.#liveClaims.has(id)) continue;
-        const staleAt = claimedAt + this.#claimTimeoutMs;
+        // mid-drain. But STILL schedule a re-scan for when it would age out: if the drain
+        // then drops its guard WITHOUT resolving the on-disk claim (a faulted commit or
+        // restore leaving an orphan), that pending scan is what reclaims it -- skipping
+        // without rescheduling can end a scan whose only remaining claims are live with
+        // #nextRecoverAt = Infinity, stranding such an orphan ECLAIMED until restart. A
+        // claim already past its lease (a drain outliving claimTimeout) re-checks one
+        // lease out, not on every verb (no hot re-scan loop). Crash recovery is untouched:
+        // a prior process's orphans are absent from THIS set and still age-reclaimed below.
+        if (this.#liveClaims.has(id)) {
+          nextAt = Math.min(nextAt, staleAt > now ? staleAt : now + this.#claimTimeoutMs);
+          continue;
+        }
         if (now < staleAt) { // still within the lease -- maybe a live pop; leave it,
           nextAt = Math.min(nextAt, staleAt); // but re-scan once it would age past the lease
           continue;
