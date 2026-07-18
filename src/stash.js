@@ -419,7 +419,7 @@ export class Stash extends EventEmitter {
   // backend.claim race releases its guard, and a refcount keeps that release from
   // clearing the winner's.
   #liveClaims; // id -> live-holder count; assigned from the per-store shared registry in the constructor
-  #guardIdentity; // the backend-identity key this instance holds in CLAIM_GUARDS (undefined -> a private guard)
+  #guardIdentity; // the key this instance holds in CLAIM_GUARDS: the backend's identity, or the backend object
   #guardReleased = false; // this instance has dropped its holder count (idempotent close())
 
   #guardClaim(ref) { this.#liveClaims.set(ref, (this.#liveClaims.get(ref) ?? 0) + 1); }
@@ -463,22 +463,22 @@ export class Stash extends EventEmitter {
       }
     }
     this.#backend = backend;
-    // Bind the per-store live-claim guard (SPEC.md 6). Two Stash over the same store
-    // (same backend identity) share ONE guard so neither's recovery age-reclaims the
-    // other's live read; a backend that declares no identity gets a private guard.
-    const identity = backend.identity;
-    if (identity === undefined) {
-      this.#liveClaims = new Map();
-    } else {
-      let shared = CLAIM_GUARDS.get(identity);
-      if (shared === undefined) {
-        shared = { guard: new Map(), holders: 0 };
-        CLAIM_GUARDS.set(identity, shared);
-      }
-      shared.holders += 1;
-      this.#guardIdentity = identity;
-      this.#liveClaims = shared.guard;
+    // Bind the per-store live-claim guard (SPEC.md 6). Two Stash over the same store share
+    // ONE guard so neither's recovery age-reclaims the other's live read. The key is the
+    // backend's declared identity (the disk root, a memory instance tag) or -- for a
+    // backend that declares none (a custom or wrapper backend) -- the backend OBJECT
+    // itself, so two Stash over the SAME instance still coordinate; only distinct
+    // identity-less objects get distinct guards (they are distinct stores as far as this
+    // process can tell). The registry entry is dropped once the store is fully idle.
+    const key = backend.identity !== undefined ? backend.identity : backend;
+    let shared = CLAIM_GUARDS.get(key);
+    if (shared === undefined) {
+      shared = { guard: new Map(), holders: 0 };
+      CLAIM_GUARDS.set(key, shared);
     }
+    shared.holders += 1;
+    this.#guardIdentity = key;
+    this.#liveClaims = shared.guard;
     this.#ttlMs = parse(opts.ttl, "ttl");
     // A ttl can be a valid duration yet place expiresAt (createdAt + ttl) past
     // the safe integer range, which make() refuses at push. Catch an unusable

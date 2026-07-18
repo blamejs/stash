@@ -402,6 +402,29 @@ for (const { name, create } of BACKENDS) {
       await b.close();
     });
 
+    test("two Stash over one identity-less backend object share the live-claim guard (SPEC.md 6)", { timeout: 10000 }, async () => {
+      // A backend that omits the optional `identity` (a custom or wrapper backend) still
+      // needs its two openers to coordinate: the guard falls back to the backend OBJECT as
+      // the key, so two Stash over the SAME instance see one another's live reads.
+      const CLAIM_TIMEOUT = 50;
+      const shared = wrapBackend(create()); // wrapBackend forwards no `identity` -> identity-less
+      const a = new Stash({ backend: shared, sweepInterval: null, claimTimeout: CLAIM_TIMEOUT });
+      const b = new Stash({ backend: shared, sweepInterval: null, claimTimeout: CLAIM_TIMEOUT }); // SAME object
+      const big = Buffer.alloc(256 * C.BYTES.KIB, 0x6d);
+      const ref = await a.push(big);
+      const claimedAt = Date.now();
+      const stream = await a.pop(ref); // A holds a live claim (the object-keyed shared guard)
+      stream.on("error", () => {});
+      const deadline = claimedAt + CLAIM_TIMEOUT + 30;
+      while (Date.now() <= deadline) await new Promise((r) => setImmediate(r)); // bounded wait on the lease
+      await b.prune();
+      assert.equal(await shared.isClaimed(ref), true, "B's recovery skipped A's live claim over the shared identity-less backend");
+      assert.deepEqual(await drain(stream), big, "A's read completes with the full bytes");
+      await pollUntil(async () => !(await shared.isClaimed(ref)));
+      await a.close();
+      await b.close();
+    });
+
     test("a claim age-reclaimed DURING acquisition (before its guard is recorded) cannot resurrect a once-only entry for a second reader (SPEC.md 6)", { timeout: 10000 }, async () => {
       // backend.claim() moves the blob into claims/ during its own awaits, BEFORE the
       // reader records the live-holder guard. If a #recover fires in that window -- a

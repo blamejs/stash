@@ -8,7 +8,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { constants as FS } from "node:fs";
+import { constants as FS, realpathSync } from "node:fs";
 import { link, lstat, lutimes, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -234,12 +234,26 @@ export class DiskBackend {
     this.#root = resolve(opts.root);
   }
 
-  // The store's process-wide identity: its resolved root path. The policy layer keys its
-  // single-writer-per-root guard on it (SPEC.md 6), so two Stash over the SAME root --
-  // even via distinct DiskBackend instances -- coordinate as one writer and never
-  // age-reclaim each other's live reads. Synchronous, no I/O (the resolve ran in the
-  // constructor); realpath would be more canonical but needs I/O the constructor forbids.
-  get identity() { return "disk:" + this.#root; }
+  // The store's process-wide identity: its CANONICAL root path. The policy layer keys its
+  // single-writer-per-root guard on it (SPEC.md 6), so two Stash over the SAME store --
+  // even via distinct DiskBackend instances, and even through different path spellings (a
+  // relative vs absolute path, a symlink to the root, a case variant on a case-insensitive
+  // fs) -- coordinate as one writer and never age-reclaim each other's live reads.
+  // realpathSync canonicalizes symlinks + case; it needs the dir to exist, so before the
+  // lazy #init creates it we fall back to the resolved path (both openers canonicalize to
+  // the same key once it exists). This derives a coordination KEY only -- it is NOT the
+  // containment realpath (#containedDir); no operation ever trusts a path from here.
+  get identity() {
+    try {
+      return "disk:" + realpathSync(this.#root);
+    } catch (err) {
+      // Not created yet (the lazy #init makes it): fall back to the resolved path -- both
+      // openers canonicalize to the same key once the dir exists. Any OTHER fault deriving
+      // the key (e.g. a permission error on the path) is a real fault, surfaced not hidden.
+      if (err && err.code === "ENOENT") return "disk:" + this.#root;
+      throw err;
+    }
+  }
 
   // Lazy, memoized layout creation (constructors do no I/O). A failed
   // init clears the memo so the next operation retries instead of

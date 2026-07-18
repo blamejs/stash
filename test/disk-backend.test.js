@@ -1122,6 +1122,33 @@ suite("disk: crash recovery (SPEC 6)", () => {
     assert.deepEqual(await drain(await next.apply(fresh)), Buffer.from("healthy"), "the store still round-trips after the reap");
   });
 
+  test("two DiskBackend over aliased roots (real dir + a symlink to it) share the live-claim guard (SPEC.md 6)", { skip: !FILE_SYMLINKS, timeout: 10000 }, async () => {
+    // The same store opened through two path spellings -- the real directory and a symlink
+    // to it -- must key ONE guard: the identity canonicalizes via realpath, so B (the
+    // alias) never age-reclaims a pop A (the real path) is still draining.
+    const CLAIM_TIMEOUT = 50;
+    const realRoot = freshRoot();
+    mkdirSync(realRoot, { recursive: true });
+    const linkRoot = realRoot + "-alias";
+    symlinkSync(realRoot, linkRoot, "dir");
+    const a = new Stash({ backend: new DiskBackend({ root: realRoot }), sweepInterval: null, claimTimeout: CLAIM_TIMEOUT });
+    const bBackend = new DiskBackend({ root: linkRoot });
+    const b = new Stash({ backend: bBackend, sweepInterval: null, claimTimeout: CLAIM_TIMEOUT });
+    const big = Buffer.alloc(256 * 1024, 0x6e);
+    const ref = await a.push(big);
+    const claimedAt = Date.now();
+    const stream = await a.pop(ref); // A holds a live claim, mid-drain
+    stream.on("error", () => {});
+    const deadline = claimedAt + CLAIM_TIMEOUT + 30;
+    while (Date.now() <= deadline) await new Promise((r) => setImmediate(r)); // bounded wait on the lease
+    await b.prune(); // B (the alias) must SKIP A's live claim
+    assert.equal(await bBackend.isClaimed(ref), true, "B (symlink alias) did not reclaim A's live claim -- the guard key is the canonical root");
+    assert.deepEqual(await drain(stream), big, "A's read completes with the full bytes");
+    for (let i = 0; i < 400 && (await bBackend.isClaimed(ref)); i += 1) await new Promise((r) => setImmediate(r)); // bounded: A's commit lands
+    await a.close();
+    await b.close();
+  });
+
   test("a planted symlink at claims/<id> is never followed off the store", { skip: !FILE_SYMLINKS }, async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("real");
