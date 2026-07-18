@@ -1170,23 +1170,32 @@ export class Stash extends EventEmitter {
       throw new IntegrityError();
     }
     // Different algorithm (a mixed-algorithm store, SPEC.md 5): the digest STRINGS are
-    // incomparable, so re-hash the incoming source under BOTH algorithms to decide on the
-    // bytes. _verifiedInbound verifies the stream against the incoming entry's OWN digest
-    // and size -- an untrusted replica that lies about its manifest is IntegrityError here,
-    // exactly as on the write path -- and the tee'd existing-algorithm hash then proves
-    // byte identity against the stored content. maxSize still bounds the drain (a hostile
-    // source is no more unbounded here than on the write path); no maxTotal residual is
-    // charged, because a reconcile writes nothing. existingAlgo always resolves: stat()
-    // returns a shape-validated entry (its digest is self-describing), the same invariant
+    // incomparable, so re-hash the incoming source under the existing algorithm to decide
+    // on the bytes. _verifiedInbound verifies the stream against the incoming entry's OWN
+    // digest and size -- an untrusted replica that lies about its manifest is IntegrityError
+    // here, exactly as on the write path -- and the existing-algorithm hash then proves byte
+    // identity against the stored content. existingAlgo always resolves: stat() returns a
+    // shape-validated entry (its digest is self-describing), the same invariant
     // _verifiedStream/_verifiedInbound rely on.
+    //
+    // A same-bytes duplicate must no-op even when the current maxSize sits BELOW the stored
+    // entry -- maxSize was lowered since it was stored, or this replica carries a tighter
+    // limit than the one that accepted it. The same-algorithm path above no-ops on the
+    // digest string without re-reading, so this cross-algorithm path must not reject on a
+    // WRITE-path limit it never writes under (a reconcile writes nothing, charges no maxTotal
+    // residual). A declared size that already differs is a conflict with no re-read; otherwise
+    // bound the re-hash by the EXISTING entry's own (trusted, already-stored) size -- a stream
+    // longer than the stored bytes cannot be identical, so it bounds a hostile replica exactly
+    // without consulting maxSize.
+    if (entry.size !== existing.size) throw new IntegrityError();
     const hash = digestHash(existingAlgo);
-    for await (const buf of _verifiedInbound(_boundedSource(chunks, this.#maxSize, null), entry)) {
+    for await (const buf of _verifiedInbound(_boundedSource(chunks, existing.size, null), entry)) {
       hash.update(buf);
     }
     // Self-consistent incoming bytes (verified above) that reproduce the stored entry's
-    // digest under its OWN algorithm, at the same size, ARE the stored content -> step 4
-    // idempotent no-op. Anything else is genuinely different bytes under the same id -> step 5.
-    if (entry.size === existing.size && constantTimeEqual(finalize(hash, existingAlgo), existing.digest)) {
+    // digest under its OWN algorithm ARE the stored content -> step 4 idempotent no-op.
+    // Anything else is genuinely different bytes under the same id -> step 5.
+    if (constantTimeEqual(finalize(hash, existingAlgo), existing.digest)) {
       return false;
     }
     throw new IntegrityError();

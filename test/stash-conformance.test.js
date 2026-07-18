@@ -1237,6 +1237,28 @@ for (const { name, create } of BACKENDS) {
       assert.equal(await stash.store(storedEntryUnder(id2, bytes, "sha256"), bytes), false, "existing sha3-512, incoming sha256 -> idempotent");
     });
 
+    test("store() no-ops a same-bytes cross-algorithm duplicate even when maxSize now sits below the entry (a lowered limit / tighter replica must not wedge anti-entropy)", async () => {
+      // The cross-algorithm reconcile re-hashes the incoming bytes to prove identity. If
+      // that re-hash is bounded by the CURRENT maxSize, an entry already present -- stored
+      // when the limit was higher, or on a replica with a looser limit -- is rejected with
+      // SizeExceeded before the byte-identity no-op can return false, while same-algorithm
+      // duplicates no-op on the digest string without re-reading. A reconcile writes
+      // nothing, so it must bound by the EXISTING entry's own size, never the write-path
+      // maxSize; otherwise mixed-algorithm anti-entropy fails permanently for valid entries
+      // solely because the limit changed.
+      const backend = create();
+      const bytes = "content that comfortably exceeds a tightened byte ceiling";
+      const id = generate();
+      const seeder = new Stash({ backend }); // no maxSize -- the entry lands as it did when first stored
+      assert.equal(await seeder.store(storedEntryUnder(id, bytes, "sha256"), bytes), true, "the entry is already present under sha256");
+      const tight = new Stash({ backend, maxSize: 10 }); // bytes.length >> 10
+      assert.equal(await tight.store(storedEntryUnder(id, bytes, "sha3-512"), bytes), false, "identical bytes, different algorithm -> idempotent no-op, NOT SizeExceeded");
+      assert.equal((await tight.list()).length, 1, "still exactly one entry -- nothing rewritten");
+      assert.equal((await tight.show(id)).digest, storedEntryUnder(id, bytes, "sha256").digest, "the stored entry keeps its original algorithm");
+      // A genuinely different, over-limit replica under the same id is still a conflict.
+      await assert.rejects(tight.store(storedEntryUnder(id, bytes + "X", "sha3-512"), bytes + "X"), IntegrityError);
+    });
+
     test("store() still flags a CROSS-algorithm digest conflict as IntegrityError (step 5): different bytes never masquerade as idempotent", async () => {
       // The fail-open trap: a naive fix ("different algorithm -> false") would silently
       // accept genuinely different bytes as a no-op, masking the very conflict step 5
