@@ -362,10 +362,17 @@ function _positiveCount(value, label) {
 // root). Two Stash over the SAME store share ONE guard map, so one instance's crash
 // recovery never age-reclaims a claim ANOTHER instance's live reader still holds (which
 // would restore/burn a once-only read out from under it). A backend that declares no
-// identity -- a test wrapper, a custom backend -- gets a private guard. Refcounted:
-// dropped from the registry when its last holder calls close(), so a long-lived process
-// creating transient stores does not accrete empty maps.
-const CLAIM_GUARDS = new Map(); // identity -> { guard: Map<id, count>, holders: number }
+// identity keys by the backend OBJECT instead, so two Stash over the same instance still
+// coordinate. The entry stays registered for as long as ANY Stash over the store is
+// reachable -- NOT dropped by close(), which leaves the store fully usable -- so a store
+// re-used after close, or a second instance opened later, still shares the same guard. It
+// is released only when the last such Stash is garbage-collected (GUARD_REAP), bounding a
+// long-lived process's registry to the stores it can still reach.
+const CLAIM_GUARDS = new Map(); // key -> { guard: Map<id, count>, holders: number }
+const GUARD_REAP = new FinalizationRegistry((key) => {
+  const shared = CLAIM_GUARDS.get(key);
+  if (shared !== undefined && (shared.holders -= 1) <= 0 && shared.guard.size === 0) CLAIM_GUARDS.delete(key);
+});
 
 export class Stash extends EventEmitter {
   #backend;
@@ -418,26 +425,33 @@ export class Stash extends EventEmitter {
   // either writes the on-disk claim and both begin acquisition; the one that loses the
   // backend.claim race releases its guard, and a refcount keeps that release from
   // clearing the winner's.
-  #liveClaims; // id -> live-holder count; assigned from the per-store shared registry in the constructor
+  #liveClaims; // id -> live-holder count; bound LAZILY (#ensureGuardBound) from the shared registry
   #guardIdentity; // the key this instance holds in CLAIM_GUARDS: the backend's identity, or the backend object
-  #guardReleased = false; // this instance has dropped its holder count (idempotent close())
 
+  // Bind this instance to the store's shared guard, once, on the first #recover -- when a
+  // canonical backend identity is stable (its lazy init has run). The key is the backend's
+  // declared identity (the disk root's realpath, a memory instance tag) or, for a backend
+  // that declares none, the backend OBJECT (so two Stash over the same instance still
+  // coordinate). Registered with GUARD_REAP so the entry is released when this instance is
+  // garbage-collected, never on close() (which leaves the store usable).
+  #ensureGuardBound() {
+    if (this.#liveClaims !== undefined) return;
+    const key = this.#backend.identity !== undefined ? this.#backend.identity : this.#backend;
+    let shared = CLAIM_GUARDS.get(key);
+    if (shared === undefined) {
+      shared = { guard: new Map(), holders: 0 };
+      CLAIM_GUARDS.set(key, shared);
+    }
+    shared.holders += 1;
+    this.#guardIdentity = key;
+    this.#liveClaims = shared.guard;
+    GUARD_REAP.register(this, key);
+  }
   #guardClaim(ref) { this.#liveClaims.set(ref, (this.#liveClaims.get(ref) ?? 0) + 1); }
   #unguardClaim(ref) {
     const n = (this.#liveClaims.get(ref) ?? 0) - 1;
-    if (n > 0) { this.#liveClaims.set(ref, n); return; }
-    this.#liveClaims.delete(ref);
-    this.#dropSharedGuardIfIdle(); // a claim settling after the last close() may empty the store's guard
-  }
-  // Drop the store's shared guard from the registry ONLY once it is fully idle -- no
-  // holders (every Stash over the store closed) AND no live claims outstanding. A close()
-  // that races an undrained pop/apply must NOT delete the entry: a later Stash over the
-  // same store would then get an empty guard and its recovery would reclaim the still-
-  // draining claim. So the last of {last close, last claim settling} performs the cleanup.
-  #dropSharedGuardIfIdle() {
-    if (this.#guardIdentity === undefined) return;
-    const shared = CLAIM_GUARDS.get(this.#guardIdentity);
-    if (shared !== undefined && shared.holders <= 0 && shared.guard.size === 0) CLAIM_GUARDS.delete(this.#guardIdentity);
+    if (n > 0) this.#liveClaims.set(ref, n);
+    else this.#liveClaims.delete(ref);
   }
   // Force the next public verb to re-run #recover. Called when a claim resolution
   // FAULTS (restore / commit / burn threw): the on-disk claim may still stand as an
@@ -463,22 +477,10 @@ export class Stash extends EventEmitter {
       }
     }
     this.#backend = backend;
-    // Bind the per-store live-claim guard (SPEC.md 6). Two Stash over the same store share
-    // ONE guard so neither's recovery age-reclaims the other's live read. The key is the
-    // backend's declared identity (the disk root, a memory instance tag) or -- for a
-    // backend that declares none (a custom or wrapper backend) -- the backend OBJECT
-    // itself, so two Stash over the SAME instance still coordinate; only distinct
-    // identity-less objects get distinct guards (they are distinct stores as far as this
-    // process can tell). The registry entry is dropped once the store is fully idle.
-    const key = backend.identity !== undefined ? backend.identity : backend;
-    let shared = CLAIM_GUARDS.get(key);
-    if (shared === undefined) {
-      shared = { guard: new Map(), holders: 0 };
-      CLAIM_GUARDS.set(key, shared);
-    }
-    shared.holders += 1;
-    this.#guardIdentity = key;
-    this.#liveClaims = shared.guard;
+    // The per-store live-claim guard binds LAZILY, on the first #recover -- never here:
+    // a backend's canonical identity (e.g. the disk root's realpath) is only stable after
+    // its lazy init has run, and the constructor does no backend I/O. Until then this
+    // instance has no claims to guard.
     this.#ttlMs = parse(opts.ttl, "ttl");
     // A ttl can be a valid duration yet place expiresAt (createdAt + ttl) past
     // the safe integer range, which make() refuses at push. Catch an unusable
@@ -648,6 +650,7 @@ export class Stash extends EventEmitter {
     const gen = ++this.#recoverGen; // this scan's generation; a forced reschedule during it bumps this
     this.#recovered = (async () => {
       const claims = await this.#backend.listClaims();
+      this.#ensureGuardBound(); // listClaims has run the backend's lazy init -> its identity is now stable
       const now = Date.now();
       let nextAt = Infinity;
       for (const { id, claimedAt } of claims) {
@@ -1665,18 +1668,11 @@ export class Stash extends EventEmitter {
    *   }
    */
   async close() {
-    // Release this instance's hold on the per-store shared guard. Idempotent via
-    // #guardReleased (a second close() must not double-decrement). The registry entry is
-    // dropped only once the store is fully idle -- no holders AND no live claims: closing
-    // while a pop/apply stream is still draining keeps the guard registered so a later
-    // Stash over the same store still sees the live claim (#dropSharedGuardIfIdle, also
-    // reached when that last claim settles). #guardIdentity is kept for that late cleanup.
-    if (this.#guardIdentity !== undefined && !this.#guardReleased) {
-      this.#guardReleased = true;
-      const shared = CLAIM_GUARDS.get(this.#guardIdentity);
-      if (shared !== undefined) shared.holders -= 1;
-      this.#dropSharedGuardIfIdle();
-    }
+    // close() does NOT release the per-store shared guard: it stops only the janitor and
+    // leaves the store fully usable (a closed store still serves push/apply/pop), so a
+    // claim taken after close, or a second Stash opened later over the same store, must
+    // still find the guard registered. The entry is released when this instance is garbage-
+    // collected (GUARD_REAP), never here.
     if (this.#sweepTimer !== null) {
       clearInterval(this.#sweepTimer);
       this.#sweepTimer = null;

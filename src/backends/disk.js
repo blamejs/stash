@@ -8,7 +8,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { constants as FS, realpathSync } from "node:fs";
+import { constants as FS } from "node:fs";
 import { link, lstat, lutimes, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -234,28 +234,17 @@ export class DiskBackend {
     this.#root = resolve(opts.root);
   }
 
-  // The store's process-wide identity: its CANONICAL root path. The policy layer keys its
-  // single-writer-per-root guard on it (SPEC.md 6), so two Stash over the SAME store --
+  // The store's process-wide identity: its CANONICAL root path, so the policy layer's
+  // single-writer-per-root guard (SPEC.md 6) coordinates two Stash over the SAME store --
   // even via distinct DiskBackend instances, and even through different path spellings (a
-  // relative vs absolute path, a symlink to the root, a case variant on a case-insensitive
-  // fs) -- coordinate as one writer and never age-reclaim each other's live reads.
-  // realpathSync canonicalizes symlinks + case; it needs the dir to exist, so before the
-  // lazy #init creates it we fall back to the resolved path (both openers canonicalize to
-  // the same key once it exists). This derives a coordination KEY only -- it is NOT the
-  // containment realpath (#containedDir); no operation ever trusts a path from here.
-  get identity() {
-    try {
-      return "disk:" + realpathSync(this.#root);
-    } catch (err) {
-      // Any filesystem reason the root cannot be canonicalized YET -- it does not exist (the
-      // lazy #init creates it), a parent component is a file (ENOTDIR), a permission wall
-      // (EACCES/EPERM) -- falls back to the resolved path for this coordination KEY; the
-      // real fault surfaces at first use when #init runs. Construction must not throw over a
-      // guard key. A non-filesystem error (no `code`) is genuinely unexpected -- surfaced.
-      if (err && typeof err.code === "string") return "disk:" + this.#root;
-      throw err;
-    }
-  }
+  // symlink to the root, a case variant on a case-insensitive fs) -- as one writer, so
+  // neither's recovery age-reclaims the other's live read. #init realpaths the root ONCE
+  // and caches it (#realRoot), so this getter is STABLE and does NO I/O: the policy layer
+  // binds the guard LAZILY, after the first operation has run #init, so it always reads the
+  // canonical value. The resolved path is only a placeholder for a read before init (which
+  // the lazy binding avoids). This is a coordination KEY only -- never the containment
+  // realpath (#containedDir); no operation trusts a path from here.
+  get identity() { return "disk:" + (this.#realRoot ?? this.#root); }
 
   // Lazy, memoized layout creation (constructors do no I/O). A failed
   // init clears the memo so the next operation retries instead of
