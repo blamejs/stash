@@ -1101,6 +1101,27 @@ suite("disk: crash recovery (SPEC 6)", () => {
     assert.deepEqual(await drain(await next.apply(fresh)), Buffer.from("healthy"), "the store still round-trips after the reap");
   });
 
+  test("a DIRECTORY-shaped corrupt sidecar on a stale claim is reaped by recovery, not left to wedge on EISDIR", async () => {
+    // A rarer sidecar corruption: the sidecar PATH is a directory, not a truncated file.
+    // stat() still throws IntegrityError (its shape check rejects a non-file), so recovery
+    // takes the same corrupt-entry cleanup -- but commit() must remove the directory-shaped
+    // sidecar RECURSIVELY, exactly as verify's repair does, or it throws EISDIR, leaves the
+    // claim standing, and re-wedges every verb on the same permanent EINTEGRITY denial.
+    const { root, stash } = freshStash();
+    const ref = await stash.push("budgeted", { reads: 2 });
+    plantClaim(root, ref); // blob -> claims/, stale mtime, sidecar left in meta/
+    rmSync(join(root, "meta", ref + ".json")); // replace the sidecar file...
+    mkdirSync(join(root, "meta", ref + ".json")); // ...with a directory (the corruption)
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    assert.deepEqual(await next.list(), [], "recovery reaped the directory-shaped corrupt sidecar; the store is not wedged");
+    for (const dir of ["claims", "meta", "blobs"]) {
+      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ holds no residue of the reaped corrupt entry`);
+    }
+    assert.equal((await next.tombstones()).length, 0, "the corrupt-entry cleanup writes no grave");
+    const fresh = await next.push("healthy");
+    assert.deepEqual(await drain(await next.apply(fresh)), Buffer.from("healthy"), "the store still round-trips after the reap");
+  });
+
   test("a planted symlink at claims/<id> is never followed off the store", { skip: !FILE_SYMLINKS }, async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("real");

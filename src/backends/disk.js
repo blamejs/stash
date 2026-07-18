@@ -1267,12 +1267,19 @@ export class DiskBackend {
   async commit(id) {
     assertValid(id);
     const metaDir = await this.#containedDir("meta");
-    await rm(join(metaDir, id + ".json"), { force: true });
+    // recursive: a corrupt sidecar can be DIRECTORY-shaped (or a symlink), not the normal
+    // regular file -- recovery finishing a destruction over such corruption must still
+    // reap it (matching verify's repair, which uses the same recursive rm), or commit
+    // throws EISDIR, the claim stands, and every later verb re-runs recovery and re-fails.
+    // `rm` removes a final-component symlink ITSELF, never following it (CWE-59/367);
+    // recursive is inert on a regular file.
+    await rm(join(metaDir, id + ".json"), { force: true, recursive: true });
     const claimsDir = await this.#containedDir("claims");
     // The claimed blob's read stream may have only just closed; on Windows its
     // handle can linger, so absorb the transient EPERM rather than fail the
-    // commit (force already makes an already-gone blob a no-op -- idempotent).
-    await _retryTransient(() => rm(join(claimsDir, id), { force: true }));
+    // commit (force already makes an already-gone blob a no-op -- idempotent). recursive
+    // for the same directory-shaped-corruption tolerance as the sidecar above.
+    await _retryTransient(() => rm(join(claimsDir, id), { force: true, recursive: true }));
   }
 
   // listClaims() -> { id, claimedAt }[]. The recovery scan's input. Same
