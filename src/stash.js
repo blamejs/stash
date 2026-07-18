@@ -629,10 +629,25 @@ export class Stash extends EventEmitter {
           continue;
         }
         let hasSidecar = true;
+        let corruptSidecar = false;
         try {
           await this.#backend.stat(id);
         } catch (err) {
           if (err instanceof RefNotFound) hasSidecar = false;
+          // A corrupt sidecar on a stale orphan claim -- a crash mid consumeRead
+          // rewrite leaves the sidecar unparsable while the blob stands in claims/ --
+          // is a DAMAGED entry recovery must RESOLVE, never rethrow. Rethrowing poisons
+          // the memoized scan, and every verb runs #recover first, so one corrupt
+          // claimed entry becomes a permanent store-wide EINTEGRITY denial; verify({
+          // repair }) is no escape, since it leaves a CLAIMED corrupt sidecar to recovery
+          // (#condemnIfUnclaimed). The entry is unreadable, so restore is meaningless --
+          // recovery finishes the destruction (the physical cleanup verify performs for
+          // an UNCLAIMED corrupt sidecar), no grave: damage repair is not a lifecycle
+          // destruction, so a healthy replica may still reconcile the id back. A
+          // STRUCTURAL layout fault also surfaces as IntegrityError, but the commit(id) /
+          // isClaimed(id) below re-drive the backend's containment, so genuine fs damage
+          // still throws and stays loud (the claim survives, the memo clears for a retry).
+          else if (err instanceof IntegrityError) corruptSidecar = true;
           else throw err;
         }
         // A grave already standing for this id means a TERMINAL #destroy (a pop or a
@@ -651,8 +666,8 @@ export class Stash extends EventEmitter {
         // swallow the fault; a claim still standing after a failed restore/commit is
         // a real fault, propagated to clear the memo for a retry.
         try {
-          if (graved || !hasSidecar) {
-            await this.#backend.commit(id); // finish a decided/interrupted destruction
+          if (graved || !hasSidecar || corruptSidecar) {
+            await this.#backend.commit(id); // finish a decided/interrupted destruction, or reap an unreadable one
           } else if (this.#onPopFailure === "burn") {
             // A stale read-claim burned by policy is a FRESH destruction -- it must leave
             // a grave (SPEC.md 4.4) or a replica could store() the id back, resurrecting

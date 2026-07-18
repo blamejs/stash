@@ -1072,6 +1072,35 @@ suite("disk: crash recovery (SPEC 6)", () => {
     await assert.rejects(next.apply(ref), RefNotFound, "one credit remained and is now spent -- not two");
   });
 
+  test("a corrupt sidecar on a stale claim is reaped by recovery, never left to wedge every verb", async () => {
+    // A crash mid consumeRead -- truncate(0) then death before the write-back --
+    // leaves a 0-byte, unparsable sidecar while the blob stands in claims/. On the
+    // next run recovery ages the orphan claim past the lease and stats it, which
+    // throws IntegrityError on the corrupt sidecar. Recovery must RESOLVE the damaged
+    // entry (finish the destruction -- the physical cleanup verify() defers here for a
+    // CLAIMED corrupt sidecar), never rethrow: a rethrow poisons the memoized #recover,
+    // and every verb runs it first, so one corrupt claimed entry becomes a permanent
+    // store-wide EINTEGRITY denial that verify({ repair }) cannot clear (it leaves a
+    // claimed corrupt sidecar to recovery). The entry is unreadable, so restore is
+    // meaningless and recovery reaps it.
+    const { root, stash } = freshStash();
+    const ref = await stash.push("budgeted", { reads: 2 });
+    plantClaim(root, ref); // blob -> claims/, stale mtime, sidecar left in meta/
+    truncateSync(join(root, "meta", ref + ".json"), 0); // the crash-mid-rewrite corruption
+    const next = new Stash({ backend: new DiskBackend({ root }) });
+    // A verb succeeds: recovery resolved the damaged claim rather than poisoning itself.
+    assert.deepEqual(await next.list(), [], "recovery reaped the corrupt claimed entry; the store is not wedged");
+    for (const dir of ["claims", "meta", "blobs"]) {
+      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ holds no residue of the reaped corrupt entry`);
+    }
+    // Corrupt-entry cleanup is damage repair, not a lifecycle destruction, so it leaves
+    // NO grave (verify's model) -- a healthy replica may legitimately reconcile the id back.
+    assert.equal((await next.tombstones()).length, 0, "the corrupt-entry cleanup writes no grave");
+    // And the store is fully live: it accepts new writes and serves them.
+    const fresh = await next.push("healthy");
+    assert.deepEqual(await drain(await next.apply(fresh)), Buffer.from("healthy"), "the store still round-trips after the reap");
+  });
+
   test("a planted symlink at claims/<id> is never followed off the store", { skip: !FILE_SYMLINKS }, async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("real");

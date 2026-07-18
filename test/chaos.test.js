@@ -12,7 +12,7 @@ import { suite, test, after } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 
-import { Stash } from "../src/index.js";
+import { Stash, IntegrityError } from "../src/index.js";
 import { generate } from "../src/ref.js";
 import { C } from "../src/constants.js";
 import { BACKENDS, drain, makeStoredEntry, wrapBackend, pollUntil } from "./_helpers.js";
@@ -378,6 +378,43 @@ for (const { name, create } of BACKENDS) {
       // times out) without the reschedule; reclaimed with it.
       await pollUntil(async () => { await stash.prune(); return !(await inner.isClaimed(victimRef)); }, { timeout: 6000 });
       assert.equal(await inner.isClaimed(victimRef), false, "a skipped live claim that later orphans via a faulted commit is still reclaimed");
+      await stash.close();
+    });
+
+    test("recovery resolves a corrupt-sidecar orphan claim instead of wedging every verb on EINTEGRITY (SPEC.md 6)", async () => {
+      // A crash mid consumeRead leaves a stale orphan claim whose sidecar is unparsable,
+      // so recovery's stat(id) throws IntegrityError. Recovery must FINISH the damaged
+      // entry's destruction, never rethrow: #recover is memoized and every verb runs it
+      // first, so a rethrow turns one corrupt claimed entry into a permanent store-wide
+      // EINTEGRITY denial. Backend-agnostic (a Map holds no corrupt sidecar), so the
+      // IntegrityError is injected on stat for the orphan and its staleness on listClaims;
+      // the fix routes it to commit, the physical cleanup verify performs for a corrupt
+      // sidecar -- no grave, since damage repair is not a lifecycle destruction.
+      const inner = create();
+      const setup = new Stash({ backend: inner, sweepInterval: null });
+      const orphanRef = await setup.push("orphan-bytes");
+      const orphanClaim = await inner.claim(orphanRef); // a prior run's abandoned claim
+      orphanClaim.source.on("error", () => {});
+      orphanClaim.source.destroy();
+
+      let commits = 0;
+      const backend = wrapBackend(inner, {
+        // Report the fresh claim as long past its lease (a stale orphan) ...
+        listClaims: async () => (await inner.listClaims()).map((c) => (c.id === orphanRef ? { ...c, claimedAt: c.claimedAt - 10 * 60_000 } : c)),
+        // ... and make its sidecar unreadable, the crash-mid-rewrite corruption.
+        stat: async (id) => { if (id === orphanRef) throw new IntegrityError("sidecar storage shape is damaged"); return inner.stat(id); },
+        commit: async (id) => { if (id === orphanRef) commits += 1; return inner.commit(id); },
+      });
+      const stash = new Stash({ backend, sweepInterval: null, claimTimeout: 60_000 });
+
+      // The first verb runs #recover: the orphan reads as stale, its stat throws
+      // IntegrityError -- recovery must reap it (commit), not rethrow into a wedge.
+      assert.deepEqual(await stash.list(), [], "recovery reaped the corrupt orphan; the store is not wedged");
+      assert.equal(commits, 1, "recovery finished the corrupt entry's destruction via commit, never a rethrow");
+      assert.equal((await stash.tombstones()).length, 0, "the corrupt-entry cleanup writes no grave");
+      // And every verb stays live -- no EINTEGRITY poisoning the memoized recover.
+      const fresh = await stash.push("healthy");
+      assert.ok((await stash.list()).some((e) => e.id === fresh), "the store still accepts and lists new writes");
       await stash.close();
     });
   });
