@@ -725,18 +725,22 @@ export class Stash extends EventEmitter {
             await this.#backend.commit(id); // finish a decided/interrupted destruction, or reap an unreadable one
           } else {
             // Restore a stale orphan that carries NO durable destruction intent. This does NOT
-            // silently drop a burn: a live `'burn'` failure destroys through #destroy, which
-            // writes the grave DURABLY BEFORE it commits, so a burn that got that far lands in the
-            // `graved` branch above and recovery FINISHES it -- its verdict is preserved. What
-            // reaches here is a claim with no grave: a crash orphan (a prior run died mid-read, its
-            // outcome unknowable), or a live burn that faulted before it could record the grave --
-            // which cannot be completed anyway, since committing without a grave would let a replica
-            // store() the id back (SPEC.md 4.4). For both, restoring is the only safe outcome:
-            // recovery never burns a claim whose destruction was not durably recorded, because
-            // across a crash the store cannot tell a read observed mid-delivery from one that read
-            // nothing, and silently destroying possibly-unread bytes is the worse failure. The
-            // entry survives for a retry; a caller needing at-most-once even across a crash must
-            // enforce it above the store.
+            // silently drop a burn: a live `'burn'` failure destroys through #destroy, which writes
+            // the grave DURABLY BEFORE it commits, so a burn that got that far lands in the `graved`
+            // branch above and recovery FINISHES it -- its verdict is preserved even if the commit
+            // itself faulted. What reaches HERE is a claim with no grave, one of:
+            //   (1) a crash orphan -- a prior run died mid-read, its outcome unknowable; or
+            //   (2) a live burn whose grave write PERMANENTLY faulted. writeTombstone retries
+            //       transient faults, so a fault that escaped it is real (a full disk, a denied
+            //       write), and a burn CANNOT be completed without a grave -- committing without one
+            //       would let a replica store() the id back (SPEC.md 4.4). The burn is impossible
+            //       under ANY policy, not a verdict being dropped.
+            // For both, restore is the only safe outcome: it neither strands the claim (retrying an
+            // impossible burn forever) nor destroys data that cannot be safely destroyed. Recovery
+            // never burns a claim whose destruction was not durably recorded, because across a crash
+            // the store cannot tell a read observed mid-delivery from one that read nothing, and
+            // silently destroying possibly-unread bytes is the worse failure. The entry survives for
+            // a retry; a caller needing at-most-once even across a crash enforces it above the store.
             await this.#backend.restore(id);
           }
         } catch (err) {
