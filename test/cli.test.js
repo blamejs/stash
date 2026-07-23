@@ -10,7 +10,7 @@
 import { after, suite, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, readdirSync, mkdirSync, chmodSync, statSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, mkdirSync, chmodSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -195,17 +195,6 @@ suite("cli", { skip: SANDBOXED }, () => {
     for (const d of ["blobs", "meta", "claims"]) mkdirSync(join(noTombstones, d), { recursive: true });
     assert.equal(runCli(["stats", "--root", noTombstones]).status, 2, "a layout missing tombstones/ is refused");
     assert.ok(!readdirSync(noTombstones).includes("tombstones"), "the CLI did not create the missing tombstones/ dir");
-  });
-
-  test("a pre-0.1.17 stash (the core dirs, no delivered/) is accepted, not rejected as 'not found'", async () => {
-    // 0.1.17 adds an auto-created delivered/ dir to the disk layout. A stash written by an
-    // older version has only the core four dirs; it must still be recognized and served, so
-    // the CLI requires the CORE dirs, not delivered/. Removing delivered/ simulates that root.
-    const root = await seed(async (s) => { await s.push("legacy entry"); });
-    rmSync(join(root, "delivered"), { recursive: true, force: true });
-    const { stdout, status } = runCli(["stats", "--root", root, "--json"]);
-    assert.equal(status, 0, "a stash without delivered/ is accepted");
-    assert.equal(JSON.parse(stdout).entries, 1, "and its entry is counted");
   });
 
   test("a malformed ref is refused (EBADREF) BEFORE the root is opened -- even a missing root", () => {

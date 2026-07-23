@@ -394,17 +394,15 @@ live-holder rule that step would let recovery burn or restore a once-only read o
 active drain. A crashed process leaves its live-claim set behind with it, so the next process
 starts empty and still reclaims every genuine orphan purely by age — crash recovery is unchanged.
 
-**Delivery-gated `'burn'` recovery.** `'burn'`'s rationale is that a read *attempt* may have
-observed the bytes — but a process that claimed an entry and then crashed *before streaming a
-single byte* observed nothing, so burning it would silently destroy never-read data. Recovery
-therefore burns an orphaned `'burn'` claim only if a byte actually reached a consumer; one that
-never delivered is **restored**, not destroyed. The read path records that observation the moment
-it emits the first byte — the backend's `markDelivered` writes a persistent marker it reports back
-through `listClaims` — so a later process's recovery can tell a delivered claim from an untouched
-one. The gating is for recovery of a *crashed* claim only: a **live** `'burn'` read that fails
-mid-drain (a dropped connection at 60%) is still burned in-process, because it demonstrably
-delivered bytes. A never-delivered orphan under the default `'restore'` policy was always restored;
-this only stops `'burn'` from turning a crash-before-any-read into data destruction.
+**Crash recovery always restores, never burns.** `onPopFailure` governs a **live** read that
+fails mid-drain: `'restore'` returns the entry, `'burn'` destroys it (a dropped connection at 60%
+loses it). That verdict is applied *in-process*, by the failing read's own handler. Crash recovery
+is different: a process that claimed an entry and then died observed nothing this later run can
+confirm, so recovery **always restores** a stale orphan and **never burns** it — even under
+`'burn'`. Burning on a crash would silently destroy data the consumer may never have read, and a
+crash cannot tell recovery whether a byte was served. So `'burn'` bounds only the live path; a
+crashed once-only read comes back and can be retried, which is the safe default when the store
+cannot know what was observed.
 
 `claimTimeout` bounds how long an orphan sits before recovery resolves it; set it to comfortably
 exceed the longest `pop`/budgeted read, since across an unclean restart a claim's age is the only
@@ -536,18 +534,17 @@ holds the bytes.
 {
   async write(id, readable, entry) {},  // → Entry; computes size + digest, hashing with the algorithm named by entry.digest's "<algo>:" prefix (default sha256)
   async read(id) {},                    // → Readable
-  async claim(id) {},                   // atomic; throws RefClaimed if already claimed; → { entry, source, token } (token identifies this claim)
+  async claim(id) {},                   // atomic; throws RefClaimed if already claimed
   async restore(id) {},                 // undo a claim
   async commit(id) {},                  // finalize a claim (delete)
   async remove(id) {},                  // → boolean
   async stat(id) {},                    // → Entry
   async list() {},                      // → Entry[]  (loud over a corrupt sidecar)
   async listReconcilable() {},          // → { entries, corrupt }  (list(), resilient over a corrupt sidecar for §4.4 reconciliation)
-  async listClaims() {},                // → { id, claimedAt, delivered }[]  (for recovery; delivered gates 'burn', §6)
+  async listClaims() {},                // → { id, claimedAt }[]  (for recovery)
   async stats() {},                     // → { entries, bytes, claimed }
   async consumeRead(id) {},             // atomic readsLeft decrement → remaining
   async isClaimed(id) {},               // → boolean (a contended reader probes before the advisory stat)
-  async markDelivered(id, token) {},    // record (persistently) that a byte of the claim `token` identifies reached a consumer (§6 delivery-gated burn)
   async writeTombstone(id, t) {},       // first-write-wins; t is { id, destroyedAt, cause }
   async hasTombstone(id) {},            // → boolean
   async listTombstones() {},            // → Tombstone[]
@@ -567,7 +564,7 @@ encryption) kept outside the policy layer per §3.
 The stability discipline is the one §10 applies to error codes: the method set, its semantics
 (claim atomicity, `consumeRead` atomicity, tombstone first-write-wins, digest verification on
 read), and its error expectations change only with a change to this spec, and the two shipped
-backends' snapshotted 19-method surface is normative for the contract — a snapshot refresh that
+backends' snapshotted 18-method surface is normative for the contract — a snapshot refresh that
 reshaped a backend method is a spec change, not a routine one. Pre-1.0 there are no
 backwards-compat shims (§2, §11): operators upgrade across a breaking change, and this contract
 is stable *within a version line* and versioned with the package.

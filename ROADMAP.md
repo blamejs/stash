@@ -171,17 +171,15 @@ inherited `Object.prototype` member as a phantom; both now gate membership on
 consumption guarantee, a soundness criterion for the `'burn'` pop-failure trade, the
 Node-floor rationale, and the memory backend's claim semantics without a filesystem.
 
-## Delivery-gated burn recovery + clock posture -- SHIPPED (0.1.17)
+## Crash recovery never burns + clock posture -- SHIPPED (0.1.17)
 
 `onPopFailure: 'burn'` destroys a read entry on the assumption a read attempt may have
 observed its bytes, but crash recovery applied it even to a claim whose process died
-before streaming a single byte -- a crash before any read became silent data
-destruction. Recovery is now delivery-gated: it burns an orphaned burn claim only if a
-byte actually reached a consumer, and restores one that never delivered; a live burn read
-that fails mid-drain is still burned. Backends gain a persistent delivery signal
-(`markDelivered` + a `delivered` field on `listClaims`) so the decision survives the
-crash, the conformance harness certifies it, and `verify()` reaps an orphaned marker as
-`orphan-delivered`. The store's wall-clock posture is now documented (SPEC.md 7.2) -- what
+before any byte was read -- turning a crash into silent data destruction. `onPopFailure`
+now governs only the LIVE read path (a mid-drain failure, resolved in-process); crash
+recovery of a stale orphan ALWAYS restores it, never burns, since a crashed process
+observed nothing recovery can confirm and a crashed once-only read is safer to hand back
+than to destroy. The store's wall-clock posture is now documented (SPEC.md 7.2) -- what
 each time-based decision reads and how the store behaves under a clock step in either
 direction -- and the README shows materializing an entry to a file in a single,
 digest-verified copy (there is no `materializeTo`: piping the verified stream is already

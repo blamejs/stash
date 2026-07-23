@@ -154,10 +154,6 @@
               "kind": "function",
               "arity": 0
             },
-            "markDelivered": {
-              "kind": "function",
-              "arity": 2
-            },
             "read": {
               "kind": "function",
               "arity": 1
@@ -201,10 +197,6 @@
     "backends/disk": {
       "kind": "object",
       "members": {
-        "CORE_SUBDIRS": {
-          "kind": "array",
-          "length": 4
-        },
         "DiskBackend": {
           "kind": "class",
           "arity": 1,
@@ -244,10 +236,6 @@
             "listTombstones": {
               "kind": "function",
               "arity": 0
-            },
-            "markDelivered": {
-              "kind": "function",
-              "arity": 2
             },
             "read": {
               "kind": "function",
@@ -289,7 +277,7 @@
         },
         "SUBDIRS": {
           "kind": "array",
-          "length": 5
+          "length": 4
         },
         "_writeAll": {
           "kind": "function",
