@@ -184,7 +184,7 @@ for (const { name, create } of BACKENDS) {
       // backend leaves a claim the process Stash never tracked -- a genuine orphan.
       const setup = new Stash({ backend: inner, sweepInterval: null });
       const orphanRef = await setup.push("orphan-data");
-      const big = Buffer.alloc(256 * C.BYTES.KIB, 0x65); // large enough that verify backpressures with no consumer -> genuinely mid-drain
+      const big = Buffer.alloc(256 * C.BYTES.KIB, 0x65); // large enough that the read backpressures with no consumer -> genuinely mid-drain
       const liveRef = await setup.push(big);
       const orphanClaim = await inner.claim(orphanRef); // the crashed prior run's abandoned claim
       orphanClaim.source.on("error", () => {});
@@ -200,9 +200,10 @@ for (const { name, create } of BACKENDS) {
       // Deliberately do NOT consume the stream: the reader holds the claim mid-drain,
       // longer than the lease, exactly as a slow drain crossing a forward step would.
 
-      // Wait past the lease for recovery to re-run, and confirm it fired by the orphan's
-      // grave. Crash recovery is untouched: the orphan (no live holder) IS reclaimed.
-      await pollUntil(async () => (await stash.tombstones()).some((g) => g.id === orphanRef));
+      // Wait past the lease for recovery to re-run, and confirm it fired by the orphan being
+      // resolved. Crash recovery is untouched: the orphan (no live holder) IS reclaimed -- here
+      // RESTORED, since recovery never burns a crash orphan. list() drives the recovery scan.
+      await pollUntil(async () => { await stash.list(); return !(await inner.isClaimed(orphanRef)); });
       assert.equal(ended, false, "the live reader has not completed -- its claim is genuinely mid-drain");
       assert.equal(await inner.isClaimed(liveRef), true, "the live reader's claim survived the recovery re-scan");
       assert.equal((await stash.tombstones()).some((g) => g.id === liveRef), false,
@@ -213,6 +214,26 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual(await drain(stream), big, "the mid-drain read completes with the full, correct bytes");
       await pollUntil(async () => !(await present(stash, liveRef)));
       assert.ok((await stash.tombstones()).some((g) => g.id === liveRef), "the reader's own pop destroyed it exactly once");
+      await stash.close();
+    });
+
+    test("recovery RESTORES a crash orphan even under 'burn' -- it never burns a crashed read (SPEC.md 6)", { timeout: 10000 }, async () => {
+      // 'burn' governs a LIVE read that fails mid-drain, resolved in-process by its own onFail.
+      // Crash recovery of a PRIOR run's stale orphan always RESTORES, never burns: a crashed
+      // process observed nothing recovery can confirm, so destroying the entry would be silent
+      // data loss. The entry comes back and reads intact; no grave is written.
+      const inner = create();
+      const setup = new Stash({ backend: inner, sweepInterval: null });
+      const ref = await setup.push("crash-orphan bytes");
+      const orphan = await inner.claim(ref); // a prior run claimed it, then crashed
+      orphan.source.on("error", () => {});
+      orphan.source.destroy();
+
+      const stash = new Stash({ backend: inner, sweepInterval: null, onPopFailure: "burn", claimTimeout: 50 });
+      await pollUntil(async () => { await stash.list(); return !(await inner.isClaimed(ref)); }); // recovery resolves the orphan
+      assert.equal(await stash.has(ref), true, "the crash orphan is restored, not burned");
+      assert.equal((await stash.tombstones()).some((g) => g.id === ref), false, "no grave -- recovery destroyed nothing");
+      assert.deepEqual(await applyDrain(stash, ref), Buffer.from("crash-orphan bytes"), "the restored entry reads back intact");
       await stash.close();
     });
 
@@ -523,9 +544,9 @@ for (const { name, create } of BACKENDS) {
       stream.on("error", () => {});
 
       // Past the orphan's lease, a verb fires the mid-drain scan: it reclaims the orphan
-      // and SKIPS victim (live-guarded). Without rescheduling that skip, the scan ends
-      // with #nextRecoverAt = Infinity.
-      await pollUntil(async () => { await stash.prune(); return (await stash.tombstones()).some((g) => g.id === orphanRef); });
+      // (RESTORED -- recovery never burns a crash orphan) and SKIPS victim (live-guarded).
+      // Without rescheduling that skip, the scan ends with #nextRecoverAt = Infinity.
+      await pollUntil(async () => { await stash.prune(); return !(await inner.isClaimed(orphanRef)); });
 
       // The reader now finishes, but its terminal commit FAULTS once, leaving victim an
       // orphan (grave written, claim not committed); the finally drops the guard.

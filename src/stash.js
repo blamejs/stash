@@ -723,17 +723,24 @@ export class Stash extends EventEmitter {
         try {
           if (graved || !hasSidecar || corruptSidecar) {
             await this.#backend.commit(id); // finish a decided/interrupted destruction, or reap an unreadable one
-          } else if (this.#onPopFailure === "burn") {
-            // A stale read-claim burned by policy is a FRESH destruction -- it must leave
-            // a grave (SPEC.md 4.4) or a replica could store() the id back, resurrecting
-            // content the burn intended to remove. Grave BEFORE commit (the #destroy
-            // ordering). Recovery reconciles a PRIOR process's residue -- an entry this
-            // process's listeners never observed -- so it writes the durable grave but
-            // emits no event (unlike the live burn). The claim cannot say whether it was
-            // a pop or a budgeted read, so the grave records the generic read cause.
-            await this.#backend.writeTombstone(id, makeTombstone(id, "pop"));
-            await this.#backend.commit(id);
           } else {
+            // Restore a stale orphan that carries NO durable destruction intent. This does NOT
+            // silently drop a burn: a live `'burn'` failure destroys through #destroy, which writes
+            // the grave DURABLY BEFORE it commits, so a burn that got that far lands in the `graved`
+            // branch above and recovery FINISHES it -- its verdict is preserved even if the commit
+            // itself faulted. What reaches HERE is a claim with no grave, one of:
+            //   (1) a crash orphan -- a prior run died mid-read, its outcome unknowable; or
+            //   (2) a live burn whose grave write PERMANENTLY faulted. writeTombstone retries
+            //       transient faults, so a fault that escaped it is real (a full disk, a denied
+            //       write), and a burn CANNOT be completed without a grave -- committing without one
+            //       would let a replica store() the id back (SPEC.md 4.4). The burn is impossible
+            //       under ANY policy, not a verdict being dropped.
+            // For both, restore is the only safe outcome: it neither strands the claim (retrying an
+            // impossible burn forever) nor destroys data that cannot be safely destroyed. Recovery
+            // never burns a claim whose destruction was not durably recorded, because across a crash
+            // the store cannot tell a read observed mid-delivery from one that read nothing, and
+            // silently destroying possibly-unread bytes is the worse failure. The entry survives for
+            // a retry; a caller needing at-most-once even across a crash enforces it above the store.
             await this.#backend.restore(id);
           }
         } catch (err) {

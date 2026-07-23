@@ -240,6 +240,30 @@ throws a native `TypeError` at the call, before any storage is touched.
 
 <!-- END error-codes -->
 
+## Recipes
+
+**Materialize an entry to a file, in one copy.** There is deliberately no `materializeTo(dest)`
+method: `apply` already returns a digest-verified stream, so piping it to a destination is a single
+copy the store never buffers, the bytes are verified end to end, it works against any backend, and
+the write lands inside the caller's own filesystem grant. A store-side copy would give up the
+digest-verified read, cross the write-scope boundary (the store writes only within its own root),
+and only work on a filesystem backend. Use `apply`: on an entry with no read budget it is
+non-destructive, so a failed write leaves the source intact to retry. (On a read-budgeted entry,
+`apply` spends one credit per full drain and the budget-exhausting drain destroys it — so a
+retry there consumes another credit, and a materialization is best run against unbudgeted refs.)
+
+```js
+import { pipeline } from "node:stream/promises";
+import { createWriteStream } from "node:fs";
+
+// non-destructive for an unbudgeted entry: read a verified copy to the destination, entry stays put
+await pipeline(await stash.apply(ref), createWriteStream(dest));
+```
+
+To *move* an unbudgeted entry out of the store, materialize it with `apply` and then `drop(ref)`
+once the write has durably landed — never `pop` into a file, since a failed write would leave the
+entry destroyed and the file incomplete.
+
 ## Runnable examples
 
 Each is a plain-node script, zero dependencies, runnable straight from a clone:

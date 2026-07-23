@@ -365,7 +365,9 @@ So `pop` is a claim → stream → commit cycle:
 - `'restore'` **(default)** — rename the entry back. It survives and the read can be retried.
   Losing data by default would be hostile.
 - `'burn'` — delete it anyway, on the assumption that any read attempt means the bytes may have
-  been observed and the entry shouldn't survive to be read again. This must be opt-in.
+  been observed and the entry shouldn't survive to be read again. This must be opt-in. It governs
+  a **live** read that fails; a claim orphaned by a *crash* is always restored, never burned (see
+  *Crash recovery*).
 
 **When is `'burn'` sound?** `'burn'` deliberately reinstates the naive-`pop` hazard above: a
 reader whose connection drops at 60% loses the entry *and* got only half the bytes. So the
@@ -379,9 +381,9 @@ bug for your caller, the entry is irreplaceable and `'burn'` is the wrong policy
 ### Crash recovery
 
 If the process dies mid-`pop`, claimed entries are left orphaned. On the first operation after
-construction, `Stash` scans for claims older than `claimTimeout` (default `10m`) and resolves
-each per `onPopFailure`. The scan is lazy — it runs on first use, not in the constructor,
-because constructors don't do I/O.
+construction, `Stash` scans for claims older than `claimTimeout` (default `10m`) and **restores**
+each — recovery always restores a stale orphan and never burns, even under `'burn'` (see below).
+The scan is lazy — it runs on first use, not in the constructor, because constructors don't do I/O.
 
 This is a **single-writer-per-root** model: one process opens a disk root at a time, so that
 process is the sole claimant and knows which claims its own live `pop`/budgeted reads currently
@@ -390,9 +392,22 @@ age-reclaimed; the age of a claim — its file mtime measured against the wall c
 only for an **orphan**, a claim with no live holder, which under the single-writer model can only
 be a crashed prior run's. This matters because the wall clock is not monotonic: a forward step (an
 NTP correction, a VM-snapshot resume) can age a young claim past `claimTimeout`, and without the
-live-holder rule that step would let recovery burn or restore a once-only read out from under an
-active drain. A crashed process leaves its live-claim set behind with it, so the next process
+live-holder rule that step would let recovery restore a once-only read out from under an active
+drain — resurrecting bytes a reader is mid-way through. A crashed process leaves its live-claim set behind with it, so the next process
 starts empty and still reclaims every genuine orphan purely by age — crash recovery is unchanged.
+
+**Crash recovery always restores, never burns.** `onPopFailure` governs a **live** read that
+fails mid-drain: `'restore'` returns the entry, `'burn'` destroys it (a dropped connection at 60%
+loses it). That verdict is applied *in-process*, by the failing read's own handler. Crash recovery
+is different: a process that claimed an entry and then died observed nothing this later run can
+confirm, so recovery **always restores** a stale orphan and **never burns** it — even under
+`'burn'`. Burning on a crash would silently destroy data the consumer may never have read, and a
+crash cannot tell recovery whether a byte was served. So `'burn'` bounds only the live path; a
+crashed once-only read comes back and can be retried, which is the safe default when the store
+cannot know what was observed. The trade is explicit: a read that crashed *mid*-delivery is
+restored, not destroyed, so a caller that needs at-most-once delivery **even across a crash** must
+enforce that in its own layer — the store keeps the data rather than risk destroying bytes no one
+read.
 
 `claimTimeout` bounds how long an orphan sits before recovery resolves it; set it to comfortably
 exceed the longest `pop`/budgeted read, since across an unclean restart a claim's age is the only
@@ -438,6 +453,30 @@ Two caveats, both meaning this is additive and **does not replace the `unref()` 
 
 It's mainly for scripts and tests, where it replaces the `try/finally` around every test that
 needs a live `Stash`.
+
+### 7.2 Clock posture
+
+Every time-based decision reads the **wall clock** (`Date.now()`), not a monotonic source, because
+each must survive a process restart and — for expiry and tombstone pruning — agree across replicas
+that never share a monotonic origin:
+
+- **Expiry** compares `expiresAt` (stamped once at push, never extended) against the wall clock.
+  `expiresAt` is absolute, so replicas reach the same deadline independently (§4.4) — expiry is
+  deterministic, not skew-sensitive.
+- **Claim lease freshness** (`claimTimeout`) compares a claim's mtime against the wall clock, but
+  **only for an orphan** — a claim a live in-process reader holds is never age-reclaimed (§6), so a
+  clock step cannot reclaim a read mid-drain.
+- **Tombstone pruning** (`tombstoneTtl`) compares a grave's `destroyedAt` against the wall clock.
+
+Behavior under a wall-clock **step** follows from this. A **forward** step (an NTP correction, a
+VM-snapshot resume) can expire entries, age orphan claims, and prune graves earlier than their
+wall-clock terms — bounded, and for claims defused by the live-holder rule so a once-only read is
+never handed out twice or destroyed under an active drain. A **backward** step defers expiry, orphan
+recovery, and grave pruning by the step size; nothing is destroyed *early* by a backward step, and
+no entry ever outlives its push-time terms as a result (the monotone rule, §4.2, is never violated —
+a step changes only *when* a destruction the terms already permit is observed, never whether it
+happens). The store takes no dependency on clock monotonicity and installs no heartbeat or lease
+that the monotone rule forbids.
 
 ---
 
@@ -530,7 +569,7 @@ encryption) kept outside the policy layer per §3.
 The stability discipline is the one §10 applies to error codes: the method set, its semantics
 (claim atomicity, `consumeRead` atomicity, tombstone first-write-wins, digest verification on
 read), and its error expectations change only with a change to this spec, and the two shipped
-backends' snapshotted 17-method surface is normative for the contract — a snapshot refresh that
+backends' snapshotted 18-method surface is normative for the contract — a snapshot refresh that
 reshaped a backend method is a spec change, not a routine one. Pre-1.0 there are no
 backwards-compat shims (§2, §11): operators upgrade across a breaking change, and this contract
 is stable *within a version line* and versioned with the package.

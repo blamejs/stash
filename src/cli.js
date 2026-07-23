@@ -106,12 +106,11 @@ function resolveRoot(flags, env) {
 // the operator sees their own --root argument.
 function assertStashLayout(root) {
   // A real disk root carries the FULL layout; require EVERY directory #init creates
-  // (SUBDIRS, imported so this can never drift from the backend), so a partial or
-  // wrong directory is refused, not silently completed into an empty store -- #init
-  // would otherwise re-create any missing one on first use. A missing directory
-  // (ENOENT/ENOTDIR) is "no stash here" -- a usage error the operator fixes by
-  // correcting --root -- but an access or I/O fault (EACCES, ...) is a REAL fault
-  // surfaced distinctly, never masked as "not found".
+  // (SUBDIRS, imported so this can never drift from the backend), so a partial or wrong
+  // directory is refused, not silently completed into an empty store -- #init would
+  // otherwise re-create any missing one on first use. A missing directory (ENOENT/ENOTDIR)
+  // is "no stash here" -- a usage error the operator fixes by correcting --root -- but an
+  // access or I/O fault (EACCES, ...) is a REAL fault surfaced distinctly, never masked.
   for (const sub of SUBDIRS) {
     let st;
     try {

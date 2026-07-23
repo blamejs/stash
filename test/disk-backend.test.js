@@ -996,27 +996,17 @@ suite("disk: crash recovery (SPEC 6)", () => {
     assert.equal(existsSync(join(root, "blobs", ref)), true, "the blob is live under blobs/ again");
   });
 
-  test("an abandoned claim burns under onPopFailure:'burn', leaving a GRAVE and no live residue (no resurrection)", async () => {
+  test("an abandoned claim is RESTORED under onPopFailure:'burn' -- crash recovery never burns", async () => {
+    // 'burn' governs a LIVE read that fails mid-drain. Crash recovery of a stale orphan always
+    // RESTORES it, even under burn: a crashed process observed nothing recovery can confirm, so
+    // destroying it would be silent data loss (SPEC.md 6). The entry comes back, reads intact,
+    // and leaves no grave.
     const { root, stash } = freshStash();
-    const ref = await stash.push("condemned");
-    plantClaim(root, ref);
+    const ref = await stash.push("survivor");
+    plantClaim(root, ref); // a prior run claimed it, then crashed
     const next = new Stash({ backend: new DiskBackend({ root }), onPopFailure: "burn" });
-    await assert.rejects(next.apply(ref), RefNotFound);
-    for (const dir of ["blobs", "meta", "claims"]) {
-      assert.deepEqual(readdirSync(join(root, dir)), [], `${dir}/ holds no live residue`);
-    }
-    // A burn IS a destruction: it must leave a grave, or a replica could store() the id
-    // back and resurrect content the burn policy removed (SPEC.md 4.4).
-    const graves = await next.tombstones();
-    assert.equal(graves.length, 1, "the recovery burn left a grave");
-    assert.equal(graves[0].id, ref);
-    assert.ok(["pop", "spent"].includes(graves[0].cause), "the grave records a read-claim destruction");
-    const digest = "sha256:" + require$hash("reborn");
-    assert.equal(
-      await next.store({ id: ref, size: 6, digest, createdAt: 1, expiresAt: null, reads: null, readsLeft: null, meta: {} }, "reborn"),
-      false,
-      "the grave refuses resurrection via store()",
-    );
+    assert.deepEqual(await drain(await next.apply(ref)), Buffer.from("survivor"), "the crash orphan is restored and reads intact");
+    assert.deepEqual(await next.tombstones(), [], "recovery wrote no grave -- it destroyed nothing");
   });
 
   test("recovery FINISHES a decided destruction: a stale claim whose grave already stands is committed, never restored", async () => {

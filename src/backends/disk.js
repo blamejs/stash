@@ -22,6 +22,8 @@ import { options } from "../validate.js";
 // The disk layout's required directories, in one place: #init creates every one,
 // and a consumer that must recognize a real stash root (the CLI's layout pre-check)
 // validates against THIS set, so a new layout directory extends both at once.
+// The directories every disk stash root carries -- created by #init and required by the
+// CLI's layout check, so a partial or wrong directory is refused rather than filled in.
 export const SUBDIRS = ["blobs", "meta", "claims", "tombstones"];
 
 // A sidecar is one Entry's JSON: id + counters + caller meta. Far above

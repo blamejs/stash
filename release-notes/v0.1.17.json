@@ -1,0 +1,15 @@
+{
+  "version": "0.1.17",
+  "date": "2026-07-23",
+  "headline": "Crash recovery never destroys an entry: a stale claim left by a crashed process is always restored, never burned, even under `onPopFailure: 'burn'`. The store's clock posture is also documented.",
+  "summary": "The default `'restore'` policy has always kept a failed read's entry for retry. `'burn'` is the opt-in that destroys a read entry on the assumption that a read attempt may have observed its bytes -- but crash recovery applied it even to a claim whose process died before any byte was read, turning a crash into silent data destruction that burn's own rationale does not justify. `onPopFailure` now governs only the LIVE read path -- a read that fails mid-drain, resolved in-process by its own handler. Crash recovery of a stale orphan always RESTORES it and never burns, since a crashed process observed nothing recovery can confirm and handing a once-only read back for a retry is safer than destroying it. The store's wall-clock posture -- and its behavior under a clock step in either direction -- is now written down.",
+  "sections": {
+    "Fixed": [
+      "Under `onPopFailure: 'burn'`, crash recovery destroyed a stale claim left by a crashed process even when no byte had been read, turning a crash before any read into silent data destruction. `onPopFailure` now applies only to a LIVE read that fails mid-drain (resolved in-process); crash recovery of a stale orphan always RESTORES it and never burns, even under `'burn'`. The entry comes back for a retry and no tombstone is written. The default `'restore'` policy is unchanged."
+    ],
+    "Changed": [
+      "The store's clock posture is now documented (SPEC.md 7.2): every time-based decision -- expiry, claim-lease freshness, tombstone pruning -- reads the wall clock, because each must survive a restart and, for expiry and pruning, agree across replicas. Expiry and pruning are deterministic (an absolute `expiresAt` / `destroyedAt`, not skew-sensitive); a live reader's claim is immune to a clock step; and a backward step only defers a destruction the push-time terms already permit -- it never destroys an entry early nor lets one outlive its terms.",
+      "The README documents materializing an entry to a file in a single, digest-verified copy (`pipeline(await stash.apply(ref), createWriteStream(dest))`). The store deliberately offers no `materializeTo` method: a store-side copy would give up the digest-verified read, cross the store's write-scope boundary, and work only on a filesystem backend, where piping the verified stream is already single-copy and backend-agnostic."
+    ]
+  }
+}
