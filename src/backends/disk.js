@@ -793,10 +793,12 @@ export class DiskBackend {
   // unbounded walk (CWE-367). force AND recursive: the foreign/tmp shape may itself
   // be a tampered DIRECTORY, which repair must still reap; rm removes a
   // final-component symlink itself, never following it (CWE-59). Entries route
-  // through #condemn/remove, never here.
-  async #discard(subdir, name, kind, repaired) {
+  // through #condemn/remove, never here. `id` is the repaired record's ref id: null
+  // for a foreign name or a .tmp (no ref), but the ref itself for a ref-shaped marker
+  // (an orphan delivery marker), so the repaired record mirrors the finding's id.
+  async #discard(subdir, name, kind, repaired, id = null) {
     await rm(join(await this.#containedDir(subdir), name), { force: true, recursive: true });
-    repaired.push({ kind, id: null });
+    repaired.push({ kind, id });
   }
 
   // #isPresent(path) -> boolean. lstat probe: present -> true; ENOENT -> false; any
@@ -1034,7 +1036,7 @@ export class DiskBackend {
       }
       if (await this.#isPresent(join(claimsForDelivered, name))) continue; // its claim still stands
       findings.push({ kind: "orphan-delivered", id: name });
-      if (opts.repair) await this.#discard("delivered", name, "orphan-delivered", repaired);
+      if (opts.repair) await this.#discard("delivered", name, "orphan-delivered", repaired, name);
     }
 
     return { scanned: scanned.size, findings, repaired };

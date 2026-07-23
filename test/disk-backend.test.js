@@ -1530,8 +1530,9 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     const dry = await stash.verify();
     assert.deepEqual(dry.findings, [{ kind: "orphan-delivered", id: orphan }]);
     assert.equal(existsSync(join(root, "delivered", orphan)), true, "the dry run leaves it");
-    await stash.verify({ repair: true });
+    const rep = await stash.verify({ repair: true });
     assert.equal(existsSync(join(root, "delivered", orphan)), false, "repair reaps the orphan marker");
+    assert.deepEqual(rep.repaired, [{ kind: "orphan-delivered", id: orphan }], "the repair preserves the ref id, mirroring the finding");
   });
 
   test("a FRESH sidecarless blob is SPARED -- write() renames blob->final BEFORE the sidecar, so it may be an in-flight push (CWE-367)", async () => {
