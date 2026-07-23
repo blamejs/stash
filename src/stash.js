@@ -132,9 +132,11 @@ function _verifiedStream(entry, source, verdict) {
       // Best-effort: a marker-write failure still releases the byte, because the read's own
       // onCommit/onFail is the authoritative resolution and a lost marker only softens a later
       // crash's burn verdict toward restore (the data-safe direction), never fails the read. A
-      // crash before ANY chunk is emitted leaves it unmarked, so the never-streamed case
-      // restores precisely.
-      if (!delivered) {
+      // crash before ANY byte is emitted leaves it unmarked, so the never-streamed case
+      // restores precisely -- and an EMPTY chunk streams zero bytes, so it is not an
+      // observation either: delivery is marked on the first NON-EMPTY chunk, never a leading
+      // empty one, or a crash after an empty chunk would burn an entry no byte ever reached.
+      if (!delivered && chunk.length > 0) {
         delivered = true;
         if (verdict && verdict.onDeliver) {
           verdict.onDeliver().then(() => callback(null, chunk), () => callback(null, chunk));

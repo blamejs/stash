@@ -305,6 +305,30 @@ for (const { name, create } of BACKENDS) {
       await stash.close();
     });
 
+    test("under 'burn', a read of only empty chunks never marks delivery -- zero bytes is no observation (SPEC.md 6)", async () => {
+      // An empty chunk streams zero bytes, so it is not an observation: delivery is marked on
+      // the first NON-EMPTY byte, never a leading empty chunk. A backend that emits empty
+      // chunks (bytes and digest unchanged) must not flip the claim to delivered on them, or a
+      // crash right after would burn an entry no byte ever reached.
+      const inner = create();
+      const seed = new Stash({ backend: inner, sweepInterval: null });
+      const ref = await seed.push(Buffer.alloc(0)); // a zero-byte entry
+      let marked = false;
+      const backend = wrapBackend(inner, {
+        claim: async (id) => {
+          const { entry, source } = await inner.claim(id);
+          async function* empties() { yield Buffer.alloc(0); yield Buffer.alloc(0); for await (const c of source) yield c; }
+          return { entry, source: Readable.from(empties()) };
+        },
+        markDelivered: async (id) => { marked = true; return inner.markDelivered(id); },
+      });
+      const stash = new Stash({ backend, sweepInterval: null, onPopFailure: "burn" });
+      assert.equal((await drain(await stash.pop(ref))).length, 0, "the zero-byte entry reads back empty");
+      assert.equal(marked, false, "empty chunks stream zero bytes, so delivery is never marked");
+      await stash.close();
+      await seed.close();
+    });
+
     test("a FAULTED expired-restore in the claim window releases the live-claim guard, so recovery still reclaims the orphan (SPEC.md 6)", { timeout: 10000 }, async () => {
       // The early-expiry path in a claimed read (an entry live at the advisory #statLive
       // but lapsed by the time the claim is won -- fragile area 4) restores the claim and
