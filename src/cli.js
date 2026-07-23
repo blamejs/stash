@@ -139,8 +139,7 @@ const COMMANDS = {
 };
 
 // The subcommand names, exported so a test pins that --help documents every one --
-// a new command added to COMMANDS but not to HELP is a drift the suite catches (the
-// drift-free-help discipline without a separate snapshot).
+// a command added to COMMANDS but not to HELP is caught by the test suite.
 export const COMMAND_NAMES = Object.freeze(Object.keys(COMMANDS));
 
 // A fresh one-shot Stash over the root: no sweep timer (construct, run one verb,
@@ -270,8 +269,8 @@ export async function main(argv, io) {
     return EXIT.USAGE;
   }
   // A ref argument is validated at the whitelist BEFORE the root is opened -- ref
-  // validation precedes any storage access (hard rule 4), so a malformed ref is
-  // refused with zero filesystem I/O, regardless of the root's state.
+  // validation precedes any storage access, so a malformed ref is refused with zero
+  // filesystem I/O, regardless of the root's state.
   if (spec.refPositional && !isValid(parsed.positionals[0])) {
     io.err.write("stashjs: EBADREF\n");
     return EXIT.BAD_REF;

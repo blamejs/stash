@@ -18,7 +18,7 @@ services:
     # a version (WIKI_IMAGE_TAG in an .env file alongside this compose
     # file), so a forgotten `docker compose pull` doesn't silently
     # upgrade, and an upgrade is one variable away.
-    image: ghcr.io/blamejs/stash-wiki:${WIKI_IMAGE_TAG:-0.1.17}
+    image: ghcr.io/blamejs/stash-wiki:${WIKI_IMAGE_TAG:-0.1.18}
     build: !reset null
     container_name: stash-wiki
     # Not exposed on the host -- only Caddy reaches it on the internal net.

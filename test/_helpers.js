@@ -4,7 +4,7 @@
 // Shared test helpers -- the backend conformance factories, stream/entry
 // fixtures, and the poll/retry primitives, in one home so the conformance suite,
 // the disk suite, the model and chaos suites, and the CLI suite all compose the
-// SAME fixtures rather than re-rolling them (drift rule 4). A helper needed by a
+// SAME fixtures rather than re-rolling them. A helper needed by a
 // second test file moves here; nothing below constructs a mock a suite could not
 // reuse. Not a test file itself (no `test(...)`), so `node --test` does not run it.
 
@@ -21,9 +21,9 @@ import { freshScratchDir } from "./_scratch.js";
 // needs the capability. The library itself is what must pass sandboxed.
 export const SANDBOXED = typeof process.permission !== "undefined";
 
-// pollUntil(fn) -- resolve once fn() is truthy, reject on timeout. The
-// drift-rule-6b wait: poll a condition for an event, never sleep a fixed span.
-// (A fixed passive window appears only to prove the ABSENCE of an event.)
+// pollUntil(fn) -- resolve once fn() is truthy, reject on timeout. Poll a
+// condition for an event, never sleep a fixed span. (A fixed passive window
+// appears only to prove the ABSENCE of an event.)
 export async function pollUntil(fn, { timeout = 3000, step = 5 } = {}) {
   const deadline = Date.now() + timeout;
   for (;;) {

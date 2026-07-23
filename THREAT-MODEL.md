@@ -9,9 +9,8 @@ would love to escape. This document states what the library defends, where
 the trust boundaries are, the threat classes it is designed against, and
 what is explicitly out of scope.
 
-Every defense below is **implemented**: the SPEC.md section 12 delivery plan
-(M1-M8) is complete as of 0.1.10, and the store is feature-complete pre-1.0.
-Each defense notes the milestone that shipped it.
+Every defense below is **implemented** in the shipped store, which is
+feature-complete pre-1.0.
 
 ## Assets
 
@@ -31,11 +30,11 @@ Each defense notes the milestone that shipped it.
 
 | Input | Trust | Handling |
 |---|---|---|
-| Refs arriving at any public method | **Untrusted** | Whitelist regex (`/^v1_[A-Za-z0-9_-]{43}$/`) before anything else; `InvalidRef` otherwise -- *implemented (M1)* |
-| Blob bytes (`push` sources) | **Untrusted, opaque** | Never interpreted, sniffed, or inspected; size-limited mid-stream -- *limits implemented (M4)* |
-| `meta` values | **Untrusted, opaque** | Round-tripped verbatim; never read, validated, indexed, or logged -- *implemented (M1)* |
-| Replication input (`store()` entries) | **Untrusted** | Full check order of SPEC.md section 4.4: ref whitelist, tombstone refusal, expiry no-op, idempotency, digest-conflict rejection -- *implemented (M7)* |
-| The filesystem under the stash root | **Semi-trusted** | Realpath containment, `lstat` symlink rejection, digest verification -- *implemented (M2/M5/M6)* |
+| Refs arriving at any public method | **Untrusted** | Whitelist regex (`/^v1_[A-Za-z0-9_-]{43}$/`) before anything else; `InvalidRef` otherwise |
+| Blob bytes (`push` sources) | **Untrusted, opaque** | Never interpreted, sniffed, or inspected; size-limited mid-stream |
+| `meta` values | **Untrusted, opaque** | Round-tripped verbatim; never read, validated, indexed, or logged |
+| Replication input (`store()` entries) | **Untrusted** | Full check order of SPEC.md section 4.4: ref whitelist, tombstone refusal, expiry no-op, idempotency, digest-conflict rejection |
+| The filesystem under the stash root | **Semi-trusted** | Realpath containment, `lstat` symlink rejection, digest verification |
 | Constructor options (backend, TTL, limits, policies) | **Operator-provided (trusted)** | Taken as configuration |
 
 ## Threat classes and design response
@@ -47,9 +46,8 @@ Each defense notes the milestone that shipped it.
    *chooses* not to decrypt is a promise; a store with nowhere for a key to
    live is an architecture, and only the second survives compulsion.
    Encryption belongs to the consumer, which is the thing with the key.
-   *Architectural; in force since M1 and enforced by an executable
-   invariant (the source greps clean of `createCipheriv` /
-   `createDecipheriv`; SPEC.md section 13.1).*
+   *Architectural, and enforced by an executable invariant: the source greps
+   clean of `createCipheriv` / `createDecipheriv` (SPEC.md section 13.1).*
 
 2. **Ref guessing and enumeration** (CWE-330, CWE-340; timing side of it CWE-208)**.** An attacker probes for entries they
    suspect exist. -> Refs are 256-bit random values, not content hashes --
@@ -57,15 +55,15 @@ Each defense notes the milestone that shipped it.
    make the store an enumeration oracle for "did someone stash this
    document." The digest is integrity-only and never accepted as a lookup
    key. Ref comparison uses `timingSafeEqual` so a comparison cannot leak
-   prefix matches. *Implemented (M1).*
+   prefix matches.
 
 3. **Path traversal via refs** (CWE-22/CWE-23, the Zip-Slip class)**.** Refs become filenames, so a hostile ref is
    a hostile path. -> Every ref entering a public method must match the
    whitelist regex character-for-character before it touches the
    filesystem; `../../etc/shadow` dies at the regex, not at the syscall.
    No normalization, no `path.resolve` rescue, no clean-it-up-and-continue.
-   *Implemented: whitelist since M1, revalidated at the disk backend's own
-   public boundary since M2.*
+   *The whitelist runs at every public method, and the disk backend
+   revalidates at its own public boundary.*
 
 4. **Symlink escape from the stash root** (CWE-59/CWE-61)**.** Something plants a symlink
    inside the root pointing outside it. -> Node's permission model follows
@@ -74,9 +72,9 @@ Each defense notes the milestone that shipped it.
    asserts every resolved blob/meta/claim path is still under that root
    (refusing with `InvalidRef` otherwise), and uses `lstat` rather than
    `stat` so a symlink where a blob should be reads as corruption, not a
-   blob. *Implemented (M2), with the planted-symlink and swapped-directory
-   vectors in the disk suite; the sidecar is also size-bounded before parse
-   (CWE-770) and strictly shape-validated (CWE-20).*
+   blob. *Planted-symlink and swapped-directory cases are covered; the
+   sidecar is also size-bounded before parse (CWE-770) and strictly
+   shape-validated (CWE-20).*
 
 5. **Push flood / disk fill** (CWE-400/CWE-770)**.** An attacker (or a curl loop) pushes until
    the disk is full. -> `maxSize` is enforced mid-stream (the write is
@@ -85,8 +83,8 @@ Each defense notes the milestone that shipped it.
    `StashFull`. There is **no eviction**: silently destroying the oldest
    entry to make room would turn a push flood into an attack on other
    people's data -- for a whistleblower drop, a denial-of-evidence
-   primitive. The loud rejection is the feature. *Limits implemented (M4).
-   No-eviction is a standing design rule (SPEC.md section 3).*
+   primitive. The loud rejection is the feature. *No-eviction is a standing
+   design rule (SPEC.md section 3).*
 
 6. **Partial-read data loss.** A destructive read's connection drops at
    60% and the bytes are gone while the reader got half a file. -> `pop`
@@ -95,7 +93,7 @@ Each defense notes the milestone that shipped it.
    `onPopFailure` policy -- `'restore'` by default (the entry survives for
    retry; losing data by default is hostile), `'burn'` as an explicit
    opt-in for stores that treat any read attempt as observation. Claims
-   orphaned by a crash are recovered per the same policy. *Implemented (M5).*
+   orphaned by a crash are recovered per the same policy.
 
 7. **Capability leakage through errors, logs, and telemetry** (CWE-209, CWE-532)**.** A ref in a
    log file is a leaked capability. -> No error message ever contains a
@@ -104,8 +102,8 @@ Each defense notes the milestone that shipped it.
    `stats()` surface returns aggregates only, never refs. Event payloads
    carry full entries by design -- the embedder owns the store -- and the
    no-refs-in-logs rule binds what the embedder writes out. *Typed errors
-   with the no-identifier rule implemented (M1); the logging and telemetry
-   prohibitions are standing design rules (SPEC.md sections 3 and 10).*
+   carry no identifier; the logging and telemetry prohibitions are standing
+   design rules (SPEC.md sections 3 and 10).*
 
 8. **Replication resurrection.** Naive sync copies a popped entry straight
    back from a replica that still holds it -- the dead walk. -> Every early
@@ -119,21 +117,22 @@ Each defense notes the milestone that shipped it.
    gap between reconciliations -- a knob only the deployment can set. And a
    read budget is enforced per store, so multi-replica serving degrades
    exactly-once to eventually-once; the spec directs consumers to a
-   cold-standby topology if they need the stronger guarantee. *Implemented (M7).*
+   cold-standby topology if they need the stronger guarantee.
 
 9. **Silent corruption** (the CWE-354 class, validated rather than skipped)**.** Bit rot or a tampered blob served as good bytes.
    -> A digest is computed during the write stream, verified incrementally
    on read, and a mismatch is a loud `IntegrityError`, never silent bad
    bytes; `verify()` audits the whole store for corrupt blobs, orphaned
    halves, and stale claims, and removes nothing without an explicit
-   `repair: true`. *Implemented (M2 digest-on-write, M5 verify-on-read, M6 audit).*
+   `repair: true`. *The digest is computed on write, verified incrementally on
+   read, and audited across the store by `verify()`.*
 
 As defense-in-depth around all of the above, the library is designed to run
 under Node's permission model with filesystem grants scoped to the stash
 root (SPEC.md section 2.1) -- no child processes, worker threads, native
 addons, or WASI; paths only, never file descriptors; fail loud on
-`ERR_ACCESS_DENIED` rather than silently degrading. The suite passing under
-`--permission` scoped to the test root is a CI gate from M2 onward. Note
+`ERR_ACCESS_DENIED` rather than silently degrading. The suite passes under
+`--permission` scoped to the test root, enforced as a CI gate. Note
 that `--permission` does not gate the network on this Node line; the store
 opens no sockets regardless, which is the actual guarantee.
 

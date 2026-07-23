@@ -48,8 +48,8 @@ export function options(opts, label, spec) {
 
 // oneOf(value, label, allowed) -> value | throws TypeError. A closed-enum
 // option: the value must be one of the `allowed` tokens or a config-time
-// TypeError names the label and the permitted set (onPopFailure is the first
-// consumer). The tokens are configuration vocabulary, not capabilities, so the
+// TypeError names the label and the permitted set (onPopFailure is one such
+// option). The tokens are configuration vocabulary, not capabilities, so the
 // allowed set is safe to echo; the message SHAPE is what stays static per
 // validator class, and the failing value is never quoted back.
 // @enforced-by validator-shape-reinlined

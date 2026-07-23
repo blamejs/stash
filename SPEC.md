@@ -579,11 +579,11 @@ The contract is executable. `@blamejs/stash/conformance` exports
 in-tree backends pass against any backend factory, driving the shipped `Stash` consumer path and
 asserting the frozen verdicts (`ENOREF`, `ECLAIMED`, `E2BIG`, `EFULL`). It imports no test
 runner — the caller wires their own (`node:test` or otherwise) — so a third-party backend proves
-interchangeability by running the identical cases, not by reading prose. The first shipped core
+interchangeability by running the identical cases, not by reading prose. The bundled conformance core
 covers round-trip fidelity across every source type, identity, expiry, limits, claim atomicity,
 read budgets, and tombstone first-write-wins; the fault-injection cases (planted corruption,
-crash recovery) that need to reach into a backend's storage stay in the in-tree suite until the
-contract grows an injection hook.
+crash recovery) that need to reach into a backend's storage remain in the in-tree suite, since the
+portable contract exposes no storage-injection hook.
 
 **DiskBackend** — layout:
 
@@ -700,7 +700,7 @@ resurrect, budgets converge to zero, and retrying an identical `store` is a no-o
 cold-standby sync sketch and the §2.1 permission flags.
 
 The M1-M8 plan above is the original delivery contract and is complete. Post-M8 additions extend
-it (each still spec-first, RED-vector-driven, and patch-versioned):
+it (each still spec-first, test-first, and patch-versioned):
 
 **M9 — Digest agility.** The integrity hash is a construct-time choice (§5): `digest` selects
 `sha256` (default) / `sha512` / `sha3-256` / `sha3-512` / `shake256`. The stored digest is

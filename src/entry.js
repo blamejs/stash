@@ -6,9 +6,9 @@
 //
 // entry -- the canonical Entry structure (SPEC.md 4), defined ONCE.
 //
-// One structure, both directions: every path that constructs an entry
-// (push today; the disk backend's meta read at M2, store()'s replication
-// input at M7) composes this module, so the writer's shape and a reader's
+// One structure, both directions: every path that constructs an entry --
+// a push, the disk backend's meta read, store()'s replication input --
+// composes this module, so the writer's shape and a reader's
 // validation can never diverge. A second Entry construction site is the
 // bug class this file exists to prevent -- the readsLeft field-literal
 // shape is detector-enforced.
@@ -148,7 +148,7 @@ export const CAUSES = Object.freeze(["pop", "drop", "clear", "spent"]);
 // makeTombstone(id, cause) -> a fresh tombstone. `destroyedAt` is stamped from
 // the one clock read at the single construction site (the Entry.make precedent),
 // so a grave's timestamp is never assembled from two reads. The write direction
-// of the tombstone shape; the milestone module never hand-rolls a `{ id,
+// of the tombstone shape; no other module hand-rolls a `{ id,
 // destroyedAt, cause }` literal (the field-literal shape is detector-enforced).
 // @enforced-by guard-shape-reinlined
 // @guard-shape destroyedAt\s*:

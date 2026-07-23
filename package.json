@@ -1,6 +1,6 @@
 {
   "name": "@blamejs/stash",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Zero-dependency, ephemeral, crypto-agnostic content store for Node.js. Bytes in, ref out; bytes out once, and they're gone.",
   "keywords": [
     "stash",

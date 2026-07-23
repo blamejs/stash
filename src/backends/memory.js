@@ -110,7 +110,7 @@ export class MemoryBackend {
   // entry -- its digest carries the self-describing algorithm (a fresh push's pending
   // "<algo>:" marker, a replicated entry's full "<algo>:<hex>") -- so the policy
   // layer's selection reaches the backend through the documented argument, not an
-  // out-of-band one; a markerless entry defaults to sha256, byte-identical to before.
+  // out-of-band one; a markerless entry defaults to sha256.
   // Every retained chunk is an OWNED COPY: the store outlives the push, so a caller
   // that reuses its chunk buffer after a yield (a scratch buffer, a pooled slab) must
   // not be able to rewrite stored bytes out from under the recorded digest.
@@ -220,7 +220,8 @@ export class MemoryBackend {
   }
 
   // listClaims() -> { id, claimedAt }[]. The recovery scan reads this to resolve
-  // claims a prior run abandoned; no operator-facing claim inspection ships in M5.
+  // claims a prior run abandoned; it is an internal recovery input, not an
+  // operator-facing claim-inspection API.
   async listClaims() {
     const out = [];
     for (const [id, held] of this.#claims) out.push({ id, claimedAt: held.claimedAt });
@@ -343,7 +344,7 @@ export class MemoryBackend {
   }
 
   // removeTombstone(id) -> boolean. Delete a grave (ttl pruning). true if one was
-  // held. SPEC.md 9 gains this row alongside the write/has/list methods.
+  // held. SPEC.md 9 lists this alongside the write/has/list tombstone methods.
   async removeTombstone(id) {
     assertValid(id);
     return this.#tombstones.delete(id);

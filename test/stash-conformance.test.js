@@ -1415,7 +1415,7 @@ suite("M3 lifecycle: sweeper, close, disposal (SPEC.md 7, 7.1)", () => {
     const stash = new Stash({ backend: new MemoryBackend(), sweepInterval: 5 });
     await stash.close();
     await stash.push("x", { ttl: 0 });
-    // absence window (drift rule 6b): prove NO sweep runs after close
+    // absence window: prove NO sweep runs after close
     await new Promise((r) => setTimeout(r, 60));
     assert.equal((await stash.list({ includeExpired: true })).length, 1);
   });
