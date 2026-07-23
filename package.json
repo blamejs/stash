@@ -37,9 +37,12 @@
     "src/",
     "CHANGELOG.md",
     "LICENSE",
+    "LTS-CALENDAR.md",
     "MIGRATING.md",
     "NOTICE",
     "README.md",
+    "ROADMAP.md",
+    "SECURITY.md",
     "SPEC.md"
   ],
   "scripts": {

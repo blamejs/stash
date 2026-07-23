@@ -32,6 +32,12 @@ operator can be compelled to.
   security-only patches beginning when its successor ships, on the
   zero-dependency posture (no third-party CVE lane -- a vulnerability is in
   this library's code or in Node itself). The Node floor is 24.18.0.
+- The published package now includes the support-window calendar
+  (LTS-CALENDAR.md), the vulnerability-disclosure policy (SECURITY.md), and
+  the roadmap (ROADMAP.md) alongside the changelog, migration guide, and
+  spec, so every cross-reference in the packaged README resolves for a
+  consumer reading the extracted tarball rather than pointing at a file the
+  package omits.
 
 ## 0.1.18 — 2026-07-23
 

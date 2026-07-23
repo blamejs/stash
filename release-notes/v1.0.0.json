@@ -6,7 +6,8 @@
   "sections": {
     "Changed": [
       "The public API surface is declared stable under semantic versioning. Every verb (`push`, `apply`, `pop`, `show`, `has`, `list`, `reconcilable`, `stats`, `tombstones`, `store`, `drop`, `clear`, `verify`, `prune`, `close`), every constructor option, every typed error code, the ref format, and the on-disk sidecar format are covered: a breaking change ships a new major, preceded by a deprecation warning at least one minor ahead and a migration recipe. See MIGRATING.md and LTS-CALENDAR.md.",
-      "The support policy takes effect: each major receives 24 months of security-only patches beginning when its successor ships, on the zero-dependency posture (no third-party CVE lane -- a vulnerability is in this library's code or in Node itself). The Node floor is 24.18.0."
+      "The support policy takes effect: each major receives 24 months of security-only patches beginning when its successor ships, on the zero-dependency posture (no third-party CVE lane -- a vulnerability is in this library's code or in Node itself). The Node floor is 24.18.0.",
+      "The published package now includes the support-window calendar (LTS-CALENDAR.md), the vulnerability-disclosure policy (SECURITY.md), and the roadmap (ROADMAP.md) alongside the changelog, migration guide, and spec, so every cross-reference in the packaged README resolves for a consumer reading the extracted tarball rather than pointing at a file the package omits."
     ]
   }
 }
