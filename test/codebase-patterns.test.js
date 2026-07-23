@@ -184,6 +184,7 @@ const VALID_ALLOW_CLASSES = {
   "validator-shape-reinlined": 1,
   "forbidden-crypto-token": 1,
   "digest-algo-hardcode": 1,
+  "prototype-key-confusion": 1,
   "sandbox-widening-import": 1,
   "permission-probe-branch": 1,
   "error-event-emit": 1,
@@ -332,6 +333,33 @@ test("digest-algo-hardcode -- no algorithm literal outside the digest registry",
   let bad = _scanLines(files, re, { prepare: _stripComments });
   bad = _filterMarkers(bad, "digest-algo-hardcode");
   _report("SPEC.md 5: no createHash(\"<algo>\") or \"<algo>:\" literal outside src/digest.js (the registry owns the algorithm set)", bad);
+});
+
+// ---------------------------------------------------------------------------
+// (1b) prototype-key-confusion -- untrusted-key registry membership (CWE-1321)
+// ---------------------------------------------------------------------------
+
+test("prototype-key-confusion -- no computed-member membership test against undefined", () => {
+  // reason: a store indexes registries by UNTRUSTED strings -- a stored
+  // digest's algorithm prefix (DIGESTS), a CLI subcommand token (COMMANDS).
+  // Testing membership with `registry[key] === undefined` (or `!== undefined`)
+  // reads through the prototype chain: a key naming an inherited
+  // Object.prototype member ("constructor", "__proto__", "toString", "valueOf")
+  // resolves to that member, is NOT undefined, and passes the membership test as
+  // a PHANTOM row the registry never defined (CWE-1321, prototype-key
+  // confusion). The phantom then defeats a `registry[key] ?? DEFAULT` fallback
+  // or slips past an unknown-command guard. Membership over a computed
+  // identifier key must go through `Object.hasOwn(registry, key)`, which never
+  // consults the prototype. The shape is a computed member (`ident[ident]`, not
+  // an array index `x[0]` or a string-literal key `x["k"]`) compared to
+  // undefined; comments are stripped so the prose above is untouched. The
+  // assign-then-compare variant (`const v = reg[key]; if (v === undefined)`) is
+  // pinned by the digest and CLI behavioral vectors, which drive an inherited
+  // key through the shipped read and command-dispatch paths.
+  const re = /[A-Za-z_$][\w$]*\[[A-Za-z_$][\w$]*\]\s*(?:===|!==)\s*undefined/;
+  let bad = _scanLines(_srcFiles(), re, { prepare: _stripComments });
+  bad = _filterMarkers(bad, "prototype-key-confusion");
+  _report("CWE-1321: no `registry[key] === undefined` membership test in src/ -- use Object.hasOwn (the prototype chain is not a registry row)", bad);
 });
 
 // ---------------------------------------------------------------------------
