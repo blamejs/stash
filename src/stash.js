@@ -725,11 +725,15 @@ export class Stash extends EventEmitter {
             await this.#backend.commit(id); // finish a decided/interrupted destruction, or reap an unreadable one
           } else {
             // Crash recovery ALWAYS restores a stale orphan, never burns it -- even under
-            // `onPopFailure: 'burn'`. A crashed process observed nothing recovery can confirm, so
-            // destroying the entry would be silent data loss (SPEC.md 6). `'burn'` governs a LIVE
-            // read that fails mid-drain, which its own onFail resolves in-process; recovery of a
-            // prior run's residue is restore-only, so the entry survives for a retry and no grave
-            // is written.
+            // `onPopFailure: 'burn'`. `'burn'` governs a LIVE read that fails mid-drain, which its
+            // own onFail resolves in-process; recovery of a prior run's residue is restore-only.
+            // This is a DELIBERATE trade, not an oversight: across a crash the store cannot know
+            // what a consumer observed, so it cannot tell a read that crashed mid-delivery (which a
+            // strict `'burn'` caller would want destroyed) from one that crashed before any byte
+            // (which must be kept). Given that ambiguity it always keeps the data -- silently
+            // destroying possibly-unread bytes is the worse failure than re-serving a once-only
+            // entry whose reader died. The entry survives for a retry and no grave is written; a
+            // caller needing at-most-once even across a crash must enforce it above the store.
             await this.#backend.restore(id);
           }
         } catch (err) {

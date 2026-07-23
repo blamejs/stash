@@ -404,7 +404,10 @@ confirm, so recovery **always restores** a stale orphan and **never burns** it â
 `'burn'`. Burning on a crash would silently destroy data the consumer may never have read, and a
 crash cannot tell recovery whether a byte was served. So `'burn'` bounds only the live path; a
 crashed once-only read comes back and can be retried, which is the safe default when the store
-cannot know what was observed.
+cannot know what was observed. The trade is explicit: a read that crashed *mid*-delivery is
+restored, not destroyed, so a caller that needs at-most-once delivery **even across a crash** must
+enforce that in its own layer â€” the store keeps the data rather than risk destroying bytes no one
+read.
 
 `claimTimeout` bounds how long an orphan sits before recovery resolves it; set it to comfortably
 exceed the longest `pop`/budgeted read, since across an unclean restart a claim's age is the only
