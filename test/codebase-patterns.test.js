@@ -340,27 +340,59 @@ test("digest-algo-hardcode -- no algorithm literal outside the digest registry",
 // (1b) prototype-key-confusion -- untrusted-key registry membership (CWE-1321)
 // ---------------------------------------------------------------------------
 
-test("prototype-key-confusion -- no computed-member membership test against undefined", () => {
-  // reason: a store indexes registries by UNTRUSTED strings -- a stored
-  // digest's algorithm prefix (DIGESTS), a CLI subcommand token (COMMANDS).
-  // Testing membership with `registry[key] === undefined` (or `!== undefined`)
-  // reads through the prototype chain: a key naming an inherited
-  // Object.prototype member ("constructor", "__proto__", "toString", "valueOf")
-  // resolves to that member, is NOT undefined, and passes the membership test as
-  // a PHANTOM row the registry never defined (CWE-1321, prototype-key
-  // confusion). The phantom then defeats a `registry[key] ?? DEFAULT` fallback
-  // or slips past an unknown-command guard. Membership over a computed
-  // identifier key must go through `Object.hasOwn(registry, key)`, which never
-  // consults the prototype. The shape is a computed member (`ident[ident]`, not
-  // an array index `x[0]` or a string-literal key `x["k"]`) compared to
-  // undefined; comments are stripped so the prose above is untouched. The
-  // assign-then-compare variant (`const v = reg[key]; if (v === undefined)`) is
-  // pinned by the digest and CLI behavioral vectors, which drive an inherited
-  // key through the shipped read and command-dispatch paths.
-  const re = /[A-Za-z_$][\w$]*\[[A-Za-z_$][\w$]*\]\s*(?:===|!==)\s*undefined/;
-  let bad = _scanLines(_srcFiles(), re, { prepare: _stripComments });
-  bad = _filterMarkers(bad, "prototype-key-confusion");
-  _report("CWE-1321: no `registry[key] === undefined` membership test in src/ -- use Object.hasOwn (the prototype chain is not a registry row)", bad);
+test("prototype-key-confusion -- no computed-member membership test that reads through the prototype", () => {
+  // reason: a store indexes registries by UNTRUSTED strings -- a stored digest's
+  // algorithm prefix (DIGESTS), a CLI subcommand token (COMMANDS). Any membership
+  // test over a computed identifier key that consults the prototype chain treats a
+  // key naming an inherited Object.prototype member ("constructor", "__proto__",
+  // "toString", "valueOf", "hasOwnProperty") as a PHANTOM row the registry never
+  // defined (CWE-1321): the member is not undefined, is truthy, is not null, and
+  // `in` finds it, so it defeats a `registry[key] ?? DEFAULT` fallback or slips
+  // past an unknown-key guard. Membership over a computed identifier key must go
+  // through `Object.hasOwn(registry, key)`, which never consults the prototype.
+  // Two unsafe shapes are caught, over comment- AND literal-stripped source (so
+  // prose, a string key `x["k"]`, and a " in " inside a string are all untouched,
+  // and an array index `x[0]` never matches an identifier key):
+  //   (a) inline      -- `reg[key] === undefined` / `!== undefined`
+  //   (b) assign-then -- `const v = reg[key];` ... `v === undefined` (the form two
+  //                      of the three original sites shipped in -- correlated by the
+  //                      bound name within a short window, whole-file not line-wise)
+  // Both target the `=== undefined` MEMBERSHIP test, whose only purpose is to ask
+  // whether a registry defines a computed key -- a high-signal shape (you would
+  // otherwise just use the value). The `in` operator also reads through the
+  // prototype, but it is deliberately NOT flagged: `key in obj` is the idiomatic,
+  // safe existence check when the KEY is trusted (`field in value` over the frozen
+  // FIELDS set, `key in opts` over the code-defined unimplemented list -- both
+  // fail closed), and the shape cannot distinguish a trusted key from an untrusted
+  // one, so flagging it would fire on innocent code. The untrusted-key registries
+  // in this tree (DIGESTS, COMMANDS) are read with `[key]`, covered by (a)/(b) and
+  // the Object.hasOwn discipline. A trusted-key `=== undefined` case that genuinely
+  // cannot use Object.hasOwn carries an `allow:prototype-key-confusion` marker; none
+  // exist today, so the tree is silent.
+  const INLINE = /[A-Za-z_$][\w$]*\[[A-Za-z_$][\w$]*\]\s*(?:===|!==)\s*undefined/;
+  const ASSIGN = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\[[A-Za-z_$][\w$]*\]\s*;[\s\S]{0,160}?\b\1\s*(?:===|!==)\s*undefined/g;
+  const bad = [];
+  for (const file of _srcFiles()) {
+    const rel = _relPath(file);
+    if (rel === SELF) continue;
+    const raw = _read(file);
+    const subject = _stripCommentsAndLiterals(raw);
+    const rawLines = _lines(raw);
+    const lines = _lines(subject);
+    for (let i = 0; i < lines.length; i++) {
+      if (INLINE.test(lines[i])) {
+        bad.push({ file: rel, line: i + 1, content: (rawLines[i] || lines[i]).trim() });
+      }
+    }
+    let m;
+    ASSIGN.lastIndex = 0;
+    while ((m = ASSIGN.exec(subject)) !== null) {
+      const lineNo = subject.slice(0, m.index).split("\n").length;
+      bad.push({ file: rel, line: lineNo, content: (rawLines[lineNo - 1] || "").trim() });
+    }
+  }
+  const filtered = _filterMarkers(bad, "prototype-key-confusion");
+  _report("CWE-1321: no prototype-consulting membership over a computed key in src/ -- use Object.hasOwn (the prototype chain is not a registry row)", filtered);
 });
 
 // ---------------------------------------------------------------------------

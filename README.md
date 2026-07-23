@@ -87,7 +87,7 @@ const stash = new Stash({ backend: new MemoryBackend() });
 
 ## What ships today
 
-The M1 + M2 + M3 + M4 + M5 + M6 + M7 surface (see `SPEC.md` section 12 for the full delivery plan):
+The complete delivery plan (`SPEC.md` section 12), plus digest agility, the `stashjs` CLI, and a consumable backend contract:
 
 - `push` / `pop` / `apply` / `show` / `has` / `list` / `reconcilable` / `stats` /
   `verify` / `store` / `tombstones` / `drop` / `clear` over either backend, with size

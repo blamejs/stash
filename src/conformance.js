@@ -152,6 +152,22 @@ export function runBackendConformance(factory, options) {
     assert.equal((await drain(await stash.apply(ref))).toString("utf8"), "alpha beta");
   });
 
+  test("round-trips mixed chunk types: a streamed string chunk and a typed-array chunk encode as bytes", async () => {
+    // A streamed string chunk is the ONLY way to reach the per-chunk UTF-8
+    // measurement and encoding of a source (a top-level string is converted to a
+    // Buffer before the stream runs), so a backend must size and encode it the same
+    // as the disk and memory backends do -- the byte length is UTF-8, not char count.
+    const stash = new Stash({ backend: create() });
+    async function* chunks() {
+      yield "text chunk ";
+      yield new Uint8Array([0x62, 0x79, 0x74, 0x65, 0x73]);
+    }
+    const ref = await stash.push(chunks());
+    const got = await drain(await stash.apply(ref));
+    assert.equal(got.toString("utf8"), "text chunk bytes");
+    assert.equal((await stash.show(ref)).size, got.length);
+  });
+
   test("stream chunks are copied at write: caller buffer reuse cannot rewrite stored bytes", async () => {
     // A source that reuses its chunk buffer after the yield -- the pooled
     // slab / scratch-buffer pattern. The store outlives the push, so a
