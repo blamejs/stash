@@ -47,6 +47,27 @@ import { assertValid, constantTimeEqual } from "../ref.js";
  * Storage is a private Map from id to `{ entry, chunks }`; nothing touches
  * the filesystem, so the permission-model posture costs nothing here.
  *
+ * Claim semantics (the pop cycle, SPEC.md 6) stand in for the disk backend's
+ * filesystem primitives without a filesystem. A `claim` atomically moves the
+ * entry out of the live Map into a separate claims Map; that move is
+ * synchronous within one method body -- no `await` between the "already
+ * claimed?" check and the move -- so on the single-threaded event loop the
+ * move ITSELF is the atomicity two concurrent pops race on: the first wins,
+ * the second sees the id already claimed and gets `RefClaimed`. That is the
+ * role the disk backend gives an atomic rename/link. `restore` returns a claim
+ * to the live map; `commit` destroys it. Claim freshness is a `claimedAt`
+ * wall-clock stamp on the in-memory claim record -- the analogue of the disk
+ * claim file's mtime -- and `verify` reports a claim older than `claimTimeout`
+ * as a stale claim, never repairing it (resolving one is recovery's job).
+ *
+ * The claims Map lives only in this process's heap, so a claim is
+ * process-lifetime: it dies with the process. A crash takes the whole store
+ * -- live entries, claims, and tombstones alike -- with it, so unlike the disk
+ * backend there is NO cross-process crash recovery here: nothing persists for a
+ * later run's recovery scan to reclaim by age. Use this backend only for a
+ * stash whose lifetime is the process's; reach for the disk backend when a
+ * claim, or the data, must survive a restart.
+ *
  * @example
  *   import { Stash } from "@blamejs/stash";
  *   import { MemoryBackend } from "@blamejs/stash/backends/memory";

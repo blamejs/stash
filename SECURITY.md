@@ -128,6 +128,19 @@ exception, a hang -- is reported as a crash. The harness lives in
   errors capability-free), and runs under the same `--permission` grant as the
   library.
 
+- **Only choose `onPopFailure: 'burn'` when a partial read must never be
+  retried.** The default `'restore'` is the safe choice for irreplaceable
+  bytes: a pop that fails or is aborted mid-stream (a dropped connection, a
+  digest mismatch) leaves the entry intact, so the read is simply retried and
+  nothing is lost. `'burn'` destroys the entry on that same failed drain -- no
+  second chance -- deliberately reinstating the data-loss the claim/stream/commit
+  cycle exists to prevent. It is sound only when the loss is acceptable: a
+  genuinely one-shot token whose bytes must not be served again even after a
+  broken read, or bytes the caller can re-obtain elsewhere. If losing the entry
+  to a dropped connection would be a bug for the caller, the bytes are
+  irreplaceable and `'burn'` is the wrong policy. The choice is store-wide and
+  fixed at construction; there is no per-`pop` override.
+
 - **Replication cannot resurrect a destroyed entry -- if `tombstoneTtl` is set
   right.** Every early destruction leaves a tombstone, and `store()` refuses a
   tombstoned id, so a `store` racing a `drop` (or a sync replaying an old copy)

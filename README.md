@@ -74,6 +74,17 @@ npm install @blamejs/stash
 
 Requires Node `>= 24.18.0`.
 
+The package is authored in ESM (`import`), but a CommonJS project can consume
+it with `require` on that Node floor -- no build step, no shim. The package
+graph has no top-level await, so Node loads it synchronously under `require`:
+
+```js
+const { Stash } = require("@blamejs/stash");
+const { MemoryBackend } = require("@blamejs/stash/backends/memory");
+
+const stash = new Stash({ backend: new MemoryBackend() });
+```
+
 ## What ships today
 
 The M1 + M2 + M3 + M4 + M5 + M6 + M7 surface (see `SPEC.md` section 12 for the full delivery plan):

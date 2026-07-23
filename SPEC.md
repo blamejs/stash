@@ -33,7 +33,15 @@ else. Stop and ask.
 
 - **Node 24.18.0.** `"engines": { "node": ">=24.18.0" }`, with a `.node-version` / `.nvmrc` of
   `24.18.0`. Treat this as a floor to build against: no polyfills, no compatibility shims, no
-  `if (nodeVersion < x)` branches for older runtimes.
+  `if (nodeVersion < x)` branches for older runtimes. The capabilities the store depends on all
+  arrived at the Node 24 *major* level, not in the `.18` patch: the stable permission model
+  (`--permission`, §2.1), V8 13.6 explicit resource management behind `Symbol.asyncDispose`
+  (§7.1), and `require(esm)` of the package's synchronous ESM graph (a CommonJS project can
+  `require` it with no build step). The specific `.18` patch is a conservative
+  security-currency floor — it keeps consumers on a maintained Node 24 patch rather than an
+  early 24.x carrying since-fixed defects — not a dependency on anything that first shipped in
+  that release. It is a floor, not a ceiling: any newer 24.x, and later majors per the
+  [LTS calendar](LTS-CALENDAR.md), are supported.
 - **Zero dependencies**, runtime and dev. Node builtins only; tests use `node:test` and
   `node:assert`. If something can't be done without adding a package, stop and ask.
 - **ESM only.** `"type": "module"`, plain JavaScript. No TypeScript, no build step, no
@@ -358,6 +366,15 @@ So `pop` is a claim → stream → commit cycle:
   Losing data by default would be hostile.
 - `'burn'` — delete it anyway, on the assumption that any read attempt means the bytes may have
   been observed and the entry shouldn't survive to be read again. This must be opt-in.
+
+**When is `'burn'` sound?** `'burn'` deliberately reinstates the naive-`pop` hazard above: a
+reader whose connection drops at 60% loses the entry *and* got only half the bytes. So the
+default `'restore'` is the right choice whenever the bytes are irreplaceable — a failed or
+aborted pop then leaves the entry intact and the read is simply retried. Choose `'burn'` only
+when a partial read must never be retried *and* the loss is acceptable: a genuinely one-shot
+token whose bytes must not be served twice even after a broken read, or bytes the caller can
+re-obtain from another source. If losing the entry to a dropped connection would be a data-loss
+bug for your caller, the entry is irreplaceable and `'burn'` is the wrong policy.
 
 ### Crash recovery
 
