@@ -132,18 +132,21 @@ function _verifiedStream(entry, source, verdict) {
       // Best-effort: a marker-write failure still releases the byte, because the read's own
       // onCommit/onFail is the authoritative resolution and a lost marker only softens a later
       // crash's burn verdict toward restore (the data-safe direction), never fails the read. A
-      // crash before ANY byte is emitted leaves it unmarked, so the never-streamed case
-      // restores precisely -- and an EMPTY chunk streams zero bytes, so it is not an
-      // observation either: delivery is marked on the first NON-EMPTY chunk, never a leading
-      // empty one, or a crash after an empty chunk would burn an entry no byte ever reached.
-      if (!delivered && chunk.length > 0) {
-        delivered = true;
-        if (verdict && verdict.onDeliver) {
-          verdict.onDeliver().then(() => callback(null, chunk), () => callback(null, chunk));
-          return;
-        }
-      }
+      // crash before ANY byte is handed off leaves it unmarked, so the never-streamed case
+      // restores precisely; an EMPTY chunk streams zero bytes, so it is not a byte and does not
+      // mark; and the byte is handed to the consumer FIRST -- delivery is recorded only AFTER a
+      // real byte is in the outbound pipeline, never before, so a crash cannot claim delivery
+      // for a byte that never left. The mark is fired fire-and-forget (no first-byte latency)
+      // and carries the claim's identity, so a mark that lands after the claim is resolved -- a
+      // budgeted id re-claimed for its next read -- records the OLD claim's identity and can
+      // never be read as the new claim's delivery. Best-effort/drop-silent (drift rule 8): the
+      // read's own onCommit/onFail is the authoritative resolution; a lost marker only softens the
+      // burn verdict of a subsequent crash toward restore (the data-safe direction), never fails
+      // the read.
+      const firstByte = !delivered && chunk.length > 0;
+      if (firstByte) delivered = true;
       callback(null, chunk);
+      if (firstByte && verdict && verdict.onDeliver) void verdict.onDeliver().catch(() => {});
     },
     async flush(callback) {
       const got = finalize(hash, algo);
@@ -802,9 +805,9 @@ export class Stash extends EventEmitter {
     // acquisition window; if the claim FAILS (RefClaimed to a loser, RefNotFound),
     // this drain never became the holder, so the guard is released.
     this.#guardClaim(ref);
-    let entry, source;
+    let entry, source, token;
     try {
-      ({ entry, source } = await this.#backend.claim(ref));
+      ({ entry, source, token } = await this.#backend.claim(ref));
     } catch (err) {
       this.#unguardClaim(ref);
       throw err;
@@ -833,7 +836,7 @@ export class Stash extends EventEmitter {
       // (unobserved -> restore, never destroy never-read data; SPEC.md 6). The default
       // 'restore' policy always restores an orphan, so it needs no marker and pays no
       // per-read cost. The marker rides the claim and is cleared on restore/commit.
-      onDeliver: this.#onPopFailure === "burn" ? () => this.#backend.markDelivered(ref) : undefined,
+      onDeliver: this.#onPopFailure === "burn" ? () => this.#backend.markDelivered(ref, token) : undefined,
       // Drop the live-holder guard once the verdict RESOLVES the claim (a destroy, a
       // debit+restore, or a burn), never before, and in a `finally` so a resolution
       // fault still releases it: the read is over, and a claim a faulted commit left

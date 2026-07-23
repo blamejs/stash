@@ -194,7 +194,7 @@ for (const { name, create } of BACKENDS) {
       const orphanClaim = await inner.claim(orphanRef); // the crashed prior run's abandoned claim
       orphanClaim.source.on("error", () => {});
       orphanClaim.source.destroy(); // close the read handle; the claim file itself remains
-      await inner.markDelivered(orphanRef); // it delivered a byte before crashing, so burn (its grave is the recovery-fired signal)
+      await inner.markDelivered(orphanRef, orphanClaim.token); // it delivered a byte before crashing, so burn (its grave is the recovery-fired signal)
 
       // The new process. A short lease + a reader parked past it reproduces the
       // forward-step condition (a live claim aged past claimTimeout).
@@ -252,7 +252,7 @@ for (const { name, create } of BACKENDS) {
       const orphan = await inner.claim(ref);
       orphan.source.on("error", () => {});
       orphan.source.destroy();
-      await inner.markDelivered(ref); // a byte reached a consumer before the crash
+      await inner.markDelivered(ref, orphan.token); // a byte reached a consumer before the crash
 
       const stash = new Stash({ backend: inner, sweepInterval: null, onPopFailure: "burn", claimTimeout: 50 });
       await pollUntil(async () => { await stash.list(); return (await stash.tombstones()).some((g) => g.id === ref); });
@@ -261,24 +261,29 @@ for (const { name, create } of BACKENDS) {
       await stash.close();
     });
 
-    test("under 'burn', a byte reaches the consumer only AFTER its delivery is recorded -- no fire-and-forget race leaves a stale marker (SPEC.md 6)", async () => {
-      // The mark must be durable BEFORE the first byte is released, not fire-and-forget: a
-      // mark landing late (after a budgeted read's restore cleared the marker) would leave a
-      // stale marker that makes a later never-delivered re-claim of the same id get BURNED --
-      // destroying never-read data. Delaying markDelivered proves the byte waits for it.
+    test("under 'burn', the delivery mark is recorded AFTER the byte is handed off, so a slow mark never delays the read (SPEC.md 6)", async () => {
+      // Delivery is recorded fire-and-forget once a real byte is in the outbound pipeline, never
+      // before -- so a byte is never counted delivered before it has left, and the consumer never
+      // waits on the marker write. Even a slow markDelivered does not hold up the read.
       const inner = create();
-      let marked = false;
-      let deliveredBeforeMark = false;
+      let markStarted = false;
+      let markDone = false;
+      let byteSeenBeforeMarkDone = false;
       const backend = wrapBackend(inner, {
-        markDelivered: async (id) => { await new Promise((r) => setImmediate(r)); marked = true; return inner.markDelivered(id); },
+        markDelivered: async (id, token) => {
+          markStarted = true;
+          await new Promise((r) => setTimeout(r, 30));
+          markDone = true;
+          return inner.markDelivered(id, token);
+        },
       });
       const stash = new Stash({ backend, sweepInterval: null, onPopFailure: "burn" });
-      const ref = await stash.push("observed payload");
+      const ref = await stash.push("payload bytes");
       const stream = await stash.pop(ref);
-      stream.on("data", () => { if (!marked) deliveredBeforeMark = true; });
-      await drain(stream);
-      assert.equal(deliveredBeforeMark, false, "no byte reached the consumer before markDelivered recorded it");
-      assert.equal(marked, true, "markDelivered ran");
+      stream.on("data", () => { if (!markDone) byteSeenBeforeMarkDone = true; });
+      assert.deepEqual(await drain(stream), Buffer.from("payload bytes"), "the read completes with the full bytes");
+      assert.equal(byteSeenBeforeMarkDone, true, "the byte reached the consumer without waiting for the slow delivery mark");
+      assert.equal(markStarted, true, "delivery was recorded");
       await stash.close();
     });
 
@@ -316,11 +321,11 @@ for (const { name, create } of BACKENDS) {
       let marked = false;
       const backend = wrapBackend(inner, {
         claim: async (id) => {
-          const { entry, source } = await inner.claim(id);
+          const { entry, source, token } = await inner.claim(id);
           async function* empties() { yield Buffer.alloc(0); yield Buffer.alloc(0); for await (const c of source) yield c; }
-          return { entry, source: Readable.from(empties()) };
+          return { entry, source: Readable.from(empties()), token };
         },
-        markDelivered: async (id) => { marked = true; return inner.markDelivered(id); },
+        markDelivered: async (id, token) => { marked = true; return inner.markDelivered(id, token); },
       });
       const stash = new Stash({ backend, sweepInterval: null, onPopFailure: "burn" });
       assert.equal((await drain(await stash.pop(ref))).length, 0, "the zero-byte entry reads back empty");
@@ -621,7 +626,7 @@ for (const { name, create } of BACKENDS) {
       const oc = await inner.claim(orphanRef); // young orphan: triggers the mid-drain re-scan
       oc.source.on("error", () => {});
       oc.source.destroy();
-      await inner.markDelivered(orphanRef); // delivered before crashing -> burn, so its grave marks the scan firing
+      await inner.markDelivered(orphanRef, oc.token); // delivered before crashing -> burn, so its grave marks the scan firing
       const big = Buffer.alloc(256 * C.BYTES.KIB, 0x68);
       const victimRef = await setup.push(big);
 

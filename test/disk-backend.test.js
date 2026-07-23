@@ -140,7 +140,8 @@ function plantClaim(root, ref, { ageMs = CLAIM_STALE_MS, dropSidecar = false, de
   // and recovery restores it (SPEC.md 6).
   if (delivered) {
     mkdirSync(join(root, "delivered"), { recursive: true });
-    writeFileSync(join(root, "delivered", ref), "");
+    // The marker's content is the claim's identity token (its mtime), so listClaims counts it.
+    writeFileSync(join(root, "delivered", ref), String(Math.floor(when.getTime())));
   }
 }
 

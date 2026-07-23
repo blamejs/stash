@@ -99,6 +99,11 @@ export class MemoryBackend {
   // holds bytes and moves them between states the policy layer directs.
   #claims = new Map();
 
+  // A per-claim identity, unique for the lifetime of this backend: markDelivered records
+  // delivery against the claim it was issued for, so a mark for a resolved claim cannot flip a
+  // re-claim of the same id (a budgeted read's next claim) to delivered.
+  #claimSeq = 0;
+
   // The store's process-wide identity. The policy layer keys its single-writer-per-root
   // guard on it (SPEC.md 6) so two Stash over one store never age-reclaim each other's
   // live reads. Per-instance for MemoryBackend (each instance is a separate store).
@@ -194,10 +199,12 @@ export class MemoryBackend {
     const held = this.#entries.get(id);
     if (held === undefined) throw new RefNotFound();
     this.#entries.delete(id);
-    this.#claims.set(id, { entry: held.entry, chunks: held.chunks, claimedAt: Date.now() });
+    const token = (this.#claimSeq += 1); // this claim's identity, for markDelivered
+    this.#claims.set(id, { entry: held.entry, chunks: held.chunks, claimedAt: Date.now(), token });
     return {
       entry: structuredClone(held.entry),
       source: Readable.from(held.chunks.map((buf) => Buffer.from(buf))),
+      token,
     };
   }
 
@@ -227,15 +234,16 @@ export class MemoryBackend {
     return out;
   }
 
-  // markDelivered(id) -> void. Record that a byte of this claim reached a consumer
-  // (SPEC.md 6, 9): recovery reads it via listClaims to burn an observed claim but
-  // restore a never-delivered one. The flag rides the in-heap claim record, so it
-  // vanishes with the claim on restore/commit and, like every memory claim, does not
-  // survive the process. A markDelivered for an id that is not claimed is a no-op --
-  // there is no claim for the marker to gate.
-  async markDelivered(id) {
+  // markDelivered(id, token) -> void. Record that a byte of the claim identified by `token`
+  // reached a consumer (SPEC.md 6, 9): recovery reads it via listClaims to burn an observed
+  // claim but restore a never-delivered one. Gated on the token, so a mark issued for a claim
+  // that has since been resolved -- and the id re-claimed for a budgeted read's next pass --
+  // finds the current claim's token different and does nothing, never flipping the new claim
+  // to delivered. The flag rides the in-heap claim record, so it vanishes with the claim on
+  // restore/commit and does not survive the process; a mark for an absent claim is a no-op.
+  async markDelivered(id, token) {
     const held = this.#claims.get(id);
-    if (held !== undefined) held.delivered = true;
+    if (held !== undefined && held.token === token) held.delivered = true;
   }
 
   // isClaimed(id) -> boolean. Advisory: is a live claim held on this id right now?

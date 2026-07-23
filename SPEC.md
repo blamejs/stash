@@ -536,7 +536,7 @@ holds the bytes.
 {
   async write(id, readable, entry) {},  // → Entry; computes size + digest, hashing with the algorithm named by entry.digest's "<algo>:" prefix (default sha256)
   async read(id) {},                    // → Readable
-  async claim(id) {},                   // atomic; throws RefClaimed if already claimed
+  async claim(id) {},                   // atomic; throws RefClaimed if already claimed; → { entry, source, token } (token identifies this claim)
   async restore(id) {},                 // undo a claim
   async commit(id) {},                  // finalize a claim (delete)
   async remove(id) {},                  // → boolean
@@ -547,7 +547,7 @@ holds the bytes.
   async stats() {},                     // → { entries, bytes, claimed }
   async consumeRead(id) {},             // atomic readsLeft decrement → remaining
   async isClaimed(id) {},               // → boolean (a contended reader probes before the advisory stat)
-  async markDelivered(id) {},           // record (persistently) that a byte of this claim reached a consumer (§6 delivery-gated burn)
+  async markDelivered(id, token) {},    // record (persistently) that a byte of the claim `token` identifies reached a consumer (§6 delivery-gated burn)
   async writeTombstone(id, t) {},       // first-write-wins; t is { id, destroyedAt, cause }
   async hasTombstone(id) {},            // → boolean
   async listTombstones() {},            // → Tombstone[]

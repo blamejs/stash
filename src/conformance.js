@@ -381,11 +381,15 @@ export function runBackendConformance(factory, options) {
     const before = claimedAs(await backend.listClaims());
     assert.ok(before, "the claim is listed");
     assert.equal(before.delivered, false, "a fresh claim reports delivered:false");
-    await backend.markDelivered(ref);
+    // The claim returns an identity token; markDelivered records delivery against it.
+    await backend.markDelivered(ref, claim.token);
     assert.equal(claimedAs(await backend.listClaims()).delivered, true, "markDelivered flips the claim to delivered:true");
     // Idempotent: a second mark is harmless.
-    await backend.markDelivered(ref);
+    await backend.markDelivered(ref, claim.token);
     assert.equal(claimedAs(await backend.listClaims()).delivered, true, "markDelivered is idempotent");
+    // A mark carrying a DIFFERENT identity does not flip this claim.
+    await backend.markDelivered(ref, "not-this-claim");
+    assert.equal(claimedAs(await backend.listClaims()).delivered, true, "an unmatched token leaves the prior delivered state");
     await backend.restore(ref); // resolve the claim so the case leaves nothing behind
   });
 

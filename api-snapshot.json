@@ -156,7 +156,7 @@
             },
             "markDelivered": {
               "kind": "function",
-              "arity": 1
+              "arity": 2
             },
             "read": {
               "kind": "function",
@@ -247,7 +247,7 @@
             },
             "markDelivered": {
               "kind": "function",
-              "arity": 1
+              "arity": 2
             },
             "read": {
               "kind": "function",

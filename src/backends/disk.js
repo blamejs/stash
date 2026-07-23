@@ -736,6 +736,12 @@ export class DiskBackend {
       // 4 fixes Stats at { entries, bytes, claimed }); counting graves is a future
       // amendment. This walk stays loud on a FOREIGN name here, like every layout dir.
     }
+    // delivered/: the burn-delivery markers -- ref-named, not part of the { entries, bytes,
+    // claimed } footprint, but this walk stays loud on a FOREIGN name here as in every layout dir.
+    for (const name of await readdir(await this.#containedDir("delivered"))) {
+      if (name.endsWith(".tmp")) continue;
+      if (!isValid(name)) throw new IntegrityError("store layout is damaged");
+    }
     return { entries, bytes, claimed };
   }
 
@@ -1191,8 +1197,8 @@ export class DiskBackend {
     await _retryTransient(() => rm(join(blobDir, id), { force: true }));
     // A fresh claim starts with NO delivery state (the memory backend's fresh-record
     // semantics): clear any residual marker so a budgeted id re-claimed after a prior read
-    // cannot inherit that read's delivered flag. The read path records delivery for THIS
-    // claim only after the mark is durably written and before the first byte is released.
+    // cannot inherit that read's delivered flag. Defense-in-depth -- the marker also carries
+    // the claim's identity, so a stale one would be ignored regardless.
     await rm(join(await this.#containedDir("delivered"), id), { force: true });
     // link does not touch mtime, so stamp claimedAt explicitly -- otherwise every
     // claim on an older entry would look instantly stale to recovery (fragile
@@ -1213,10 +1219,16 @@ export class DiskBackend {
     try {
       const claimedAt = Date.now();
       await lutimes(claimPath, new Date(claimedAt), new Date(claimedAt));
+      // The claim's identity token: floor(mtimeMs) read BACK, so it equals exactly what
+      // listClaims reports for this claim. The read path stamps a delivery marker with this
+      // value; listClaims treats the claim as delivered only when the marker carries it, so a
+      // marker left by a prior claim (a budgeted id re-claimed since) carries a different
+      // identity and is ignored.
+      const token = Math.floor((await lstat(claimPath)).mtimeMs);
       const entry = await this.stat(id); // the winner reads the sidecar (present)
       const damaged = "claimed blob storage shape is damaged";
       const fh = await this.#openStored(claimPath, () => new IntegrityError(damaged), damaged);
-      return { entry, source: fh.createReadStream() };
+      return { entry, source: fh.createReadStream(), token };
     } catch (err) {
       await this.restore(id).catch(() => {});
       throw err;
@@ -1355,11 +1367,20 @@ export class DiskBackend {
         _absent(err);
         continue;
       }
-      // `delivered` is a persistent marker file (delivered/<id>) the read path drops
-      // when the first byte reaches a consumer under 'burn' (SPEC.md 6); its presence
-      // survives the crash that orphaned the claim, so recovery can tell an observed
-      // read from an unobserved one and restore rather than destroy never-read data.
-      const delivered = await this.#isPresent(join(deliveredDir, name));
+      // `delivered` is a persistent marker file (delivered/<id>) the read path writes when
+      // the first byte reaches a consumer under 'burn' (SPEC.md 6); it survives the crash that
+      // orphaned the claim, so recovery can tell an observed read from an unobserved one and
+      // restore rather than destroy never-read data. The marker's CONTENT is the claim's
+      // identity (its claimedAt), so it counts only for THIS claim: a marker a since-resolved
+      // claim of the same id (a budgeted re-claim) left carries a different value and is ignored.
+      // Read no-follow; an absent, tampered, or unreadable marker is simply "not confirmed
+      // delivered", which restores -- the data-safe direction.
+      let delivered = false;
+      try {
+        const mh = await open(join(deliveredDir, name), READ_FLAGS);
+        try { delivered = (await mh.readFile("utf8")) === String(claimedAt); }
+        finally { await mh.close(); }
+      } catch { /* allow:catch-return-swallow -- no/refused/unreadable marker => not delivered (restore) */ }
       out.push({ id: name, claimedAt, delivered });
     }
     return out;
@@ -1370,21 +1391,35 @@ export class DiskBackend {
   // presence to decide burn (observed) vs restore (never observed). Idempotent (a "w"
   // create truncates a re-mark), contained, and metadata-durable exactly as the claim
   // link is -- the read path calls it only under 'burn', before it hands over the byte.
-  async markDelivered(id) {
+  async markDelivered(id, token) {
     assertValid(id);
-    // No claim, nothing to gate: a mark must never resurrect a marker for a claim that has
-    // been resolved (and, for a budgeted id, re-claimed) -- so it is a no-op unless the
-    // claim still stands, mirroring the memory backend's flag-on-the-live-record semantics.
+    // Gate on the claim's IDENTITY, not just its presence: a mark is a no-op unless the claim
+    // standing now is the one it was issued for (its mtime equals the token). A mark from a
+    // since-resolved claim of the same id -- a budgeted read's next pass re-claimed it -- carries
+    // the OLD identity and is ignored, so it can never flip the new claim to delivered nor
+    // overwrite its marker. Mirrors the memory backend's token check on the live record.
     const claimsDir = await this.#containedDir("claims");
-    if (!(await this.#isPresent(join(claimsDir, id)))) return;
+    let currentToken;
+    try {
+      currentToken = Math.floor((await lstat(join(claimsDir, id))).mtimeMs);
+    } catch (err) {
+      _absent(err); // no claim stands (ENOENT) -> nothing to mark; a real fault propagates
+      return;
+    }
+    if (currentToken !== token) return;
     const deliveredDir = await this.#containedDir("delivered");
     // O_NOFOLLOW | O_NONBLOCK, the discipline every other open in this backend holds: a
     // planted symlink at the marker path is refused (CWE-59), never followed to truncate an
     // out-of-store target, and a planted FIFO cannot park the open. O_CREAT | O_TRUNC keeps
-    // a re-mark idempotent.
+    // a re-mark idempotent. The content is the claim's identity token, so listClaims can tell
+    // a mark for THIS claim from one a since-resolved claim of the same id left behind.
     const flags = FS.O_WRONLY | FS.O_CREAT | FS.O_TRUNC | (FS.O_NOFOLLOW || 0) | (FS.O_NONBLOCK || 0);
     const fh = await open(join(deliveredDir, id), flags, FILE_MODE);
-    await fh.close();
+    try {
+      await _writeAll(fh, Buffer.from(String(token), "utf8"), 0);
+    } finally {
+      await fh.close();
+    }
   }
 
   // isClaimed(id) -> boolean. Advisory: is a live claim held on this id right now?

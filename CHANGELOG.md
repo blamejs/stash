@@ -20,15 +20,17 @@ wall-clock posture -- and its behavior under a clock step in either direction
 
 ### Changed
 
-- The SPEC.md 9 backend contract gains `markDelivered(id)` and a `delivered`
-  field on `listClaims()`: a backend records, persistently, that a byte of a
-  claim reached a consumer, so a later process's recovery can tell an
-  observed read from an unobserved one. The conformance harness
-  (`@blamejs/stash/conformance`) certifies it, so a custom backend proves the
-  same delivery-gated guarantee against the same cases the in-tree backends
-  pass. `verify()` gains an `orphan-delivered` finding -- a delivery marker
-  whose claim is gone is inert (ids never repeat) but is reaped under repair
-  as layout residue.
+- The SPEC.md 9 backend contract gains `markDelivered(id, token)` and a
+  `delivered` field on `listClaims()`, and `claim()` now returns an identity
+  `token`: a backend records, persistently, that a byte of a specific claim
+  reached a consumer, so a later process's recovery can tell an observed read
+  from an unobserved one -- and a mark issued for a claim since resolved (an
+  id re-claimed for a budgeted read's next pass) carries the old identity and
+  is ignored. The conformance harness (`@blamejs/stash/conformance`)
+  certifies it, so a custom backend proves the same delivery-gated guarantee
+  against the same cases the in-tree backends pass. `verify()` gains an
+  `orphan-delivered` finding -- a delivery marker whose claim is gone is
+  inert (ids never repeat) but is reaped under repair as layout residue.
 - The store's clock posture is now documented (SPEC.md 7.2): every time-based
   decision -- expiry, claim-lease freshness, tombstone pruning -- reads the
   wall clock, because each must survive a restart and, for expiry and
