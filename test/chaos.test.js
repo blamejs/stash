@@ -329,7 +329,11 @@ for (const { name, create } of BACKENDS) {
 
       parkInRestore = true;
       const inflight = stash.list().catch(() => {}); // the in-flight scan; parks resolving the orphan
-      await pollUntil(async () => scanParked);
+      // Generous window: reaching the park point runs a real disk recovery scan, which
+      // under a loaded parallel run can take well past the 3s default. This is setup, not
+      // the assertion -- the reclaim-speed discrimination is the tight poll below -- so a
+      // long budget (within the test's 15s timeout) only tolerates a starved machine.
+      await pollUntil(async () => scanParked, { timeout: 12000 });
 
       // With the scan parked mid-resolve, the pop's commit faults -> forced re-scan (deadline 0).
       failVictimCommit = true;

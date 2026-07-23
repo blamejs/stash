@@ -57,10 +57,12 @@ export async function capture() {
   const index = await import(new URL("../src/index.js", import.meta.url));
   const memory = await import(new URL("../src/backends/memory.js", import.meta.url));
   const disk = await import(new URL("../src/backends/disk.js", import.meta.url));
+  const conformance = await import(new URL("../src/conformance.js", import.meta.url));
   const surface = {
     index: describeValue({ ...index }, 0),
     "backends/memory": describeValue({ ...memory }, 0),
     "backends/disk": describeValue({ ...disk }, 0),
+    conformance: describeValue({ ...conformance }, 0),
   };
   return { surface, sinceByPrimitive: extractSince() };
 }

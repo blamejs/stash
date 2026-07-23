@@ -1,6 +1,6 @@
 {
   "generator": "scripts/refresh-api-snapshot.js",
-  "packageVersion": "0.1.15",
+  "packageVersion": "0.1.16",
   "surface": {
     "index": {
       "kind": "object",
@@ -296,11 +296,21 @@
           "arity": 3
         }
       }
+    },
+    "conformance": {
+      "kind": "object",
+      "members": {
+        "runBackendConformance": {
+          "kind": "function",
+          "arity": 2
+        }
+      }
     }
   },
   "sinceByPrimitive": {
     "stash.backends.DiskBackend": "0.1.1",
     "stash.backends.MemoryBackend": "0.1.0",
+    "stash.conformance.runBackendConformance": "0.1.16",
     "stash.Stash": "0.1.0",
     "stash.push": "0.1.0",
     "stash.apply": "0.1.0",

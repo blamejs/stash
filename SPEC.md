@@ -33,7 +33,15 @@ else. Stop and ask.
 
 - **Node 24.18.0.** `"engines": { "node": ">=24.18.0" }`, with a `.node-version` / `.nvmrc` of
   `24.18.0`. Treat this as a floor to build against: no polyfills, no compatibility shims, no
-  `if (nodeVersion < x)` branches for older runtimes.
+  `if (nodeVersion < x)` branches for older runtimes. The capabilities the store depends on all
+  arrived at the Node 24 *major* level, not in the `.18` patch: the stable permission model
+  (`--permission`, §2.1), V8 13.6 explicit resource management behind `Symbol.asyncDispose`
+  (§7.1), and `require(esm)` of the package's synchronous ESM graph (a CommonJS project can
+  `require` it with no build step). The specific `.18` patch is a conservative
+  security-currency floor — it keeps consumers on a maintained Node 24 patch rather than an
+  early 24.x carrying since-fixed defects — not a dependency on anything that first shipped in
+  that release. It is a floor, not a ceiling: any newer 24.x, and later majors per the
+  [LTS calendar](LTS-CALENDAR.md), are supported.
 - **Zero dependencies**, runtime and dev. Node builtins only; tests use `node:test` and
   `node:assert`. If something can't be done without adding a package, stop and ask.
 - **ESM only.** `"type": "module"`, plain JavaScript. No TypeScript, no build step, no
@@ -359,6 +367,15 @@ So `pop` is a claim → stream → commit cycle:
 - `'burn'` — delete it anyway, on the assumption that any read attempt means the bytes may have
   been observed and the entry shouldn't survive to be read again. This must be opt-in.
 
+**When is `'burn'` sound?** `'burn'` deliberately reinstates the naive-`pop` hazard above: a
+reader whose connection drops at 60% loses the entry *and* got only half the bytes. So the
+default `'restore'` is the right choice whenever the bytes are irreplaceable — a failed or
+aborted pop then leaves the entry intact and the read is simply retried. Choose `'burn'` only
+when a partial read must never be retried *and* the loss is acceptable: a genuinely one-shot
+token whose bytes must not be served twice even after a broken read, or bytes the caller can
+re-obtain from another source. If losing the entry to a dropped connection would be a data-loss
+bug for your caller, the entry is irreplaceable and `'burn'` is the wrong policy.
+
 ### Crash recovery
 
 If the process dies mid-`pop`, claimed entries are left orphaned. On the first operation after
@@ -501,6 +518,33 @@ holds the bytes.
   async verify(opts) {},                // integrity + orphan audit → report; repair opt-in
 }
 ```
+
+### 9.1 The interface is a stable contract
+
+This method set is a public extension point, not an internal detail. Any object implementing it
+can be passed as `backend` to `new Stash({ backend })`, so a store on a filesystem this library
+does not ship — an S3-compatible object store, a remote block device, an in-house key/value
+service — is a first-class backend, its own concern (network grants, retries, consistency,
+encryption) kept outside the policy layer per §3.
+
+The stability discipline is the one §10 applies to error codes: the method set, its semantics
+(claim atomicity, `consumeRead` atomicity, tombstone first-write-wins, digest verification on
+read), and its error expectations change only with a change to this spec, and the two shipped
+backends' snapshotted 17-method surface is normative for the contract — a snapshot refresh that
+reshaped a backend method is a spec change, not a routine one. Pre-1.0 there are no
+backwards-compat shims (§2, §11): operators upgrade across a breaking change, and this contract
+is stable *within a version line* and versioned with the package.
+
+The contract is executable. `@blamejs/stash/conformance` exports
+`runBackendConformance(factory, { test, assert? })`, which registers the behavioral suite the
+in-tree backends pass against any backend factory, driving the shipped `Stash` consumer path and
+asserting the frozen verdicts (`ENOREF`, `ECLAIMED`, `E2BIG`, `EFULL`). It imports no test
+runner — the caller wires their own (`node:test` or otherwise) — so a third-party backend proves
+interchangeability by running the identical cases, not by reading prose. The first shipped core
+covers round-trip fidelity across every source type, identity, expiry, limits, claim atomicity,
+read budgets, and tombstone first-write-wins; the fault-injection cases (planted corruption,
+crash recovery) that need to reach into a backend's storage stay in the in-tree suite until the
+contract grows an injection hook.
 
 **DiskBackend** — layout:
 

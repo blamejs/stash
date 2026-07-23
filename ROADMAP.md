@@ -137,6 +137,40 @@ capability-free, and runs under `--permission` exactly as the library. Being a
 second process on a disk root, it is single-writer: point it at a quiesced store or
 a cold-standby replica.
 
+## Replication and recovery hardening -- SHIPPED (0.1.15)
+
+`reconcilable()` is a resilient anti-entropy source read: it returns the healthy
+entries to replicate plus the ids of entries whose sidecars are too damaged to
+read, so one corrupt entry no longer halts the sync of every sound one, while
+`list()` stays loud over corruption for an audit. `store()` reconciles on byte
+identity rather than the algorithm-tagged digest string, so two stores holding the
+same bytes under different digest algorithms reconcile idempotently instead of
+throwing a spurious conflict -- verified byte-for-byte, bounded by the stored
+entry's size, so a lying or oversized replica still fails closed. The disk backend's
+blob rename now rides out a transient filesystem fault as its sidecar and claim
+renames already do. Crash recovery and the claimed-read path are hardened
+throughout: a live reader's claim is guarded from the moment acquisition begins, so
+a forward wall-clock step can never hand a once-only entry to a second reader nor
+destroy a read mid-drain; a claim orphaned by a faulted resolution is always
+reclaimed rather than stranded; a crash-corrupted sidecar on a claimed entry no
+longer wedges every operation; and a replicated entry with an exhausted read budget
+is rejected.
+
+## Backend contract and conformance harness -- SHIPPED (0.1.16)
+
+The SPEC.md 9 backend interface becomes a declared stable contract with an
+executable form: the `@blamejs/stash/conformance` subpath exports
+`runBackendConformance(factory, { test })`, the behavioral suite the in-tree memory
+and disk backends pass, so a store this library does not bundle certifies
+interchangeability against the same cases without cloning the repository. It imports
+no test runner, so a backend author wires their own. A prototype-key-confusion class
+(CWE-1321) is closed in the two lookups keyed by untrusted strings -- a stored
+digest's algorithm prefix and a CLI subcommand token -- which could resolve an
+inherited `Object.prototype` member as a phantom; both now gate membership on
+`Object.hasOwn`, guarded by a source-wide detector. Documentation gains a CommonJS
+consumption guarantee, a soundness criterion for the `'burn'` pop-failure trade, the
+Node-floor rationale, and the memory backend's claim semantics without a filesystem.
+
 ## Standing constraints
 
 Every milestone honors the one rule (no decrypt capability), zero

@@ -245,7 +245,14 @@ export async function main(argv, io) {
     io.out.write(version + "\n");
     return EXIT.OK;
   }
-  const spec = COMMANDS[argv[0]];
+  // COMMANDS is indexed by an UNTRUSTED argv token, so membership is Object.hasOwn,
+  // never a bare `COMMANDS[name]` read: a token naming an inherited Object.prototype
+  // member ("constructor", "__proto__", "toString") would resolve to that member and
+  // slip past the `spec === undefined` guard as a phantom command (CWE-1321,
+  // prototype-key confusion) -- the same discipline digest.js applies to a stored
+  // digest's algorithm prefix.
+  const name = argv[0];
+  const spec = Object.hasOwn(COMMANDS, name) ? COMMANDS[name] : undefined;
   if (spec === undefined) {
     io.err.write("stashjs: unknown command (run stashjs --help)\n");
     return EXIT.USAGE;

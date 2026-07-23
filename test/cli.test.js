@@ -247,6 +247,21 @@ suite("cli", { skip: SANDBOXED }, () => {
     assert.ok(!flag.stderr.includes("nonsense"), "the unknown flag is not echoed");
   });
 
+  test("a command name that is an inherited Object.prototype member is unknown, not a phantom command", () => {
+    // CWE-1321: COMMANDS[argv[0]] with an inherited key ("constructor", "__proto__",
+    // "toString") must be a MISS, resolved through Object.hasOwn -- not a member of
+    // Object.prototype that slips past the unknown-command guard.
+    for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+      const cmd = runCli([name]);
+      assert.equal(cmd.status, 2, name + " exits with a usage error");
+      assert.ok(
+        cmd.stderr.includes("unknown command"),
+        name + " is reported as an unknown command, not parsed as a known one (got: " + JSON.stringify(cmd.stderr) + ")",
+      );
+      assert.ok(!cmd.stderr.includes(name), name + " is not echoed");
+    }
+  });
+
   test("no arguments prints help and exits 0", () => {
     const { stdout, status } = runCli([]);
     assert.equal(status, 0);

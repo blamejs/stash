@@ -143,9 +143,53 @@ export async function bench({ iterations = 30, warmup = 3, sizes, algos } = {}) 
   return { generatedAt: null, iterations, warmup, cells };
 }
 
-// Invoked directly: run the full bench and print it as one JSON document.
+// boundedInsertScaling(opts) -> { generatedAt: null, backend, limit, N, samples }.
+// The insert-under-a-bound cost curve. A bounded push/store runs prune() + stats()
+// before it writes -- prune() opens and parses every sidecar to reap the dead
+// (mandatory: maxTotal charges its residual against the LIVE footprint), stats()
+// then totals the physical footprint -- so each insert is O(n) over the store and a
+// run of N is O(n^2). This measures per-insert latency as the store grows, so the
+// no-central-index tradeoff (SPEC.md 3: the full scan is cheap at maxEntries scale,
+// and a count/index to make the gate O(1) is the mutable-file coupling the sidecar
+// design rejects) is a number, not a claim. Report-only, like bench(): no floor is
+// asserted -- machine variance makes a hard threshold meaningless. Kept out of the
+// default run so `node bench/run.js`'s stable JSON is unchanged; pass `--bounded`.
+export async function boundedInsertScaling({ N = 500, backendName = "disk", limit = { maxEntries: 1e9 } } = {}) {
+  const roots = [];
+  const make = backendName === "memory"
+    ? () => new MemoryBackend()
+    : () => {
+      const root = mkdtempSync(join(tmpdir(), "stash-bounded-"));
+      roots.push(root);
+      return new DiskBackend({ root });
+    };
+  const blob = Buffer.alloc(64, 0x61); // small blob: the cost is the scan, not the blob IO
+  const perInsertMs = new Array(N);
+  try {
+    // sweepInterval null: no background prune competes with the timed inserts.
+    const stash = new Stash({ backend: make(), sweepInterval: null, ...limit });
+    for (let i = 0; i < N; i += 1) {
+      const t0 = performance.now();
+      await stash.push(blob);
+      perInsertMs[i] = performance.now() - t0;
+    }
+    await stash.close();
+  } finally {
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
+  }
+  // Sample per-insert latency at growing store sizes rather than dumping N points.
+  const marks = [1, 100, 250, 500, 750, 1000].filter((n) => n <= N);
+  const samples = marks.map((at) => ({ at, ms: perInsertMs[at - 1] }));
+  return { generatedAt: null, backend: backendName, limit, N, samples };
+}
+
+// Invoked directly: the default run prints the hot-path bench as one stable JSON
+// document; `--bounded` prints the insert-under-a-bound scaling curve instead.
 if (process.argv[1] && process.argv[1].endsWith("run.js")) {
-  bench()
+  const runner = process.argv.includes("--bounded")
+    ? boundedInsertScaling({ N: 1000 })
+    : bench();
+  runner
     .then((result) => {
       process.stdout.write(JSON.stringify(result, null, 2) + "\n");
     })

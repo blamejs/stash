@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { checksVerdict, collectAllPages, mergeArgs, reviewerSignalsReview, reviewTriggerForHead, syncLockfileVersion, tagFromState, unresolvedThreads } from "../scripts/release.js";
+import { checksVerdict, collectAllPages, mergeArgs, reviewerSignalsReview, reviewTriggerForHead, syncComposeImageTag, syncLockfileVersion, tagFromState, unresolvedThreads } from "../scripts/release.js";
 
 // ---------------------------------------------------------------------------
 // checksVerdict -- CheckRun entries (status / conclusion)
@@ -344,6 +344,55 @@ test("syncLockfileVersion: does not mutate the input lockfile", () => {
   syncLockfileVersion(lock, "0.1.4");
   assert.equal(lock.version, "0.1.3");
   assert.equal(lock.packages[""].version, "0.1.3");
+});
+
+// ---------------------------------------------------------------------------
+// syncComposeImageTag -- the docs-site image pin moves with the release. Both
+// forms of the wiki-image reference (the local build label and the prod pull
+// default) must land on the bumped version, or the documented production
+// deploy pulls a stale image the release never republished (wiki-image-tag-drift).
+// ---------------------------------------------------------------------------
+
+test("syncComposeImageTag: bumps the local build-label pin", () => {
+  const out = syncComposeImageTag("    image: blamejs-stash-wiki:0.1.3\n", "0.1.4");
+  assert.equal(out, "    image: blamejs-stash-wiki:0.1.4\n");
+});
+
+test("syncComposeImageTag: bumps the prod ${WIKI_IMAGE_TAG:-X.Y.Z} pull default, keeping the interpolation", () => {
+  const out = syncComposeImageTag("    image: ghcr.io/blamejs/stash-wiki:${WIKI_IMAGE_TAG:-0.1.3}\n", "0.1.4");
+  assert.equal(out, "    image: ghcr.io/blamejs/stash-wiki:${WIKI_IMAGE_TAG:-0.1.4}\n");
+});
+
+test("syncComposeImageTag: rewrites every wiki-image pin in a file, once", () => {
+  const compose =
+    "  wiki:\n    image: blamejs-stash-wiki:0.1.3\n" +
+    "  wiki2:\n    image: ghcr.io/blamejs/stash-wiki:${WIKI_IMAGE_TAG:-0.1.3}\n";
+  const out = syncComposeImageTag(compose, "0.2.0");
+  assert.equal((out.match(/stash-wiki:(?:\$\{WIKI_IMAGE_TAG:-)?0\.2\.0/g) || []).length, 2);
+  assert.equal(out.indexOf("0.1.3"), -1);
+});
+
+test("syncComposeImageTag: leaves the caddy/node base tags and the unversioned container_name alone", () => {
+  const compose =
+    "    image: caddy:2-alpine\n" +
+    "    container_name: stash-wiki\n" +
+    "    image: blamejs-stash-wiki:0.1.3\n";
+  const out = syncComposeImageTag(compose, "0.1.4");
+  assert.ok(out.indexOf("image: caddy:2-alpine") !== -1, "caddy base tag untouched");
+  assert.ok(out.indexOf("container_name: stash-wiki\n") !== -1, "container_name untouched");
+  assert.ok(out.indexOf("blamejs-stash-wiki:0.1.4") !== -1, "wiki pin bumped");
+});
+
+test("syncComposeImageTag: a no-op on already-current text returns it unchanged", () => {
+  const compose = "    image: blamejs-stash-wiki:0.1.4\n";
+  assert.equal(syncComposeImageTag(compose, "0.1.4"), compose);
+});
+
+test("syncComposeImageTag: rejects a non-string body or a non-semver version -- fail closed", () => {
+  assert.throws(() => syncComposeImageTag(null, "0.1.4"), TypeError);
+  assert.throws(() => syncComposeImageTag(42, "0.1.4"), TypeError);
+  assert.throws(() => syncComposeImageTag("image: stash-wiki:0.1.3", "not.a.version"), TypeError);
+  assert.throws(() => syncComposeImageTag("image: stash-wiki:0.1.3", ""), TypeError);
 });
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import { generate } from "../src/ref.js";
 import { C } from "../src/constants.js";
 import { DIGESTS, digestHash, finalize } from "../src/digest.js";
 import { cleanupScratch } from "./_scratch.js";
+import { runBackendConformance } from "../src/conformance.js";
 import {
   SANDBOXED, pollUntil, BACKENDS, drain, makeStoredEntry, syncOnce,
   BACKEND_METHODS, wrapBackend, corruptingReadBackend, retryClaimed,
@@ -36,102 +37,15 @@ function storedEntryUnder(id, bytes, algo, overrides = {}) {
 }
 for (const { name, create } of BACKENDS) {
   suite("conformance: " + name, () => {
-    test("round-trips a Buffer", async () => {
-      const stash = new Stash({ backend: create() });
-      const payload = Buffer.from([0, 1, 2, 250, 251, 252]);
-      const ref = await stash.push(payload);
-      assert.match(ref, /^v1_[A-Za-z0-9_-]{43}$/);
-      assert.deepEqual(await drain(await stash.apply(ref)), payload);
-      // apply is non-destructive: the bytes are still there
-      assert.deepEqual(await drain(await stash.apply(ref)), payload);
-    });
-
-    test("round-trips a bare Uint8Array without aliasing the caller's buffer", async () => {
-      const stash = new Stash({ backend: create() });
-      const payload = new Uint8Array([9, 8, 7, 6]);
-      const ref = await stash.push(payload);
-      payload.fill(0); // caller mutation after push must not reach the store
-      assert.deepEqual(await drain(await stash.apply(ref)), Buffer.from([9, 8, 7, 6]));
-    });
-
-    test("round-trips a UTF-8 string", async () => {
-      const stash = new Stash({ backend: create() });
-      const ref = await stash.push("hello stash");
-      assert.equal((await drain(await stash.apply(ref))).toString("utf8"), "hello stash");
-    });
-
-    test("round-trips a Readable without mutating the payload", async () => {
-      const stash = new Stash({ backend: create() });
-      const payload = Buffer.from("streamed bytes, chunk by chunk");
-      const ref = await stash.push(Readable.from([payload.subarray(0, 9), payload.subarray(9)]));
-      assert.deepEqual(await drain(await stash.apply(ref)), payload);
-    });
-
-    test("round-trips an AsyncIterable", async () => {
-      const stash = new Stash({ backend: create() });
-      async function* chunks() {
-        yield Buffer.from("alpha ");
-        yield Buffer.from("beta");
-      }
-      const ref = await stash.push(chunks());
-      assert.equal((await drain(await stash.apply(ref))).toString("utf8"), "alpha beta");
-    });
-
-    test("stream chunks are copied at write: caller buffer reuse cannot rewrite stored bytes", async () => {
-      // A source that reuses its chunk buffer after the yield -- the pooled
-      // slab / scratch-buffer pattern. The store outlives the push, so a
-      // retained reference (instead of an owned copy) lets the caller
-      // rewrite stored bytes out from under the recorded digest, and the
-      // entry dies unreadable on its next apply.
-      const stash = new Stash({ backend: create() });
-      const scratch = Buffer.from("aaaa");
-      async function* reusing() {
-        yield scratch;
-        scratch.fill(0x62); // runs after the store consumed the first chunk
-        yield Buffer.from("cccc");
-      }
-      const ref = await stash.push(reusing());
-      assert.equal((await drain(await stash.apply(ref))).toString("utf8"), "aaaacccc");
-    });
-
-    test("round-trips mixed chunk types: string and Uint8Array chunks encode as bytes", async () => {
-      const stash = new Stash({ backend: create() });
-      async function* chunks() {
-        yield "text chunk ";
-        yield new Uint8Array([0x62, 0x79, 0x74, 0x65, 0x73]);
-      }
-      const ref = await stash.push(chunks());
-      const got = await drain(await stash.apply(ref));
-      assert.equal(got.toString("utf8"), "text chunk bytes");
-      assert.equal((await stash.show(ref)).size, got.length);
-    });
-
-    test("a zero-byte source round-trips: size 0, digest recorded, bytes empty", async () => {
-      const stash = new Stash({ backend: create() });
-      const ref = await stash.push(Buffer.alloc(0));
-      const entry = await stash.show(ref);
-      assert.equal(entry.size, 0);
-      assert.match(entry.digest, /^sha256:[0-9a-f]{64}$/);
-      assert.equal((await drain(await stash.apply(ref))).length, 0);
-      const fromString = await stash.push("");
-      assert.equal((await stash.show(fromString)).size, 0);
-      assert.equal(await stash.drop(ref), true);
-    });
-
-    test("an abandoned apply leaves the entry intact and releases its handle", async () => {
-      // Destroy the stream after the first chunk: apply is non-destructive,
-      // so the entry must survive a partial read, a later apply must drain
-      // in full, and drop must succeed immediately -- a read handle left
-      // open by the abort would block the delete on Windows.
-      const stash = new Stash({ backend: create() });
-      const payload = Buffer.alloc(256 * 1024, 7);
-      const ref = await stash.push(payload);
-      const readable = await stash.apply(ref);
-      readable.once("data", () => readable.destroy());
-      await new Promise((resolve) => readable.once("close", resolve));
-      assert.deepEqual(await drain(await stash.apply(ref)), payload);
-      assert.equal(await stash.drop(ref), true);
-    });
+    // The portable core of the SPEC.md 9 backend contract, shared verbatim with
+    // out-of-tree backend authors through @blamejs/stash/conformance: the library's
+    // own run here and a third party's run against their backend execute the
+    // IDENTICAL cases (single source of truth). Round-trip fidelity across every
+    // source type, identity, expiry, limits, claim atomicity, read budgets, and
+    // tombstone first-write-wins live in the shipped harness; the adversarial /
+    // fault-injection cases that must reach into a backend's storage (planted
+    // corruption, crash recovery, event assertions) stay inline below.
+    runBackendConformance({ name, create }, { test, assert });
 
     test("list accepts includeExpired and rejects unknown options", async () => {
       const stash = new Stash({ backend: create() });
@@ -140,33 +54,6 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual((await stash.list({ includeExpired: false })).map((e) => e.id), [ref]);
       await assert.rejects(stash.list({ bogus: true }), TypeError);
       await assert.rejects(stash.list(null), TypeError);
-    });
-
-    test("push mints a fresh ref per entry, even for identical bytes", async () => {
-      const stash = new Stash({ backend: create() });
-      const first = await stash.push("same bytes");
-      const second = await stash.push("same bytes");
-      assert.notEqual(first, second);
-      assert.equal((await stash.list()).length, 2);
-    });
-
-    test("show returns metadata only, with size and digest computed", async () => {
-      const stash = new Stash({ backend: create() });
-      const payload = Buffer.from("metadata subject");
-      const before = Date.now();
-      const ref = await stash.push(payload, { meta: { label: "opaque" } });
-      const entry = await stash.show(ref);
-      assert.equal(entry.id, ref);
-      assert.equal(entry.size, payload.length);
-      assert.match(entry.digest, /^sha256:[0-9a-f]{64}$/);
-      assert.ok(entry.createdAt >= before && entry.createdAt <= Date.now());
-      assert.equal(entry.expiresAt, null);
-      assert.equal(entry.reads, null);
-      assert.equal(entry.readsLeft, null);
-      assert.deepEqual(entry.meta, { label: "opaque" });
-      // never contents
-      assert.equal("contents" in entry, false);
-      assert.equal("chunks" in entry, false);
     });
 
     test("meta that JSON-serializes to a non-object is refused at push", async () => {
@@ -185,53 +72,6 @@ for (const { name, create } of BACKENDS) {
       // JSON's own rules -- the top-level object shape is the contract
       const ref = await stash.push("y", { meta: { at: new Date(0) } });
       assert.deepEqual((await stash.show(ref)).meta, { at: "1970-01-01T00:00:00.000Z" });
-    });
-
-    test("meta round-trips verbatim as JSON and stays caller-isolated", async () => {
-      const stash = new Stash({ backend: create() });
-      const meta = { nested: { deep: [1, 2, 3] }, text: "x" };
-      const ref = await stash.push("payload", { meta });
-      meta.nested.deep.push(4); // caller mutation after push must not leak in
-      const entry = await stash.show(ref);
-      assert.deepEqual(entry.meta, { nested: { deep: [1, 2, 3] }, text: "x" });
-      entry.meta.nested.deep = []; // returned-copy mutation must not leak back
-      assert.deepEqual((await stash.show(ref)).meta.nested.deep, [1, 2, 3]);
-    });
-
-    test("list enumerates entries; drop removes exactly one", async () => {
-      const stash = new Stash({ backend: create() });
-      const keep = await stash.push("keep");
-      const gone = await stash.push("gone");
-      assert.deepEqual((await stash.list()).map((e) => e.id).sort(), [keep, gone].sort());
-      assert.equal(await stash.drop(gone), true);
-      assert.equal(await stash.drop(gone), false); // absent is a fact, not a failure
-      assert.deepEqual((await stash.list()).map((e) => e.id), [keep]);
-    });
-
-    test("clear destroys everything and counts it", async () => {
-      const stash = new Stash({ backend: create() });
-      await stash.push("one");
-      await stash.push("two");
-      await stash.push("three");
-      assert.equal(await stash.clear(), 3);
-      assert.deepEqual(await stash.list(), []);
-      assert.equal(await stash.clear(), 0);
-    });
-
-    test("an unknown well-formed ref is RefNotFound from apply and show", async () => {
-      const stash = new Stash({ backend: create() });
-      const absent = generate();
-      await assert.rejects(stash.apply(absent), (err) => err instanceof RefNotFound && err.code === "ENOREF");
-      await assert.rejects(stash.show(absent), (err) => err instanceof RefNotFound && err.code === "ENOREF");
-    });
-
-    test("a dropped entry is gone from every read path", async () => {
-      const stash = new Stash({ backend: create() });
-      const ref = await stash.push("ephemeral");
-      assert.equal(await stash.drop(ref), true);
-      await assert.rejects(stash.apply(ref), RefNotFound);
-      await assert.rejects(stash.show(ref), RefNotFound);
-      assert.deepEqual(await stash.list(), []);
     });
 
     // ---- M3 expiry (SPEC.md 7) ------------------------------------------
@@ -272,18 +112,6 @@ for (const { name, create } of BACKENDS) {
       const longer = await withDefault.show(await withDefault.push("x", { ttl: "7d" }));
       assert.equal(longer.expiresAt, longer.createdAt + 604800000);
       assert.equal((await withDefault.show(await withDefault.push("x", { ttl: null }))).expiresAt, null);
-    });
-
-    test("an expired entry is RefNotFound from apply, before any sweep runs", async () => {
-      const stash = new Stash({ backend: create() }); // NO sweepInterval
-      const ref = await stash.push("gone at birth", { ttl: 0 });
-      await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
-    });
-
-    test("an expired entry is RefNotFound from show", async () => {
-      const stash = new Stash({ backend: create() });
-      const ref = await stash.push("gone at birth", { ttl: 0 });
-      await assert.rejects(stash.show(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
     });
 
     test("the lazy read path drops the entry in passing, not merely hides it", async () => {
@@ -472,13 +300,6 @@ for (const { name, create } of BACKENDS) {
 
     // ---- M4 limits (SPEC.md 8) ------------------------------------------
 
-    test("maxSize: exactly the limit round-trips; one byte over is SizeExceeded", async () => {
-      const stash = new Stash({ backend: create(), maxSize: 16 });
-      const ref = await stash.push(Buffer.alloc(16, 7));
-      assert.equal((await drain(await stash.apply(ref))).length, 16);
-      await assert.rejects(stash.push(Buffer.alloc(17, 7)), (e) => e instanceof SizeExceeded && e.code === "E2BIG");
-    });
-
     test("maxSize is enforced mid-stream: no chunk after the crossing one is pulled", async () => {
       const stash = new Stash({ backend: create(), maxSize: 10 });
       const pulled = [];
@@ -582,20 +403,6 @@ for (const { name, create } of BACKENDS) {
       const ref = await stash.push(Buffer.alloc(8, 1));
       assert.equal((await stash.list()).length, 1);
       assert.equal((await drain(await stash.apply(ref))).length, 8);
-    });
-
-    test("maxEntries: a full store is StashFull before the stream starts; drop frees a slot", async () => {
-      const inner = create();
-      const backend = {};
-      for (const m of BACKEND_METHODS) backend[m] = (...a) => inner[m](...a);
-      const stash = new Stash({ backend, maxEntries: 1 });
-      const first = await stash.push("a");
-      let pulled = false;
-      async function* watched() { pulled = true; yield Buffer.from("b"); }
-      await assert.rejects(stash.push(watched()), (e) => e instanceof StashFull && e.code === "EFULL");
-      assert.equal(pulled, false, "rejected before the source was pulled -- no eviction, no wasted read");
-      await stash.drop(first);
-      assert.match(await stash.push("b"), /^v1_/);
     });
 
     test("maxTotal: a push whose footprint exceeds the remaining headroom is StashFull; the partial is cleaned; a fitting re-push works", async () => {
@@ -718,38 +525,11 @@ for (const { name, create } of BACKENDS) {
 
     // ---- M5: pop and read budgets (SPEC.md 4, 4.1, 6) --------------------------
 
-    test("pop round-trips and destroys: the payload streams once, then the entry is gone", async () => {
-      const stash = new Stash({ backend: create() });
-      const ref = await stash.push("bytes at rest");
-      assert.deepEqual(await drain(await stash.pop(ref)), Buffer.from("bytes at rest"));
-      await assert.rejects(stash.show(ref), (e) => e instanceof RefNotFound && e.code === "ENOREF");
-      await assert.rejects(stash.apply(ref), RefNotFound);
-      await assert.rejects(stash.pop(ref), RefNotFound);
-      assert.deepEqual(await stash.list(), []);
-    });
-
     test("pop ignores the read budget: one drain destroys a reads:3 entry", async () => {
       const stash = new Stash({ backend: create() });
       const ref = await stash.push("terminal", { reads: 3 });
       assert.deepEqual(await drain(await stash.pop(ref)), Buffer.from("terminal"));
       await assert.rejects(stash.show(ref), RefNotFound); // pop is terminal, budget notwithstanding
-    });
-
-    test("concurrent pop: exactly one drains the payload, the other is RefClaimed", async () => {
-      const stash = new Stash({ backend: create() });
-      // A payload above the stream highWaterMark: the winner's claim stays held
-      // (backpressure) until it is drained, so the loser's claim genuinely races
-      // a live claim rather than a payload that already auto-committed.
-      const payload = Buffer.alloc(65536, 7);
-      const ref = await stash.push(payload);
-      const settled = await Promise.allSettled([stash.pop(ref), stash.pop(ref)]);
-      const winners = settled.filter((r) => r.status === "fulfilled");
-      const losers = settled.filter((r) => r.status === "rejected");
-      assert.equal(winners.length, 1, "exactly one pop won the claim");
-      assert.equal(losers.length, 1);
-      assert.equal(losers[0].reason.code, "ECLAIMED");
-      assert.deepEqual(await drain(winners[0].value), payload);
-      await assert.rejects(stash.show(ref), RefNotFound);
     });
 
     test("pop destroyed mid-stream restores under the default policy; a retry drains fully", async () => {
@@ -785,34 +565,6 @@ for (const { name, create } of BACKENDS) {
       const ref = await stash.push("original");
       await assert.rejects(drain(await stash.pop(ref)), (e) => e instanceof IntegrityError && e.code === "EINTEGRITY");
       assert.equal((await stash.show(ref)).id, ref); // restored, not lost
-    });
-
-    test("reads:2 sequential: two full drains, readsLeft:1 between, then RefNotFound", async () => {
-      const stash = new Stash({ backend: create() });
-      const ref = await stash.push("twice", { reads: 2 });
-      assert.deepEqual(await drain(await stash.apply(ref)), Buffer.from("twice"));
-      assert.equal((await stash.show(ref)).readsLeft, 1);
-      assert.deepEqual(await drain(await stash.apply(ref)), Buffer.from("twice"));
-      await assert.rejects(stash.show(ref), RefNotFound);
-      await assert.rejects(stash.apply(ref), RefNotFound);
-    });
-
-    test("reads:2 concurrent: exactly two drained successes ever, then RefNotFound", async () => {
-      const stash = new Stash({ backend: create() });
-      const ref = await stash.push("shared", { reads: 2 });
-      let drained = 0;
-      // race more readers than credits; losers retry the claim until it is exhausted
-      await Promise.all(Array.from({ length: 6 }, () => (async () => {
-        try {
-          const bytes = await retryClaimed(async () => drain(await stash.apply(ref)));
-          assert.deepEqual(bytes, Buffer.from("shared"));
-          drained += 1;
-        } catch (err) {
-          if (!(err instanceof RefNotFound)) throw err; // the budget is spent -- expected
-        }
-      })()));
-      assert.equal(drained, 2, "a reads:2 entry served exactly twice under contention");
-      await assert.rejects(stash.show(ref), RefNotFound);
     });
 
     test("a budgeted read serializes: the loser rejects at claim time, it does not queue", async () => {
@@ -881,17 +633,6 @@ for (const { name, create } of BACKENDS) {
       await assert.rejects(stash.show(ref), RefNotFound);
       await assert.rejects(stash.apply(ref), RefNotFound);
       assert.deepEqual(await stash.list(), []);
-    });
-
-    test("a claimed entry is RefClaimed to a concurrent reader, not IntegrityError", async () => {
-      const stash = new Stash({ backend: create() });
-      const payload = Buffer.alloc(65536, 3); // above the highWaterMark: the claim stays held
-      const ref = await stash.push(payload);
-      const inflight = await stash.pop(ref); // claimed, not yet drained
-      await assert.rejects(stash.apply(ref), (e) => e instanceof RefClaimed && e.code === "ECLAIMED");
-      await assert.rejects(stash.pop(ref), RefClaimed);
-      await drain(inflight); // finish the pop
-      await assert.rejects(stash.show(ref), RefNotFound);
     });
 
     test("pop and budgeted apply on an expired entry are RefNotFound with no claim taken", async () => {

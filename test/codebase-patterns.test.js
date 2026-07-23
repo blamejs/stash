@@ -184,6 +184,7 @@ const VALID_ALLOW_CLASSES = {
   "validator-shape-reinlined": 1,
   "forbidden-crypto-token": 1,
   "digest-algo-hardcode": 1,
+  "prototype-key-confusion": 1,
   "sandbox-widening-import": 1,
   "permission-probe-branch": 1,
   "error-event-emit": 1,
@@ -205,6 +206,7 @@ const VALID_ALLOW_CLASSES = {
   "wiki-port-cross-artifact-drift": 1,
   "wiki-runtime-file-uncopied": 1,
   "unretried-fs-mutation": 1,
+  "wiki-image-tag-drift": 1,
 };
 
 // Drop matches suppressed by a file-level
@@ -332,6 +334,65 @@ test("digest-algo-hardcode -- no algorithm literal outside the digest registry",
   let bad = _scanLines(files, re, { prepare: _stripComments });
   bad = _filterMarkers(bad, "digest-algo-hardcode");
   _report("SPEC.md 5: no createHash(\"<algo>\") or \"<algo>:\" literal outside src/digest.js (the registry owns the algorithm set)", bad);
+});
+
+// ---------------------------------------------------------------------------
+// (1b) prototype-key-confusion -- untrusted-key registry membership (CWE-1321)
+// ---------------------------------------------------------------------------
+
+test("prototype-key-confusion -- no computed-member membership test that reads through the prototype", () => {
+  // reason: a store indexes registries by UNTRUSTED strings -- a stored digest's
+  // algorithm prefix (DIGESTS), a CLI subcommand token (COMMANDS). Any membership
+  // test over a computed identifier key that consults the prototype chain treats a
+  // key naming an inherited Object.prototype member ("constructor", "__proto__",
+  // "toString", "valueOf", "hasOwnProperty") as a PHANTOM row the registry never
+  // defined (CWE-1321): the member is not undefined, is truthy, is not null, and
+  // `in` finds it, so it defeats a `registry[key] ?? DEFAULT` fallback or slips
+  // past an unknown-key guard. Membership over a computed identifier key must go
+  // through `Object.hasOwn(registry, key)`, which never consults the prototype.
+  // Two unsafe shapes are caught, over comment- AND literal-stripped source (so
+  // prose, a string key `x["k"]`, and a " in " inside a string are all untouched,
+  // and an array index `x[0]` never matches an identifier key):
+  //   (a) inline      -- `reg[key] === undefined` / `!== undefined`
+  //   (b) assign-then -- `const v = reg[key];` ... `v === undefined` (the form two
+  //                      of the three original sites shipped in -- correlated by the
+  //                      bound name within a short window, whole-file not line-wise)
+  // Both target the `=== undefined` MEMBERSHIP test, whose only purpose is to ask
+  // whether a registry defines a computed key -- a high-signal shape (you would
+  // otherwise just use the value). The `in` operator also reads through the
+  // prototype, but it is deliberately NOT flagged: `key in obj` is the idiomatic,
+  // safe existence check when the KEY is trusted (`field in value` over the frozen
+  // FIELDS set, `key in opts` over the code-defined unimplemented list -- both
+  // fail closed), and the shape cannot distinguish a trusted key from an untrusted
+  // one, so flagging it would fire on innocent code. The untrusted-key registries
+  // in this tree (DIGESTS, COMMANDS) are read with `[key]`, covered by (a)/(b) and
+  // the Object.hasOwn discipline. A trusted-key `=== undefined` case that genuinely
+  // cannot use Object.hasOwn carries an `allow:prototype-key-confusion` marker; none
+  // exist today, so the tree is silent.
+  const INLINE = /[A-Za-z_$][\w$]*\[[A-Za-z_$][\w$]*\]\s*(?:===|!==)\s*undefined/;
+  const ASSIGN = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\[[A-Za-z_$][\w$]*\]\s*;[\s\S]{0,160}?\b\1\s*(?:===|!==)\s*undefined/g;
+  const bad = [];
+  for (const file of _srcFiles()) {
+    const rel = _relPath(file);
+    if (rel === SELF) continue;
+    const raw = _read(file);
+    const subject = _stripCommentsAndLiterals(raw);
+    const rawLines = _lines(raw);
+    const lines = _lines(subject);
+    for (let i = 0; i < lines.length; i++) {
+      if (INLINE.test(lines[i])) {
+        bad.push({ file: rel, line: i + 1, content: (rawLines[i] || lines[i]).trim() });
+      }
+    }
+    let m;
+    ASSIGN.lastIndex = 0;
+    while ((m = ASSIGN.exec(subject)) !== null) {
+      const lineNo = subject.slice(0, m.index).split("\n").length;
+      bad.push({ file: rel, line: lineNo, content: (rawLines[lineNo - 1] || "").trim() });
+    }
+  }
+  const filtered = _filterMarkers(bad, "prototype-key-confusion");
+  _report("CWE-1321: no prototype-consulting membership over a computed key in src/ -- use Object.hasOwn (the prototype chain is not a registry row)", filtered);
 });
 
 // ---------------------------------------------------------------------------
@@ -1330,4 +1391,60 @@ test("every repo-root file the wiki reads at runtime is COPYed by the wiki Docke
   }
   const filtered = _filterMarkers(bad, "wiki-runtime-file-uncopied");
   _report("every repo-root file the wiki reads at runtime is COPYed by examples/wiki/Dockerfile", filtered);
+});
+
+test("wiki docs-site image tag agrees with package.json across the composes (pinned per release)", () => {
+  // class: wiki-image-tag-drift
+  // reason: the docs-site image is pinned by version in two compose files --
+  // docker-compose.yml's local build label (`blamejs-stash-wiki:X.Y.Z`) and
+  // docker-compose.prod.yml's pull default
+  // (`stash-wiki:${WIKI_IMAGE_TAG:-X.Y.Z}`). DEPLOY.md documents the tag as
+  // pinned per release, and release-container.yml publishes the image under
+  // the release version, so a pin left on a prior version makes the documented
+  // `docker compose ... up -d` / `pull` production flow deploy an image the
+  // current release never republished -- CI stays green while the shipped site
+  // is stale. release.js prepare rewrites both pins in lockstep with the
+  // package.json bump (syncComposeImageTag); this gate fails the cut if either
+  // drifts. Anchor on package.json version (the one authoritative source) and
+  // assert every pinned wiki-image tag matches it.
+  let version;
+  try { version = JSON.parse(_read(path.join(REPO_ROOT, "package.json"))).version; }
+  catch (_e) { return; }
+  if (!/^\d+\.\d+\.\d+$/.test(String(version))) return;
+
+  // Matches the wiki image reference in either form -- a bare
+  // `stash-wiki:X.Y.Z` label or the `${WIKI_IMAGE_TAG:-X.Y.Z}` pull default --
+  // and captures the pinned version. The base image tags (caddy/node) and the
+  // unversioned container_name carry no `stash-wiki:` prefix, so they are left
+  // untouched.
+  const IMAGE_TAG_RE = /stash-wiki:(?:\$\{WIKI_IMAGE_TAG:-)?(\d+\.\d+\.\d+)/;
+  const bad = [];
+  let filesRead = 0;
+  let pinsSeen = 0;
+  for (const composeName of ["docker-compose.yml", "docker-compose.prod.yml"]) {
+    const rel = "examples/wiki/" + composeName;
+    let compose = null;
+    try { compose = _read(path.join(REPO_ROOT, "examples", "wiki", composeName)); filesRead += 1; }
+    catch (_e) { continue; }
+    const lines = _lines(compose);
+    for (let i = 0; i < lines.length; i++) {
+      const m = IMAGE_TAG_RE.exec(lines[i]);
+      if (!m) continue;
+      pinsSeen += 1;
+      if (m[1] !== version) {
+        bad.push({ file: rel, line: i + 1,
+          content: "wiki image tag `" + m[1] + "` doesn't match package.json version " + version +
+                   " -- the docs-site image is pinned per release; release.js prepare bumps it in lockstep" });
+      }
+    }
+  }
+  // A vacuous pass is itself drift: if the composes are present but no
+  // `stash-wiki:<version>` pin was found, the reference was renamed or the pin
+  // dropped, and the gate would silently green on a surface it no longer sees.
+  if (filesRead > 0 && pinsSeen === 0) {
+    bad.push({ file: "examples/wiki/docker-compose.prod.yml", line: 1,
+      content: "no `stash-wiki:<version>` image pin found in either compose -- the wiki-image-tag-drift gate matched nothing to check" });
+  }
+  const filtered = _filterMarkers(bad, "wiki-image-tag-drift");
+  _report("wiki docs-site image tag agrees with package.json across examples/wiki composes", filtered);
 });

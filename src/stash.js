@@ -906,6 +906,21 @@ export class Stash extends EventEmitter {
     const entry = make(id, meta, ttlMs, reads);
     let residual = null;
     if (this.#maxEntries !== null || this.#maxTotal !== null) {
+      // Two passes, and by design they do not collapse into one. prune() opens and
+      // parses every sidecar to reap the dead -- it MUST run first, because maxTotal
+      // charges its mid-stream residual against the LIVE footprint: total stats.bytes
+      // that still counted an expired entry would tighten the residual and reject a
+      // push that fits once the dead one is reaped (a dead entry blocking a live
+      // push). stats() then totals the PHYSICAL footprint -- blob + sidecar file
+      // sizes PLUS orphan blobs and sidecar-less claim blobs that list() never sees,
+      // the maxTotal-bypass accounting only a layout walk can do. So the reap scan
+      // cannot surface the footprint (deriving it from prune()'s entry list would
+      // under-count those orphans and weaken maxTotal), and the footprint walk cannot
+      // subsume the reap (folding expiry into the backend's walk pushes a policy
+      // decision into a backend that must not interpret it, SPEC.md 9). The full scan
+      // is by-design cheap at maxEntries scale (SPEC.md 3); a central count/index to
+      // make the gate O(1) is exactly the mutable-file coupling the sidecar design
+      // rejects.
       await this.prune();
       const stats = await this.#backend.stats();
       if (this.#maxEntries !== null && stats.entries >= this.#maxEntries) {
@@ -1164,9 +1179,11 @@ export class Stash extends EventEmitter {
     // stash bounds exactly as a push is -- otherwise a replica larger than maxSize, or
     // any replica past maxEntries/maxTotal, slips the configured safeguards (replication
     // input is untrusted). Expired entries are reaped first so a dead-but-unswept entry
-    // never rejects a live replica (the push discipline). Across DIFFERENT ids the stats
-    // read and the write are not atomic (concurrent inserts overshoot by the in-flight
-    // count, as push documents); the per-id chain makes the SAME id exact.
+    // never rejects a live replica (the push discipline) -- and the prune-then-stats two
+    // passes are irreducible for the reason push() documents (the reap must precede the
+    // footprint total, and neither scan subsumes the other). Across DIFFERENT ids the
+    // stats read and the write are not atomic (concurrent inserts overshoot by the
+    // in-flight count, as push documents); the per-id chain makes the SAME id exact.
     let residual = null;
     if (this.#maxEntries !== null || this.#maxTotal !== null) {
       await this.prune();

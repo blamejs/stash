@@ -71,15 +71,20 @@ export function digestMarker(algo) {
 // registry algorithm and a hex length that matches its byte count exactly. This
 // is the read-side shape gate (entry.js composes it for the Entry schema) --
 // rename/extension-proof: a new DIGESTS row extends it with no edit here.
+//
+// The prefix is UNTRUSTED bytes (a replicated entry, a disk sidecar), so
+// membership is Object.hasOwn, never a bare `DIGESTS[prefix]` read: a prefix
+// like "constructor" or "__proto__" resolves to an INHERITED Object.prototype
+// member, and treating that non-undefined value as a registry hit would read an
+// algorithm the store does not define (CWE-1321, prototype-key confusion).
 export function isValidDigest(value) {
   if (typeof value !== "string") return false;
   const colon = value.indexOf(":");
   if (colon === -1) return false;
   const algo = value.slice(0, colon);
-  const d = DIGESTS[algo];
-  if (d === undefined) return false;
+  if (!Object.hasOwn(DIGESTS, algo)) return false;
   const hex = value.slice(colon + 1);
-  return hex.length === d.bytes * 2 && /^[0-9a-f]*$/.test(hex);
+  return hex.length === DIGESTS[algo].bytes * 2 && /^[0-9a-f]*$/.test(hex);
 }
 
 // algoOf(stored) -> the algorithm named by a stored digest's prefix, or null if
@@ -88,12 +93,19 @@ export function isValidDigest(value) {
 // the write path reads the requested algorithm off the entry's digest. Resolves a
 // hex-less `"<algo>:"` (the digestMarker a fresh push carries) as well as a full
 // `"<algo>:<hex>"` -- only the prefix before the colon is consulted.
+//
+// Membership is Object.hasOwn, never a bare `DIGESTS[prefix] === undefined`: the
+// prefix is untrusted, and an inherited Object.prototype key ("constructor",
+// "__proto__", "toString") resolves to a non-undefined member. Returning that
+// phantom name instead of null would report an algorithm the registry never
+// defined -- and silently defeat the write path's `algoOf(digest) ?? DEFAULT`
+// fallback, sending a name digestHash cannot construct (CWE-1321).
 export function algoOf(stored) {
   if (typeof stored !== "string") return null;
   const colon = stored.indexOf(":");
   if (colon === -1) return null;
   const algo = stored.slice(0, colon);
-  return DIGESTS[algo] === undefined ? null : algo;
+  return Object.hasOwn(DIGESTS, algo) ? algo : null;
 }
 
 // assertDigestAlgo(value, label) -> algo | throws TypeError. Config-time
