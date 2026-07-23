@@ -703,6 +703,31 @@ export function syncLockfileVersion(lock, version) {
   };
 }
 
+// syncComposeImageTag(compose, version) -- return the docs-site compose text
+// with the wiki image's pinned version tag rewritten to `version`. The image
+// is referenced two ways: a local build label (`blamejs-stash-wiki:X.Y.Z`) and
+// the prod overlay's pull default (`stash-wiki:${WIKI_IMAGE_TAG:-X.Y.Z}`). Both
+// must move with the release: DEPLOY.md documents the tag as "pinned per
+// release", so a stale pin makes the documented production deploy pull a prior
+// version -- a `docker compose pull` then re-pulls the old tag and never
+// reaches the release it claims to. Only the `stash-wiki:` reference is
+// touched; the caddy/node base tags and the unversioned container_name are
+// left alone. The wiki-image-tag-drift gate compares the result to
+// package.json, so prepare rewrites both composes in the same step it bumps
+// package.json + the lockfile and the first push is already consistent.
+export function syncComposeImageTag(compose, version) {
+  if (typeof compose !== "string") {
+    throw new TypeError("syncComposeImageTag requires the compose file text");
+  }
+  if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new TypeError("syncComposeImageTag requires an x.y.z version, got '" + version + "'");
+  }
+  return compose.replace(
+    /(stash-wiki:(?:\$\{WIKI_IMAGE_TAG:-)?)\d+\.\d+\.\d+/g,
+    "$1" + version,
+  );
+}
+
 // prepare [version] -- start a bump-only cut on a clean, synced main:
 // bump package.json + package-lock.json (default: next patch) on a fresh
 // release branch.
@@ -734,8 +759,16 @@ function cmdPrepare() {
   const lockPath = join(ROOT, "package-lock.json");
   const lock = JSON.parse(readFileSync(lockPath, "utf8"));
   writeFileSync(lockPath, JSON.stringify(syncLockfileVersion(lock, next), null, 2) + "\n");
+  // Bump the docs-site image tag in both composes in the SAME step, so the
+  // wiki-image-tag-drift gate (compose image tag === package.json version)
+  // passes on the first push and the documented production deploy pulls the
+  // release it ships, not a stale pin.
+  for (const composeName of ["docker-compose.yml", "docker-compose.prod.yml"]) {
+    const composePath = join(ROOT, "examples", "wiki", composeName);
+    writeFileSync(composePath, syncComposeImageTag(readFileSync(composePath, "utf8"), next));
+  }
   ok("version " + current + " -> " + next + " on branch release-v" + next +
-    " (package.json + package-lock.json)");
+    " (package.json + package-lock.json + docs-site composes)");
   if (!readNotesPresent(next)) {
     console.log("next: write " + releaseNotesPath(next) + ", then regen -> commit -> push -> watch -> merge -> tag -> publish");
   }
