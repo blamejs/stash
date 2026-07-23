@@ -75,7 +75,7 @@ Two rules from SPEC.md section 13.1 are wired into CI as machine-enforced checks
 
 ### Test coverage
 
-Tests run with plain `node --test`; no framework. Backends share one conformance suite run against every backend, so a new backend inherits the whole behavioral contract. The non-negotiable cases are enumerated in SPEC.md section 13 -- concurrency races on `pop`, mid-stream aborts, crash recovery, traversal refs, symlink containment, budget accounting, tombstone convergence.
+Tests run with plain `node --test`; no framework. Backends share one conformance suite run against every backend, so a new backend inherits the whole behavioral contract. Its portable core ships as `@blamejs/stash/conformance` (`runBackendConformance(factory, { test })`), so an out-of-tree backend certifies against the same cases without cloning this repo -- the in-tree suite runs the identical harness against the memory and disk backends. The non-negotiable cases are enumerated in SPEC.md section 13 -- concurrency races on `pop`, mid-stream aborts, crash recovery, traversal refs, symlink containment, budget accounting, tombstone convergence.
 
 New behavior lands with a test that **reproduces the failure first** (red on the current tree, green on the fix), driving the real consumer path (`stash.push(...)` / `stash.pop(ref)`, not a poked backend internal) with the adversarial input that triggers it. Root-cause the whole class the bug samples, not just the one input. Use `await using` for any test that needs a live `Stash`.
 

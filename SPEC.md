@@ -502,6 +502,33 @@ holds the bytes.
 }
 ```
 
+### 9.1 The interface is a stable contract
+
+This method set is a public extension point, not an internal detail. Any object implementing it
+can be passed as `backend` to `new Stash({ backend })`, so a store on a filesystem this library
+does not ship — an S3-compatible object store, a remote block device, an in-house key/value
+service — is a first-class backend, its own concern (network grants, retries, consistency,
+encryption) kept outside the policy layer per §3.
+
+The stability discipline is the one §10 applies to error codes: the method set, its semantics
+(claim atomicity, `consumeRead` atomicity, tombstone first-write-wins, digest verification on
+read), and its error expectations change only with a change to this spec, and the two shipped
+backends' snapshotted 17-method surface is normative for the contract — a snapshot refresh that
+reshaped a backend method is a spec change, not a routine one. Pre-1.0 there are no
+backwards-compat shims (§2, §11): operators upgrade across a breaking change, and this contract
+is stable *within a version line* and versioned with the package.
+
+The contract is executable. `@blamejs/stash/conformance` exports
+`runBackendConformance(factory, { test, assert? })`, which registers the behavioral suite the
+in-tree backends pass against any backend factory, driving the shipped `Stash` consumer path and
+asserting the frozen verdicts (`ENOREF`, `ECLAIMED`, `E2BIG`, `EFULL`). It imports no test
+runner — the caller wires their own (`node:test` or otherwise) — so a third-party backend proves
+interchangeability by running the identical cases, not by reading prose. The first shipped core
+covers round-trip fidelity across every source type, identity, expiry, limits, claim atomicity,
+read budgets, and tombstone first-write-wins; the fault-injection cases (planted corruption,
+crash recovery) that need to reach into a backend's storage stay in the in-tree suite until the
+contract grows an injection hook.
+
 **DiskBackend** — layout:
 
 ```

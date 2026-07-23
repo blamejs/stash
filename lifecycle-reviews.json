@@ -106,5 +106,11 @@
     "reason": "The backend contract (SPEC.md 9) is exercised by one implementation; the claim/tombstone/verify surface it must grow arrives at M5-M7, and the disk backend (M2) is the second implementation that proves the conformance suite is backend-neutral. Graduate once both backends pass the full contract.",
     "reviewedAt": "0.1.0",
     "reviewBy": "0.2.0"
+  },
+  "stash.conformance.runBackendConformance": {
+    "decision": "keep-experimental",
+    "reason": "The exported form of the SPEC.md 9 backend contract: it registers the behavioral cases a third-party backend must pass to be interchangeable with the shipped ones. The ships-with core covers round-trip fidelity, identity, expiry, limits, claim atomicity, read-budget accounting, and tombstone first-write-wins; the fault-injection cases (corruption, crash recovery) stay in the in-tree suite until a backend-provided injection hook exists. Graduate once that case set freezes for 1.0.",
+    "reviewedAt": "0.1.16",
+    "reviewBy": "0.2.0"
   }
 }

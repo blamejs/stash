@@ -125,6 +125,25 @@ The M1 + M2 + M3 + M4 + M5 + M6 + M7 surface (see `SPEC.md` section 12 for the f
   never silently bad bytes and never a silent skip.
 - The in-memory backend, same contract, for tests and process-lifetime
   stashes. One conformance suite runs against both, unmodified.
+- **A stable backend contract, and a way to certify against it.** The
+  `SPEC.md` section 9 backend interface is a public extension point: any object
+  implementing its method set is a first-class backend, so a store this library
+  doesn't ship (an S3-compatible object store, a remote block device, an
+  in-house key/value service) plugs into `new Stash({ backend })` with the
+  network and encryption kept in your layer. `@blamejs/stash/conformance`
+  exports `runBackendConformance(factory, { test })` -- the behavioral suite the
+  in-tree backends pass, driving the shipped consumer path and asserting the
+  frozen verdicts (`ENOREF`, `ECLAIMED`, `E2BIG`, `EFULL`). It imports no test
+  runner, so you wire your own (`node:test` or otherwise) and prove your backend
+  is interchangeable rather than reading prose:
+
+  ```js
+  import { test } from "node:test";
+  import { runBackendConformance } from "@blamejs/stash/conformance";
+  import { MyBackend } from "./my-backend.js";
+
+  runBackendConformance({ name: "my-backend", create: () => new MyBackend() }, { test });
+  ```
 - The full typed error set (`RefNotFound`, `RefClaimed`, `IntegrityError`,
   `SizeExceeded`, `StashFull`, `InvalidRef` -- all `StashError`, all with
   frozen codes).
