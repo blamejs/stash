@@ -724,16 +724,19 @@ export class Stash extends EventEmitter {
           if (graved || !hasSidecar || corruptSidecar) {
             await this.#backend.commit(id); // finish a decided/interrupted destruction, or reap an unreadable one
           } else {
-            // Crash recovery ALWAYS restores a stale orphan, never burns it -- even under
-            // `onPopFailure: 'burn'`. `'burn'` governs a LIVE read that fails mid-drain, which its
-            // own onFail resolves in-process; recovery of a prior run's residue is restore-only.
-            // This is a DELIBERATE trade, not an oversight: across a crash the store cannot know
-            // what a consumer observed, so it cannot tell a read that crashed mid-delivery (which a
-            // strict `'burn'` caller would want destroyed) from one that crashed before any byte
-            // (which must be kept). Given that ambiguity it always keeps the data -- silently
-            // destroying possibly-unread bytes is the worse failure than re-serving a once-only
-            // entry whose reader died. The entry survives for a retry and no grave is written; a
-            // caller needing at-most-once even across a crash must enforce it above the store.
+            // Restore a stale orphan that carries NO durable destruction intent. This does NOT
+            // silently drop a burn: a live `'burn'` failure destroys through #destroy, which
+            // writes the grave DURABLY BEFORE it commits, so a burn that got that far lands in the
+            // `graved` branch above and recovery FINISHES it -- its verdict is preserved. What
+            // reaches here is a claim with no grave: a crash orphan (a prior run died mid-read, its
+            // outcome unknowable), or a live burn that faulted before it could record the grave --
+            // which cannot be completed anyway, since committing without a grave would let a replica
+            // store() the id back (SPEC.md 4.4). For both, restoring is the only safe outcome:
+            // recovery never burns a claim whose destruction was not durably recorded, because
+            // across a crash the store cannot tell a read observed mid-delivery from one that read
+            // nothing, and silently destroying possibly-unread bytes is the worse failure. The
+            // entry survives for a retry; a caller needing at-most-once even across a crash must
+            // enforce it above the store.
             await this.#backend.restore(id);
           }
         } catch (err) {
