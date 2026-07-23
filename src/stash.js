@@ -66,7 +66,7 @@ const DEFAULT_TOMBSTONE_TTL = "30d";
 // misassembled backend fails at boot, not at first push.
 const REQUIRED_BACKEND_METHODS = [
   "write", "read", "remove", "stat", "list", "listReconcilable", "stats", "verify",
-  "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
+  "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed", "markDelivered",
   "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone",
 ];
 
@@ -117,8 +117,23 @@ function _verifiedStream(entry, source, verdict) {
   const algo = algoOf(entry.digest);
   const hash = digestHash(algo);
   let resolved = false;
+  let delivered = false;
   const verify = new Transform({
     transform(chunk, _encoding, callback) {
+      // The first chunk the store emits into the read pipeline is the first byte streamed
+      // (SPEC.md 6): `onDeliver` (set only under 'burn') records that observation so crash
+      // recovery can tell a claim that streamed a byte from one that never did -- burning
+      // the former but RESTORING the latter rather than destroying never-read data. Fired
+      // fire-and-forget, NOT awaited: awaiting would make this transform async and shift
+      // the stream's backpressure, and the marker is a best-effort crash-recovery hint
+      // (the read's own onCommit/onFail is the authoritative resolution), so a marker whose
+      // write loses a microsecond race with a crash only softens the burn verdict on that
+      // crash -- never a correctness failure of the read itself. A crash before ANY chunk
+      // is emitted leaves it unmarked, so the never-streamed case restores precisely.
+      if (!delivered) {
+        delivered = true;
+        if (verdict && verdict.onDeliver) void verdict.onDeliver().catch(() => {}); // drop-silent hint
+      }
       hash.update(chunk);
       callback(null, chunk);
     },
@@ -659,7 +674,7 @@ export class Stash extends EventEmitter {
       this.#ensureGuardBound(); // listClaims has run the backend's lazy init -> its identity is now stable
       const now = Date.now();
       let nextAt = Infinity;
-      for (const { id, claimedAt } of claims) {
+      for (const { id, claimedAt, delivered } of claims) {
         const staleAt = claimedAt + this.#claimTimeoutMs;
         // A claim a LIVE in-process reader holds is NEVER reclaimed by age: single-
         // writer-per-root (SPEC.md 6) makes this process the sole claimant, so a claim
@@ -723,17 +738,24 @@ export class Stash extends EventEmitter {
         try {
           if (graved || !hasSidecar || corruptSidecar) {
             await this.#backend.commit(id); // finish a decided/interrupted destruction, or reap an unreadable one
-          } else if (this.#onPopFailure === "burn") {
-            // A stale read-claim burned by policy is a FRESH destruction -- it must leave
-            // a grave (SPEC.md 4.4) or a replica could store() the id back, resurrecting
-            // content the burn intended to remove. Grave BEFORE commit (the #destroy
-            // ordering). Recovery reconciles a PRIOR process's residue -- an entry this
-            // process's listeners never observed -- so it writes the durable grave but
-            // emits no event (unlike the live burn). The claim cannot say whether it was
-            // a pop or a budgeted read, so the grave records the generic read cause.
+          } else if (this.#onPopFailure === "burn" && delivered) {
+            // Burn ONLY a claim that delivered a byte to a consumer (`delivered`): burn's
+            // rationale is "a read attempt means the bytes may have been observed", and a
+            // claim that crashed before streaming a byte observed nothing -- burning it
+            // would silently destroy never-read data (SPEC.md 6). A delivered claim burned
+            // by policy is a FRESH destruction, so it must leave a grave (SPEC.md 4.4) or a
+            // replica could store() the id back, resurrecting content the burn removed.
+            // Grave BEFORE commit (the #destroy ordering). Recovery reconciles a PRIOR
+            // process's residue -- an entry this process's listeners never observed -- so it
+            // writes the durable grave but emits no event (unlike the live burn). The claim
+            // cannot say whether it was a pop or a budgeted read, so the grave records the
+            // generic read cause.
             await this.#backend.writeTombstone(id, makeTombstone(id, "pop"));
             await this.#backend.commit(id);
           } else {
+            // 'restore' policy, OR a 'burn' claim that never delivered a byte: return the
+            // entry. A never-delivered burn orphan is unobserved, so restoring it (rather
+            // than destroying it) is correct -- the entry survives for a retry, no grave.
             await this.#backend.restore(id);
           }
         } catch (err) {
@@ -798,6 +820,12 @@ export class Stash extends EventEmitter {
       throw new RefNotFound();
     }
     return _verifiedStream(entry, source, {
+      // Under 'burn' ONLY, record that the first byte reached the consumer, so a crash
+      // recovery can tell a delivered claim (observed -> burn) from a never-delivered one
+      // (unobserved -> restore, never destroy never-read data; SPEC.md 6). The default
+      // 'restore' policy always restores an orphan, so it needs no marker and pays no
+      // per-read cost. The marker rides the claim and is cleared on restore/commit.
+      onDeliver: this.#onPopFailure === "burn" ? () => this.#backend.markDelivered(ref) : undefined,
       // Drop the live-holder guard once the verdict RESOLVES the claim (a destroy, a
       // debit+restore, or a burn), never before, and in a `finally` so a resolution
       // fault still releases it: the read is over, and a claim a faulted commit left
@@ -1388,8 +1416,9 @@ export class Stash extends EventEmitter {
    * Audit the store's physical integrity. Dry-run by default: it digest-checks
    * every blob (streamed, never a full-blob read) and reports damage --
    * `digest-mismatch`, `size-mismatch`, `corrupt-sidecar`, `missing-blob`,
-   * `orphan-blob`, `orphan-tmp`, `foreign-file`, `stale-claim`, `corrupt-tombstone`
-   * -- without touching anything. `{ repair: true }` removes ONLY what it condemns (a
+   * `orphan-blob`, `orphan-tmp`, `foreign-file`, `stale-claim`, `corrupt-tombstone`,
+   * `orphan-delivered` (a delivery marker whose claim is gone -- inert, since ids never
+   * repeat, but layout residue repair reaps) -- without touching anything. `{ repair: true }` removes ONLY what it condemns (a
    * damaged entry's blob and sidecar together, or a corrupt grave whose contents fail
    * the parser); healthy entries survive byte-identical, a fresh push's in-flight
    * `.tmp` is spared, and a stale claim is reported but never deleted (resolving it is

@@ -130,11 +130,18 @@ function _renameSyncRetry(from, to) {
   }
 }
 
-function plantClaim(root, ref, { ageMs = CLAIM_STALE_MS, dropSidecar = false } = {}) {
+function plantClaim(root, ref, { ageMs = CLAIM_STALE_MS, dropSidecar = false, delivered = false } = {}) {
   _renameSyncRetry(join(root, "blobs", ref), join(root, "claims", ref));
   const when = new Date(Date.now() - ageMs);
   utimesSync(join(root, "claims", ref), when, when);
   if (dropSidecar) rmSync(join(root, "meta", ref + ".json"));
+  // A delivered marker models a crashed pop that DID stream a byte to a consumer, so
+  // recovery under 'burn' destroys it; without it the abandoned claim never delivered
+  // and recovery restores it (SPEC.md 6).
+  if (delivered) {
+    mkdirSync(join(root, "delivered"), { recursive: true });
+    writeFileSync(join(root, "delivered", ref), "");
+  }
 }
 
 // A child that takes a real claim then SIGKILLs itself mid-pop, leaving the
@@ -999,7 +1006,7 @@ suite("disk: crash recovery (SPEC 6)", () => {
   test("an abandoned claim burns under onPopFailure:'burn', leaving a GRAVE and no live residue (no resurrection)", async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("condemned");
-    plantClaim(root, ref);
+    plantClaim(root, ref, { delivered: true }); // a byte reached a consumer before the crash, so burn (not restore) is correct
     const next = new Stash({ backend: new DiskBackend({ root }), onPopFailure: "burn" });
     await assert.rejects(next.apply(ref), RefNotFound);
     for (const dir of ["blobs", "meta", "claims"]) {
@@ -1231,7 +1238,7 @@ suite("disk: crash recovery (SPEC 6)", () => {
     const inner = new DiskBackend({ root });
     let raced = false;
     const backend = {};
-    for (const m of ["write", "read", "remove", "stat", "list", "listReconcilable", "stats", "verify", "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed", "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone"]) {
+    for (const m of ["write", "read", "remove", "stat", "list", "listReconcilable", "stats", "verify", "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed", "markDelivered", "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone"]) {
       backend[m] = (...a) => inner[m](...a);
     }
     backend.stat = async (id) => {
@@ -1512,6 +1519,19 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     assert.equal(existsSync(bp(root, orphan)), true, "the dry run leaves it");
     await stash.verify({ repair: true });
     assert.equal(existsSync(bp(root, orphan)), false, "repair removes the orphan blob");
+  });
+
+  test("an orphan delivery marker (its claim gone) is orphan-delivered, reaped only under repair", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("keep");
+    const orphan = generate();
+    mkdirSync(join(root, "delivered"), { recursive: true });
+    writeFileSync(join(root, "delivered", orphan), ""); // a burn-delivery marker whose claim no longer exists
+    const dry = await stash.verify();
+    assert.deepEqual(dry.findings, [{ kind: "orphan-delivered", id: orphan }]);
+    assert.equal(existsSync(join(root, "delivered", orphan)), true, "the dry run leaves it");
+    await stash.verify({ repair: true });
+    assert.equal(existsSync(join(root, "delivered", orphan)), false, "repair reaps the orphan marker");
   });
 
   test("a FRESH sidecarless blob is SPARED -- write() renames blob->final BEFORE the sidecar, so it may be an in-flight push (CWE-367)", async () => {

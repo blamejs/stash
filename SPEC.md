@@ -394,6 +394,18 @@ live-holder rule that step would let recovery burn or restore a once-only read o
 active drain. A crashed process leaves its live-claim set behind with it, so the next process
 starts empty and still reclaims every genuine orphan purely by age — crash recovery is unchanged.
 
+**Delivery-gated `'burn'` recovery.** `'burn'`'s rationale is that a read *attempt* may have
+observed the bytes — but a process that claimed an entry and then crashed *before streaming a
+single byte* observed nothing, so burning it would silently destroy never-read data. Recovery
+therefore burns an orphaned `'burn'` claim only if a byte actually reached a consumer; one that
+never delivered is **restored**, not destroyed. The read path records that observation the moment
+it emits the first byte — the backend's `markDelivered` writes a persistent marker it reports back
+through `listClaims` — so a later process's recovery can tell a delivered claim from an untouched
+one. The gating is for recovery of a *crashed* claim only: a **live** `'burn'` read that fails
+mid-drain (a dropped connection at 60%) is still burned in-process, because it demonstrably
+delivered bytes. A never-delivered orphan under the default `'restore'` policy was always restored;
+this only stops `'burn'` from turning a crash-before-any-read into data destruction.
+
 `claimTimeout` bounds how long an orphan sits before recovery resolves it; set it to comfortably
 exceed the longest `pop`/budgeted read, since across an unclean restart a claim's age is the only
 signal that it was abandoned. A non-positive `claimTimeout` is refused at construction — it would
@@ -438,6 +450,30 @@ Two caveats, both meaning this is additive and **does not replace the `unref()` 
 
 It's mainly for scripts and tests, where it replaces the `try/finally` around every test that
 needs a live `Stash`.
+
+### 7.2 Clock posture
+
+Every time-based decision reads the **wall clock** (`Date.now()`), not a monotonic source, because
+each must survive a process restart and — for expiry and tombstone pruning — agree across replicas
+that never share a monotonic origin:
+
+- **Expiry** compares `expiresAt` (stamped once at push, never extended) against the wall clock.
+  `expiresAt` is absolute, so replicas reach the same deadline independently (§4.4) — expiry is
+  deterministic, not skew-sensitive.
+- **Claim lease freshness** (`claimTimeout`) compares a claim's mtime against the wall clock, but
+  **only for an orphan** — a claim a live in-process reader holds is never age-reclaimed (§6), so a
+  clock step cannot reclaim a read mid-drain.
+- **Tombstone pruning** (`tombstoneTtl`) compares a grave's `destroyedAt` against the wall clock.
+
+Behavior under a wall-clock **step** follows from this. A **forward** step (an NTP correction, a
+VM-snapshot resume) can expire entries, age orphan claims, and prune graves earlier than their
+wall-clock terms — bounded, and for claims defused by the live-holder rule so a once-only read is
+never handed out twice or destroyed under an active drain. A **backward** step defers expiry, orphan
+recovery, and grave pruning by the step size; nothing is destroyed *early* by a backward step, and
+no entry ever outlives its push-time terms as a result (the monotone rule, §4.2, is never violated —
+a step changes only *when* a destruction the terms already permit is observed, never whether it
+happens). The store takes no dependency on clock monotonicity and installs no heartbeat or lease
+that the monotone rule forbids.
 
 ---
 
@@ -507,10 +543,11 @@ holds the bytes.
   async stat(id) {},                    // → Entry
   async list() {},                      // → Entry[]  (loud over a corrupt sidecar)
   async listReconcilable() {},          // → { entries, corrupt }  (list(), resilient over a corrupt sidecar for §4.4 reconciliation)
-  async listClaims() {},                // → { id, claimedAt }[]  (for recovery)
+  async listClaims() {},                // → { id, claimedAt, delivered }[]  (for recovery; delivered gates 'burn', §6)
   async stats() {},                     // → { entries, bytes, claimed }
   async consumeRead(id) {},             // atomic readsLeft decrement → remaining
   async isClaimed(id) {},               // → boolean (a contended reader probes before the advisory stat)
+  async markDelivered(id) {},           // record (persistently) that a byte of this claim reached a consumer (§6 delivery-gated burn)
   async writeTombstone(id, t) {},       // first-write-wins; t is { id, destroyedAt, cause }
   async hasTombstone(id) {},            // → boolean
   async listTombstones() {},            // → Tombstone[]
@@ -530,7 +567,7 @@ encryption) kept outside the policy layer per §3.
 The stability discipline is the one §10 applies to error codes: the method set, its semantics
 (claim atomicity, `consumeRead` atomicity, tombstone first-write-wins, digest verification on
 read), and its error expectations change only with a change to this spec, and the two shipped
-backends' snapshotted 17-method surface is normative for the contract — a snapshot refresh that
+backends' snapshotted 18-method surface is normative for the contract — a snapshot refresh that
 reshaped a backend method is a spec change, not a routine one. Pre-1.0 there are no
 backwards-compat shims (§2, §11): operators upgrade across a breaking change, and this contract
 is stable *within a version line* and versioned with the package.

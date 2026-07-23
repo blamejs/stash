@@ -22,7 +22,7 @@ import { options } from "../validate.js";
 // The disk layout's required directories, in one place: #init creates every one,
 // and a consumer that must recognize a real stash root (the CLI's layout pre-check)
 // validates against THIS set, so a new layout directory extends both at once.
-export const SUBDIRS = ["blobs", "meta", "claims", "tombstones"];
+export const SUBDIRS = ["blobs", "meta", "claims", "tombstones", "delivered"];
 
 // A sidecar is one Entry's JSON: id + counters + caller meta. Far above
 // any legitimate sidecar, far below a parser-DoS payload -- a sidecar
@@ -1013,6 +1013,24 @@ export class DiskBackend {
       }
     }
 
+    // delivered/: the burn-only observation markers (SPEC.md 6). A marker whose claim
+    // is gone is inert -- ids never repeat, so it can never gate a future recovery --
+    // but it is layout residue, so report and reap it; a foreign name is corruption,
+    // loud, like every other dir.
+    const deliveredDir = await this.#containedDir("delivered");
+    const claimsForDelivered = await this.#containedDir("claims");
+    for (const name of await readdir(deliveredDir)) {
+      if (await this.#auditOrphanTmp("delivered", deliveredDir, name, now, opts, findings, repaired)) continue;
+      if (!isValid(name)) {
+        findings.push({ kind: "foreign-file", id: null });
+        if (opts.repair) await this.#discard("delivered", name, "foreign-file", repaired);
+        continue;
+      }
+      if (await this.#isPresent(join(claimsForDelivered, name))) continue; // its claim still stands
+      findings.push({ kind: "orphan-delivered", id: name });
+      if (opts.repair) await this.#discard("delivered", name, "orphan-delivered", repaired);
+    }
+
     return { scanned: scanned.size, findings, repaired };
   }
 
@@ -1203,6 +1221,10 @@ export class DiskBackend {
   async restore(id) {
     assertValid(id);
     const claimsDir = await this.#containedDir("claims");
+    // The claim is being resolved either way (restored to blobs/, or its drop
+    // finished), so drop its delivered marker; force makes the common no-marker case
+    // (a restore-policy store, or a claim that never delivered a byte) a no-op.
+    await rm(join(await this.#containedDir("delivered"), id), { force: true });
     // A drop during the claim destroys the entry by unlinking its sidecar,
     // orphaning the claimed blob. Restoring that blob into blobs/ would resurrect
     // bytes for an entry that no longer exists (SPEC 4.2 monotone) -- the same
@@ -1292,15 +1314,19 @@ export class DiskBackend {
     // commit (force already makes an already-gone blob a no-op -- idempotent). recursive
     // for the same directory-shaped-corruption tolerance as the sidecar above.
     await _retryTransient(() => rm(join(claimsDir, id), { force: true, recursive: true }));
+    // The claim is gone; drop its delivered marker too (force: a no-op when none was
+    // written -- only 'burn' reads write one).
+    await rm(join(await this.#containedDir("delivered"), id), { force: true });
   }
 
-  // listClaims() -> { id, claimedAt }[]. The recovery scan's input. Same
+  // listClaims() -> { id, claimedAt, delivered }[]. The recovery scan's input. Same
   // name discipline as list(): a foreign name in claims/ is corruption, .tmp is
   // invisible, and a claim that vanished between the readdir and its lstat (a
   // concurrent restore/commit) has simply left -- skipped, not failed. claimedAt
   // is the mtime the claim stamped.
   async listClaims() {
     const claimsDir = await this.#containedDir("claims");
+    const deliveredDir = await this.#containedDir("delivered");
     const out = [];
     for (const name of await readdir(claimsDir)) {
       if (name.endsWith(".tmp")) continue;
@@ -1316,9 +1342,26 @@ export class DiskBackend {
         _absent(err);
         continue;
       }
-      out.push({ id: name, claimedAt });
+      // `delivered` is a persistent marker file (delivered/<id>) the read path drops
+      // when the first byte reaches a consumer under 'burn' (SPEC.md 6); its presence
+      // survives the crash that orphaned the claim, so recovery can tell an observed
+      // read from an unobserved one and restore rather than destroy never-read data.
+      const delivered = await this.#isPresent(join(deliveredDir, name));
+      out.push({ id: name, claimedAt, delivered });
     }
     return out;
+  }
+
+  // markDelivered(id) -> void. Record, PERSISTENTLY, that a byte of this claim reached
+  // a consumer (SPEC.md 6, 9). An empty marker at delivered/<id>: recovery reads its
+  // presence to decide burn (observed) vs restore (never observed). Idempotent (a "w"
+  // create truncates a re-mark), contained, and metadata-durable exactly as the claim
+  // link is -- the read path calls it only under 'burn', before it hands over the byte.
+  async markDelivered(id) {
+    assertValid(id);
+    const deliveredDir = await this.#containedDir("delivered");
+    const fh = await open(join(deliveredDir, id), "w", FILE_MODE);
+    await fh.close();
   }
 
   // isClaimed(id) -> boolean. Advisory: is a live claim held on this id right now?

@@ -189,6 +189,7 @@ for (const { name, create } of BACKENDS) {
       const orphanClaim = await inner.claim(orphanRef); // the crashed prior run's abandoned claim
       orphanClaim.source.on("error", () => {});
       orphanClaim.source.destroy(); // close the read handle; the claim file itself remains
+      await inner.markDelivered(orphanRef); // it delivered a byte before crashing, so burn (its grave is the recovery-fired signal)
 
       // The new process. A short lease + a reader parked past it reproduces the
       // forward-step condition (a live claim aged past claimTimeout).
@@ -213,6 +214,45 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual(await drain(stream), big, "the mid-drain read completes with the full, correct bytes");
       await pollUntil(async () => !(await present(stash, liveRef)));
       assert.ok((await stash.tombstones()).some((g) => g.id === liveRef), "the reader's own pop destroyed it exactly once");
+      await stash.close();
+    });
+
+    test("recovery RESTORES a never-delivered orphan even under 'burn' -- a crash before any byte reached a consumer is not an observation (SPEC.md 6)", { timeout: 10000 }, async () => {
+      // burn destroys an entry because "a read attempt means the bytes may have been
+      // observed". A process that claimed then crashed WITHOUT streaming a byte observed
+      // nothing, so recovery must RESTORE it, not burn it -- otherwise a crash silently
+      // destroys never-read data. The claim below never has markDelivered called on it,
+      // so it is a zero-observation orphan; under burn it must come back, not die.
+      const inner = create();
+      const setup = new Stash({ backend: inner, sweepInterval: null });
+      const ref = await setup.push("never-observed bytes");
+      const orphan = await inner.claim(ref); // a prior run claimed it...
+      orphan.source.on("error", () => {});
+      orphan.source.destroy(); // ...and crashed WITHOUT streaming a byte (no markDelivered)
+
+      const stash = new Stash({ backend: inner, sweepInterval: null, onPopFailure: "burn", claimTimeout: 50 });
+      await pollUntil(async () => { await stash.list(); return !(await inner.isClaimed(ref)); }); // recovery resolves the orphan
+      assert.equal(await stash.has(ref), true, "a never-delivered orphan is restored, not burned");
+      assert.equal((await stash.tombstones()).some((g) => g.id === ref), false, "no grave -- nothing was observed to destroy");
+      assert.deepEqual(await applyDrain(stash, ref), Buffer.from("never-observed bytes"), "the restored entry reads back intact");
+      await stash.close();
+    });
+
+    test("recovery BURNS a delivered orphan under 'burn' -- a byte that reached a consumer is an observation (SPEC.md 6)", { timeout: 10000 }, async () => {
+      // The other side of delivery-gating: once a byte has been handed to a consumer, the
+      // burn rationale holds -- recovery of a crashed delivered claim destroys the entry.
+      const inner = create();
+      const setup = new Stash({ backend: inner, sweepInterval: null });
+      const ref = await setup.push("observed bytes");
+      const orphan = await inner.claim(ref);
+      orphan.source.on("error", () => {});
+      orphan.source.destroy();
+      await inner.markDelivered(ref); // a byte reached a consumer before the crash
+
+      const stash = new Stash({ backend: inner, sweepInterval: null, onPopFailure: "burn", claimTimeout: 50 });
+      await pollUntil(async () => { await stash.list(); return (await stash.tombstones()).some((g) => g.id === ref); });
+      assert.equal(await stash.has(ref), false, "a delivered orphan is burned");
+      assert.ok((await stash.tombstones()).some((g) => g.id === ref), "a burned entry leaves a grave -- no resurrection");
       await stash.close();
     });
 
@@ -508,6 +548,7 @@ for (const { name, create } of BACKENDS) {
       const oc = await inner.claim(orphanRef); // young orphan: triggers the mid-drain re-scan
       oc.source.on("error", () => {});
       oc.source.destroy();
+      await inner.markDelivered(orphanRef); // delivered before crashing -> burn, so its grave marks the scan firing
       const big = Buffer.alloc(256 * C.BYTES.KIB, 0x68);
       const victimRef = await setup.push(big);
 

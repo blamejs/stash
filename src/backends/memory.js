@@ -223,8 +223,19 @@ export class MemoryBackend {
   // claims a prior run abandoned; no operator-facing claim inspection ships in M5.
   async listClaims() {
     const out = [];
-    for (const [id, held] of this.#claims) out.push({ id, claimedAt: held.claimedAt });
+    for (const [id, held] of this.#claims) out.push({ id, claimedAt: held.claimedAt, delivered: held.delivered === true });
     return out;
+  }
+
+  // markDelivered(id) -> void. Record that a byte of this claim reached a consumer
+  // (SPEC.md 6, 9): recovery reads it via listClaims to burn an observed claim but
+  // restore a never-delivered one. The flag rides the in-heap claim record, so it
+  // vanishes with the claim on restore/commit and, like every memory claim, does not
+  // survive the process. A markDelivered for an id that is not claimed is a no-op --
+  // there is no claim for the marker to gate.
+  async markDelivered(id) {
+    const held = this.#claims.get(id);
+    if (held !== undefined) held.delivered = true;
   }
 
   // isClaimed(id) -> boolean. Advisory: is a live claim held on this id right now?

@@ -85,7 +85,7 @@ export async function syncOnce(from, to, bytesOf) {
 // REQUIRED_BACKEND_METHODS as the contract grows across milestones.
 export const BACKEND_METHODS = [
   "write", "read", "remove", "stat", "list", "listReconcilable", "stats", "verify",
-  "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
+  "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed", "markDelivered",
   "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone",
 ];
 

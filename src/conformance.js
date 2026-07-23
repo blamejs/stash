@@ -366,6 +366,29 @@ export function runBackendConformance(factory, options) {
     await assert.rejects(stash.show(ref), RefNotFound);
   });
 
+  test("markDelivered records a claim's delivery so recovery can tell an observed read from an unobserved one (SPEC.md 6, 9)", async () => {
+    // A crash-orphaned claim under 'burn' is destroyed only if a byte reached a consumer;
+    // one that never delivered is restored, not burned (never destroy never-read data). A
+    // backend records that observation with markDelivered and reports it via listClaims, so
+    // recovery in a later process reads it. Exercised directly on the backend contract --
+    // markDelivered has no standalone Stash verb (the read path calls it under 'burn').
+    const backend = create();
+    const stash = new Stash({ backend });
+    const ref = await stash.push("observable bytes");
+    const claim = await backend.claim(ref); // claim it exactly as a pop does
+    if (claim.source && typeof claim.source.destroy === "function") claim.source.destroy();
+    const claimedAs = (list) => list.find((c) => c.id === ref);
+    const before = claimedAs(await backend.listClaims());
+    assert.ok(before, "the claim is listed");
+    assert.equal(before.delivered, false, "a fresh claim reports delivered:false");
+    await backend.markDelivered(ref);
+    assert.equal(claimedAs(await backend.listClaims()).delivered, true, "markDelivered flips the claim to delivered:true");
+    // Idempotent: a second mark is harmless.
+    await backend.markDelivered(ref);
+    assert.equal(claimedAs(await backend.listClaims()).delivered, true, "markDelivered is idempotent");
+    await backend.restore(ref); // resolve the claim so the case leaves nothing behind
+  });
+
   // ---- Read budgets: consumeRead is atomic and never over-spends ----
 
   test("reads:2 sequential: two full drains, one credit left between them, then RefNotFound", async () => {

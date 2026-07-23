@@ -240,6 +240,26 @@ throws a native `TypeError` at the call, before any storage is touched.
 
 <!-- END error-codes -->
 
+## Recipes
+
+**Materialize an entry to a file, in one copy.** There is deliberately no `materializeTo(dest)`
+method: `apply` and `pop` already return a digest-verified stream, so piping it to a destination is
+a single copy the store never buffers, the bytes are verified end to end, it works against any
+backend, and the write lands inside the caller's own filesystem grant. A store-side copy would give
+up the digest-verified read, cross the write-scope boundary (the store writes only within its own
+root), and only work on a filesystem backend.
+
+```js
+import { pipeline } from "node:stream/promises";
+import { createWriteStream } from "node:fs";
+
+// non-destructive: read a verified copy, leave the entry in place
+await pipeline(await stash.apply(ref), createWriteStream(dest));
+
+// or destroy-on-read: the entry is gone once the file is written
+await pipeline(await stash.pop(ref), createWriteStream(dest));
+```
+
 ## Runnable examples
 
 Each is a plain-node script, zero dependencies, runnable straight from a clone:
