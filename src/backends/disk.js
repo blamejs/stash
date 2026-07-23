@@ -22,7 +22,13 @@ import { options } from "../validate.js";
 // The disk layout's required directories, in one place: #init creates every one,
 // and a consumer that must recognize a real stash root (the CLI's layout pre-check)
 // validates against THIS set, so a new layout directory extends both at once.
-export const SUBDIRS = ["blobs", "meta", "claims", "tombstones", "delivered"];
+// The dirs that must pre-exist for a path to be a valid disk stash root -- the CLI's
+// layout check requires exactly these. blobs/meta/claims/tombstones have defined a stash
+// since M2/M7; delivered/ (the SPEC.md 6 burn-delivery markers) is auto-created by #init on first
+// use, so it is NOT required to pre-exist -- a pre-0.1.17 root without it is still a valid
+// stash, and opening it (library or CLI) creates the dir.
+export const CORE_SUBDIRS = ["blobs", "meta", "claims", "tombstones"];
+export const SUBDIRS = [...CORE_SUBDIRS, "delivered"];
 
 // A sidecar is one Entry's JSON: id + counters + caller meta. Far above
 // any legitimate sidecar, far below a parser-DoS payload -- a sidecar
@@ -1181,6 +1187,11 @@ export class DiskBackend {
     }
     // Won the claim: drop the original name; the blob now lives only at claims/<id>.
     await _retryTransient(() => rm(join(blobDir, id), { force: true }));
+    // A fresh claim starts with NO delivery state (the memory backend's fresh-record
+    // semantics): clear any residual marker so a budgeted id re-claimed after a prior read
+    // cannot inherit that read's delivered flag. The read path records delivery for THIS
+    // claim only after the mark is durably written and before the first byte is released.
+    await rm(join(await this.#containedDir("delivered"), id), { force: true });
     // link does not touch mtime, so stamp claimedAt explicitly -- otherwise every
     // claim on an older entry would look instantly stale to recovery (fragile
     // area 3). A crash in the window before this leaves the old mtime, which
@@ -1359,8 +1370,18 @@ export class DiskBackend {
   // link is -- the read path calls it only under 'burn', before it hands over the byte.
   async markDelivered(id) {
     assertValid(id);
+    // No claim, nothing to gate: a mark must never resurrect a marker for a claim that has
+    // been resolved (and, for a budgeted id, re-claimed) -- so it is a no-op unless the
+    // claim still stands, mirroring the memory backend's flag-on-the-live-record semantics.
+    const claimsDir = await this.#containedDir("claims");
+    if (!(await this.#isPresent(join(claimsDir, id)))) return;
     const deliveredDir = await this.#containedDir("delivered");
-    const fh = await open(join(deliveredDir, id), "w", FILE_MODE);
+    // O_NOFOLLOW | O_NONBLOCK, the discipline every other open in this backend holds: a
+    // planted symlink at the marker path is refused (CWE-59), never followed to truncate an
+    // out-of-store target, and a planted FIFO cannot park the open. O_CREAT | O_TRUNC keeps
+    // a re-mark idempotent.
+    const flags = FS.O_WRONLY | FS.O_CREAT | FS.O_TRUNC | (FS.O_NOFOLLOW || 0) | (FS.O_NONBLOCK || 0);
+    const fh = await open(join(deliveredDir, id), flags, FILE_MODE);
     await fh.close();
   }
 

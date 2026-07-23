@@ -120,21 +120,27 @@ function _verifiedStream(entry, source, verdict) {
   let delivered = false;
   const verify = new Transform({
     transform(chunk, _encoding, callback) {
-      // The first chunk the store emits into the read pipeline is the first byte streamed
-      // (SPEC.md 6): `onDeliver` (set only under 'burn') records that observation so crash
-      // recovery can tell a claim that streamed a byte from one that never did -- burning
-      // the former but RESTORING the latter rather than destroying never-read data. Fired
-      // fire-and-forget, NOT awaited: awaiting would make this transform async and shift
-      // the stream's backpressure, and the marker is a best-effort crash-recovery hint
-      // (the read's own onCommit/onFail is the authoritative resolution), so a marker whose
-      // write loses a microsecond race with a crash only softens the burn verdict on that
-      // crash -- never a correctness failure of the read itself. A crash before ANY chunk
-      // is emitted leaves it unmarked, so the never-streamed case restores precisely.
+      hash.update(chunk);
+      // The first chunk the store emits is the first byte streamed (SPEC.md 6): under 'burn',
+      // `onDeliver` records that observation so crash recovery can tell a claim that streamed a
+      // byte from one that never did -- burning the former but RESTORING the latter rather than
+      // destroying never-read data. HOLD the first byte until the mark is DURABLY recorded, then
+      // release it, by deferring the transform callback (never an `async transform`, which would
+      // shift stream backpressure). Awaiting -- not fire-and-forget -- means the mark completes
+      // BEFORE the read can progress or resolve, so it can never race a resolution and leave a
+      // stale marker outliving its claim (a budgeted id re-claimed later cannot inherit it).
+      // Best-effort: a marker-write failure still releases the byte, because the read's own
+      // onCommit/onFail is the authoritative resolution and a lost marker only softens a later
+      // crash's burn verdict toward restore (the data-safe direction), never fails the read. A
+      // crash before ANY chunk is emitted leaves it unmarked, so the never-streamed case
+      // restores precisely.
       if (!delivered) {
         delivered = true;
-        if (verdict && verdict.onDeliver) void verdict.onDeliver().catch(() => {}); // drop-silent hint
+        if (verdict && verdict.onDeliver) {
+          verdict.onDeliver().then(() => callback(null, chunk), () => callback(null, chunk));
+          return;
+        }
       }
-      hash.update(chunk);
       callback(null, chunk);
     },
     async flush(callback) {

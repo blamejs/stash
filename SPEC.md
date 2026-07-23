@@ -567,7 +567,7 @@ encryption) kept outside the policy layer per §3.
 The stability discipline is the one §10 applies to error codes: the method set, its semantics
 (claim atomicity, `consumeRead` atomicity, tombstone first-write-wins, digest verification on
 read), and its error expectations change only with a change to this spec, and the two shipped
-backends' snapshotted 18-method surface is normative for the contract — a snapshot refresh that
+backends' snapshotted 19-method surface is normative for the contract — a snapshot refresh that
 reshaped a backend method is a spec change, not a routine one. Pre-1.0 there are no
 backwards-compat shims (§2, §11): operators upgrade across a breaking change, and this contract
 is stable *within a version line* and versioned with the package.

@@ -42,7 +42,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-import { DiskBackend, SUBDIRS } from "./backends/disk.js";
+import { DiskBackend, CORE_SUBDIRS } from "./backends/disk.js";
 import { StashError } from "./errors.js";
 import { Stash, version } from "./index.js";
 import { isValid } from "./ref.js";
@@ -105,14 +105,16 @@ function resolveRoot(flags, env) {
 // entries" and mask the mistake). No path is echoed (capability-in-error-message) --
 // the operator sees their own --root argument.
 function assertStashLayout(root) {
-  // A real disk root carries the FULL layout; require EVERY directory #init creates
-  // (SUBDIRS, imported so this can never drift from the backend), so a partial or
-  // wrong directory is refused, not silently completed into an empty store -- #init
-  // would otherwise re-create any missing one on first use. A missing directory
-  // (ENOENT/ENOTDIR) is "no stash here" -- a usage error the operator fixes by
-  // correcting --root -- but an access or I/O fault (EACCES, ...) is a REAL fault
-  // surfaced distinctly, never masked as "not found".
-  for (const sub of SUBDIRS) {
+  // A real disk root carries the CORE layout: require every directory that has DEFINED a
+  // stash (CORE_SUBDIRS, imported so this can never drift from the backend), so a partial
+  // or wrong directory is refused, not silently completed into an empty store -- #init
+  // would otherwise re-create any missing one on first use. The auto-created delivered/
+  // dir (SPEC.md 6 burn markers, added in 0.1.17) is deliberately NOT required, so a stash written
+  // by an older version -- which has no delivered/ -- is still recognized and served, and
+  // the backend creates the dir on first use. A missing core directory (ENOENT/ENOTDIR) is
+  // "no stash here" -- a usage error the operator fixes by correcting --root -- but an
+  // access or I/O fault (EACCES, ...) is a REAL fault surfaced distinctly, never masked.
+  for (const sub of CORE_SUBDIRS) {
     let st;
     try {
       st = statSync(join(root, sub));

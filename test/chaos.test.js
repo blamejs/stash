@@ -184,8 +184,13 @@ for (const { name, create } of BACKENDS) {
       // backend leaves a claim the process Stash never tracked -- a genuine orphan.
       const setup = new Stash({ backend: inner, sweepInterval: null });
       const orphanRef = await setup.push("orphan-data");
-      const big = Buffer.alloc(256 * C.BYTES.KIB, 0x65); // large enough that verify backpressures with no consumer -> genuinely mid-drain
-      const liveRef = await setup.push(big);
+      // A MULTI-CHUNK live entry so the read backpressures with no consumer -- genuinely
+      // mid-drain -- on BOTH backends: the memory backend streams a single buffer as ONE
+      // chunk, which under 'burn' (whose read holds the first byte until its delivery is
+      // recorded) would drain into the stream buffer and self-complete rather than stay held.
+      const big = Buffer.alloc(256 * C.BYTES.KIB, 0x65);
+      async function* liveChunks() { for (let i = 0; i < big.length; i += 64 * C.BYTES.KIB) yield big.subarray(i, i + 64 * C.BYTES.KIB); }
+      const liveRef = await setup.push(liveChunks());
       const orphanClaim = await inner.claim(orphanRef); // the crashed prior run's abandoned claim
       orphanClaim.source.on("error", () => {});
       orphanClaim.source.destroy(); // close the read handle; the claim file itself remains
@@ -253,6 +258,50 @@ for (const { name, create } of BACKENDS) {
       await pollUntil(async () => { await stash.list(); return (await stash.tombstones()).some((g) => g.id === ref); });
       assert.equal(await stash.has(ref), false, "a delivered orphan is burned");
       assert.ok((await stash.tombstones()).some((g) => g.id === ref), "a burned entry leaves a grave -- no resurrection");
+      await stash.close();
+    });
+
+    test("under 'burn', a byte reaches the consumer only AFTER its delivery is recorded -- no fire-and-forget race leaves a stale marker (SPEC.md 6)", async () => {
+      // The mark must be durable BEFORE the first byte is released, not fire-and-forget: a
+      // mark landing late (after a budgeted read's restore cleared the marker) would leave a
+      // stale marker that makes a later never-delivered re-claim of the same id get BURNED --
+      // destroying never-read data. Delaying markDelivered proves the byte waits for it.
+      const inner = create();
+      let marked = false;
+      let deliveredBeforeMark = false;
+      const backend = wrapBackend(inner, {
+        markDelivered: async (id) => { await new Promise((r) => setImmediate(r)); marked = true; return inner.markDelivered(id); },
+      });
+      const stash = new Stash({ backend, sweepInterval: null, onPopFailure: "burn" });
+      const ref = await stash.push("observed payload");
+      const stream = await stash.pop(ref);
+      stream.on("data", () => { if (!marked) deliveredBeforeMark = true; });
+      await drain(stream);
+      assert.equal(deliveredBeforeMark, false, "no byte reached the consumer before markDelivered recorded it");
+      assert.equal(marked, true, "markDelivered ran");
+      await stash.close();
+    });
+
+    test("a budgeted id re-claimed after a restore starts UNDELIVERED, so a never-delivered crash restores (SPEC.md 6)", { timeout: 10000 }, async () => {
+      // The data-loss path the delivery-mark exists to prevent: a { reads: 2 } entry under
+      // 'burn' is applied once (marks delivered, then restore debits the budget), then
+      // re-claimed for the second read; if that re-claim inherited the first read's delivered
+      // flag, a crash before streaming a byte would BURN it. A fresh claim must start clean.
+      const inner = create();
+      const stash = new Stash({ backend: inner, sweepInterval: null, onPopFailure: "burn", claimTimeout: 50 });
+      const ref = await stash.push("budgeted", { reads: 2 });
+      assert.deepEqual(await drain(await stash.apply(ref)), Buffer.from("budgeted")); // read 1: marks, then restores (debits 2->1)
+
+      // A prior process now re-claims for read 2 and crashes before streaming a byte.
+      const reclaim = await inner.claim(ref);
+      reclaim.source.on("error", () => {});
+      reclaim.source.destroy(); // never delivered on THIS claim
+
+      const next = new Stash({ backend: inner, sweepInterval: null, onPopFailure: "burn", claimTimeout: 50 });
+      await pollUntil(async () => { await next.list(); return !(await inner.isClaimed(ref)); });
+      assert.equal(await next.has(ref), true, "the re-claim never delivered, so recovery restored it -- no stale mark burned it");
+      assert.equal((await next.tombstones()).some((g) => g.id === ref), false, "no grave: nothing was observed on the re-claim");
+      await next.close();
       await stash.close();
     });
 

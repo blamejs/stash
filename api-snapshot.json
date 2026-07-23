@@ -201,6 +201,10 @@
     "backends/disk": {
       "kind": "object",
       "members": {
+        "CORE_SUBDIRS": {
+          "kind": "array",
+          "length": 4
+        },
         "DiskBackend": {
           "kind": "class",
           "arity": 1,

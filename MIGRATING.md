@@ -10,3 +10,7 @@ Operator-facing migration recipes, one per breaking change. When a breaking chan
 ## No migrations
 
 No breaking-change migrations have shipped yet -- every 0.1.x release has been additive. There are no active deprecations and no migration steps.
+
+### Note: disk layout gains `delivered/` (0.1.17)
+
+0.1.17 adds a `delivered/` directory to the disk-backend layout (it records that a `'burn'` claim streamed a byte, so crash recovery restores a never-read entry instead of destroying it -- see [CHANGELOG.md](CHANGELOG.md)). This needs **no action**: the library and the `stashjs` CLI create the directory automatically on first use, and a stash written by an earlier version -- which has no `delivered/` -- is still recognized and served. It is called out only so the new directory in your stash root is not a surprise.
