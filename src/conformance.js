@@ -105,7 +105,12 @@ export function runBackendConformance(factory, options) {
   if (factory === null || typeof factory !== "object" || typeof factory.create !== "function") {
     throw new TypeError("runBackendConformance(factory, ...): factory must be { name, create() }");
   }
-  const create = factory.create;
+  // Call create AS A METHOD of the factory, never a bare extracted reference: the
+  // documented contract is `{ name, create() }`, so an author may legitimately write
+  // create() as an object method that reads its own config through `this` (a root
+  // path, a client handle). Extracting `factory.create` and calling it bare would
+  // strip that receiver and hand create() a `this` of undefined.
+  const create = () => factory.create();
 
   // ---- Round-trip fidelity: every source type in, identical bytes out ----
   // A backend that drops, reorders, aliases, or re-encodes bytes fails here.

@@ -100,6 +100,25 @@ for (const { name, create } of BACKENDS) {
   });
 }
 
+// The harness must call create AS A METHOD of the factory, preserving `this`: the
+// documented `{ name, create() }` shape lets an author write create() as an object
+// method that reads its own config through `this`. A bare extracted call would hand
+// create() a `this` of undefined and break every case that constructs a backend.
+test("the harness preserves the factory receiver: a create() method that uses `this` works", async () => {
+  const factory = {
+    name: "receiver-bound",
+    make: BACKENDS.find((b) => b.name === "memory").create,
+    create() { return this.make(); }, // uses `this`; a bare call would throw on `this.make`
+  };
+  const results = await runCollecting(factory);
+  const failed = results.filter((r) => !r.ok);
+  assert.deepEqual(
+    failed.map((f) => f.name),
+    [],
+    "a receiver-bound factory certifies clean" + (failed[0] ? " -- first failure: " + failed[0].err : ""),
+  );
+});
+
 // Guard the input contract: the harness fails loud on a missing runner or a
 // malformed factory rather than silently registering nothing.
 test("runBackendConformance rejects a missing test runner and a malformed factory", () => {
