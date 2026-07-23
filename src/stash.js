@@ -50,10 +50,9 @@ import { assertValid, constantTimeEqual, generate } from "./ref.js";
 import { parse as parseSize } from "./size.js";
 import { oneOf, options, plainObject } from "./validate.js";
 
-// No push option is spec'd-but-unimplemented; the constructor's last such option
-// (tombstoneTtl) landed with M7, so the reject-unimplemented mechanism retires --
-// every spec'd option is now enforced (SPEC.md 12's delivery plan is complete for
-// the config surface). A future breaking option would re-introduce a list here.
+// No push option is spec'd-but-unimplemented. Every spec'd constructor and push
+// option is implemented and enforced, so no option is accepted-but-unenforced;
+// this list stays empty until a future option needs a fail-loud placeholder.
 const UNIMPLEMENTED_PUSH_OPTIONS = [];
 
 // tombstoneTtl default: a grave is pruned after this window (SPEC.md 4.4). It must
@@ -107,8 +106,9 @@ function _toChunkSource(source) {
 // `onFail()` runs exactly once on the OTHER outcomes -- a digest mismatch, a
 // source error, or a premature destroy -- to restore or burn the claim. The
 // `resolved` latch guarantees the verdict fires exactly once even though flush
-// and the pipeline callback can both reach it (fragile area 11). An unbudgeted,
-// unclaimed apply passes no verdict and behaves exactly as before.
+// and the pipeline callback can both reach it. An unbudgeted, unclaimed apply
+// passes no verdict and runs as a plain digest-verifying passthrough with no
+// lifecycle side effects.
 function _verifiedStream(entry, source, verdict) {
   // Self-describing: verify with the algorithm the entry was WRITTEN with (its
   // stored "<algo>:<hex>"), never a global assumption -- a store may hold entries
@@ -191,7 +191,7 @@ async function* _verifiedInbound(source, entry) {
 // claim it leaves standing is exactly what the lazy recovery scan resolves on
 // the next construction over the store.
 async function _settle(hook) {
-  // Drop-silent by design (drift rule 8's one sanctioned outlet): a restore/burn
+  // Drop-silent by design: a restore/burn
   // that cannot land must not throw into a stream teardown or an
   // unhandledRejection. A claim it leaves standing is exactly what the lazy
   // recovery scan resolves on the next construction. The hook is an async call,
@@ -346,10 +346,10 @@ function _positiveCount(value, label) {
  * to never prune; default `'30d'`) is how long a destruction's grave is kept
  * before pruning -- size it above the longest gap between replica reconciliations
  * or a forgotten grave lets an id come back. `opts.digest` picks the integrity
- * hash for new pushes -- `'sha256'` (the default, unchanged), `'sha512'`,
+ * hash for new pushes -- `'sha256'` (the default), `'sha512'`,
  * `'sha3-256'`, `'sha3-512'`, or `'shake256'`; the stored digest is self-describing,
  * so a read verifies with the entry's OWN algorithm and one store may mix them.
- * Every spec'd option is now accepted and enforced; an unknown one is a
+ * Every option this constructor accepts is enforced; an unknown one is a
  * config-time TypeError.
  *
  * @example
@@ -393,7 +393,7 @@ export class Stash extends EventEmitter {
   #tombstoneTtlMs = null;
   // The integrity-hash algorithm for NEW writes (push). Reads are self-describing
   // (they verify with the entry's own stored algorithm), so this only picks what a
-  // fresh push records. Default sha256 keeps every existing store byte-identical.
+  // fresh push records. The default is sha256, so a push that names no algorithm records a sha256 digest.
   #digestAlgo = DEFAULT_DIGEST;
   // The lazy crash-recovery scan, memoized: resolved on the first public verb
   // (never in the constructor -- constructors do no I/O), mirroring the disk
@@ -553,9 +553,9 @@ export class Stash extends EventEmitter {
   // (resolves on success OR failure, never rejects), so close() can await it
   // without inheriting a sweep failure. The sweep swallows any prune rejection:
   // an async setInterval callback that rejects becomes an unhandledRejection,
-  // fatal on Node, and a janitor must never take the process down. This is the
-  // drift-rule-8 tier-3 drop-silent sink; M6 replaces the silence with the
-  // 'sweepError' emit.
+  // fatal on Node, and a janitor must never take the process down. This is a
+  // deliberate drop-silent point; a rejected sweep surfaces as a 'sweepError'
+  // event rather than being swallowed silently or crashing the process.
   async #sweep() {
     if (this.#sweepInFlight !== null) return;
     const work = this.prune();
@@ -579,7 +579,7 @@ export class Stash extends EventEmitter {
   // outcome the sweep exists to prevent), and a SYNCHRONOUS throw would propagate
   // out of the emit. So each listener runs inside its own promise chain: the one
   // trailing `.catch` contains BOTH failure modes. A handler's own failure is
-  // dropped here -- the one sanctioned drop-silent sink (drift rule 8), the reason
+  // dropped here -- the one sanctioned drop-silent sink, the reason
   // the failure channel is 'sweepError' and never the fatal 'error'. rawListeners
   // preserves `once` semantics (its wrapper self-removes when called). Emits nothing
   // when there are no listeners.
@@ -594,8 +594,8 @@ export class Stash extends EventEmitter {
   // RefNotFound -- an expired entry is never served, even if no sweep ever
   // runs. A remove that fails (a read-only grant, a vanished dir) propagates
   // LOUDLY rather than being swallowed into the not-found verdict: SPEC 2.1
-  // says never degrade a denial silently. apply and show both route through
-  // here; M5's pop plugs into the same gate.
+  // says never degrade a denial silently. apply, show, and pop all route
+  // through this gate.
   async #statLive(ref) {
     const entry = await this.#backend.stat(ref);
     if (isExpired(entry, Date.now())) {
@@ -612,7 +612,7 @@ export class Stash extends EventEmitter {
   // Entry (SPEC.md 4.3): a listener that mutates its payload must never reach a
   // subsequent show()/list(). The single place the copy is made, so no emit site
   // can leak a live Entry reference. Emits fire at the verb layer, AFTER the state
-  // change commits, so M7's store() stays silent by construction (no bypass flag).
+  // change commits, so store() stays silent by construction (no bypass flag).
   #emit(event, entry) {
     this.emit(event, structuredClone(entry));
   }
@@ -641,7 +641,7 @@ export class Stash extends EventEmitter {
   // orphan may be a live pop and is left, then re-checked once it ages. A
   // claim whose sidecar is gone is an
   // interrupted commit -- recovery FINISHES the deletion (never restores a
-  // sidecar-less blob into the store, fragile area 6); otherwise the entry is
+  // sidecar-less blob into the store); otherwise the entry is
   // resolved per onPopFailure ('burn' destroys, 'restore' returns it). It drives
   // backend methods only, so it cannot recurse into a public verb. A failed scan
   // clears the memo so the next verb retries, mirroring the disk backend's #init.
@@ -761,11 +761,11 @@ export class Stash extends EventEmitter {
   }
 
   // #claimedRead(ref, onCommit) -- the ONE claimed-read path, shared by pop and
-  // budgeted apply (SPEC.md 4.1 "same commit path", drift rule 6a). Claim the
+  // budgeted apply (SPEC.md 4.1 "same commit path"). Claim the
   // entry (the claim serializes concurrent readers; the loser gets RefClaimed
   // from the backend), re-check expiry on the CLAIMED entry -- the authoritative
   // check, since a TTL can lapse between the advisory pre-check and winning the
-  // claim (fragile area 4) -- then stream it digest-verified. A full drain with a
+  // claim -- then stream it digest-verified. A full drain with a
   // matching digest runs `onCommit(claimedEntry)`; any other outcome (mismatch,
   // error, premature destroy) restores the claim, or burns it under
   // onPopFailure: 'burn'. pop and budgeted apply differ only in onCommit, so the
@@ -1002,7 +1002,7 @@ export class Stash extends EventEmitter {
         if (claimed.readsLeft === 1) {
           await this.#destroy(ref, claimed, "spent", "dropped"); // the last credit: grave + commit + 'dropped'
         } else {
-          await this.#backend.consumeRead(ref); // persist the debit BEFORE restoring (fragile area 5)
+          await this.#backend.consumeRead(ref); // persist the debit BEFORE restoring
           await this.#backend.restore(ref); // a non-terminal read destroys nothing -- no grave, no event
         }
       }, { cause: "spent", event: "dropped" }); // a burned budgeted read destroys the entry -> 'dropped'
@@ -1117,8 +1117,8 @@ export class Stash extends EventEmitter {
     // IntegrityError -- replicated bytes are stored input, not a caller argument.
     plainObject(rawEntry, "store: entry");
     // Step 1: a malformed id dies at the whitelist BEFORE any backend access -- the
-    // ref-validation-precedes-storage invariant every verb holds (hard rule 4). This
-    // MUST precede the store chain / #recover(), which touch the backend.
+    // ref-validation-precedes-storage invariant every verb holds. This MUST precede
+    // the store chain / #recover(), which touch the backend.
     assertValid(rawEntry.id);
     const chunks = _toChunkSource(source);
     const ref = rawEntry.id;
@@ -1216,7 +1216,7 @@ export class Stash extends EventEmitter {
     // backend re-hashes with the entry's own algorithm (algoOf) and a sha3-512 entry
     // lands as sha3-512 -- the selection rides in the entry, never an extra argument.
     await this.#backend.write(ref, bounded, entry);
-    // TOCTOU (fragile area, CWE-367): a concurrent pop/drop could dig the grave
+    // TOCTOU (CWE-367): a concurrent pop/drop could dig the grave
     // between the step-2 check and this write landing. The grave must ALWAYS win --
     // a store onto a tombstoned id would resurrect it -- so re-check AFTER the
     // write; if a grave appeared, remove what was just stored and refuse.
@@ -1424,7 +1424,7 @@ export class Stash extends EventEmitter {
     // dry run MUTATE (a restore/burn) and would hide the very stale-claim finding
     // verify exists to surface -- a fresh auditor process whose first call is
     // verify() must see the crash residue, not silently clean it. claimTimeout is
-    // policy (M5), passed down so the backend can age a stale claim without owning
+    // policy, passed down so the backend can age a stale claim without owning
     // the threshold; the tmp grace is C.AUDIT.
     return this.#backend.verify({ repair: opts.repair === true, claimTimeoutMs: this.#claimTimeoutMs });
   }
@@ -1660,8 +1660,8 @@ export class Stash extends EventEmitter {
     }
     for (const entry of reaped) this.#emit("expired", entry);
     // Prune stale graves (SPEC.md 4.4): a tombstone older than tombstoneTtl is
-    // reaped, riding THIS sweep -- no second timer (fragile area: one janitor). A
-    // null tombstoneTtl never prunes. listTombstones is loud over a corrupt grave,
+    // reaped, riding THIS sweep -- no second timer, so a single sweep owns both entry
+    // expiry and grave pruning. A null tombstoneTtl never prunes. listTombstones is loud over a corrupt grave,
     // the same prune-is-loud-over-corruption discipline the entry scan holds.
     if (this.#tombstoneTtlMs !== null) {
       for (const grave of await this.#backend.listTombstones()) {

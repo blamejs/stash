@@ -108,7 +108,7 @@ Contributions are accepted under the [Developer Certificate of Origin](https://d
 Good contribution areas:
 
 1. **Adversarial test vectors** -- malformed refs, symlink plants, partial-write recovery, concurrent-pop and budget races.
-2. **Coverage and hardening** -- the SPEC.md section 12 delivery plan (M1-M8) is complete, so the open work is deepening the tests around the shipped surface: uncovered branches, crash/chaos injection on the claim and tombstone-recovery paths, and fuzz-corpus growth on the untrusted-bytes parsers.
+2. **Coverage and hardening** -- the SPEC.md section 12 delivery plan is complete, so the open work is deepening the tests around the shipped surface: uncovered branches, crash/chaos injection on the claim and tombstone-recovery paths, and fuzz-corpus growth on the untrusted-bytes parsers.
 3. **Documentation and runnable examples** -- clearer prose, more runnable examples, and doc-correctness fixes against the shipped behavior.
 
 What we don't want:

@@ -151,8 +151,8 @@ export function descriptorMatchesName(opened, named) {
 // {dev, ino:0}. size and birthtimeMs are ANDed on as tiebreaks: both are populated
 // on the Windows fstat AND lstat path, and identical for one object (fstat and lstat
 // of the same inode agree), so an untampered read never false-rejects; the terms
-// only ever make the predicate MORE selective, so the swap defense cannot be
-// weakened (hard rule 12), while two distinct files must now ALSO collide on size
+// only ever make the predicate MORE selective, so the swap defense is only ever
+// strengthened, never weakened, while two distinct files must now ALSO collide on size
 // and creation time to be mistaken for one -- not attacker-controllable in the swap
 // window over write-once immutable blobs.
 // @enforced-by guard-shape-reinlined
@@ -199,8 +199,8 @@ export async function verifyDescriptorAgainstName(openedStat, path, damaged) {
  * @related    stash.backends.MemoryBackend, stash.Stash
  *
  * Construct the sidecar-file disk backend over `opts.root`. The layout is
- * `blobs/<id>` + `meta/<id>.json` (plus the claim and tombstone
- * directories their milestones will use), directories mode 0700 and files
+ * `blobs/<id>` + `meta/<id>.json` (plus the claims and tombstones
+ * directories the pop cycle and replication use), directories mode 0700 and files
  * 0600, with no central index to corrupt: a listing is a readdir plus
  * sidecar reads. Writes stream to a `.tmp`, fsync, then rename -- a
  * reader never sees a partial blob, and a crash leaves an invisible
@@ -386,7 +386,7 @@ export class DiskBackend {
     // The algorithm rides IN the entry's self-describing digest (a fresh push's
     // pending "<algo>:" marker, a replicated entry's full "<algo>:<hex>"), so the
     // policy layer's selection reaches the backend through the documented argument,
-    // never an out-of-band one; a markerless entry defaults to sha256, unchanged.
+    // never an out-of-band one; a markerless entry defaults to sha256.
     const algo = algoOf(entry.digest) ?? DEFAULT_DIGEST;
     const blobDir = await this.#containedDir("blobs");
     const tmpPath = join(blobDir, id + ".tmp");
@@ -461,7 +461,7 @@ export class DiskBackend {
   }
 
   // #claimAwareAbsent(id, damaged) -- verdict for a blob missing from blobs/
-  // under a present sidecar (fragile area 2). A no-follow lstat of claims/<id>:
+  // under a present sidecar. A no-follow lstat of claims/<id>:
   // present means the blob was moved there for a pop -> RefClaimed (the entry is
   // being served, not gone); absent means the sidecar has no blob anywhere ->
   // IntegrityError. Reporting RefClaimed keeps a concurrent reader from being
@@ -649,8 +649,8 @@ export class DiskBackend {
   // size PLUS its sidecar file size, PLUS any sidecar-less claim or orphan blob
   // still occupying the shelf, so a limit sees the real cost and a caller can't
   // slip past `maxTotal` with tiny blobs and huge `meta`, nor by hoarding crashed
-  // removes' orphans. `claimed` is the count in claims/ (0 until the claim machinery
-  // lands, M5). Loud, not lossy: a foreign name in ANY layout dir fails the same way
+  // removes' orphans. `claimed` is the count in claims/ (the entries currently
+  // mid-pop). Loud, not lossy: a foreign name in ANY layout dir fails the same way
   // list() does. The sidecar is stat'd
   // BEFORE the entry is counted, so a sidecar that vanished between the readdir
   // and its lstat (a concurrent sweep or drop) is skipped entirely -- not counted
@@ -722,15 +722,15 @@ export class DiskBackend {
         _absent(err); // vanished mid-scan (a concurrent verify/drop) -- skip
       }
     }
-    // tombstones/: M7's records; M6 writes none, so there are no bytes to count yet,
+    // tombstones/: replication's graves. Their bytes are not part of the footprint count,
     // but the aggregate stays loud on a foreign name here as in every layout dir.
     for (const name of await readdir(await this.#containedDir("tombstones"))) {
       if (name.endsWith(".tmp")) continue;
       const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
       if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
-      // a grave (<id>.json) is tiny and not yet part of the footprint count (SPEC.md
-      // 4 fixes Stats at { entries, bytes, claimed }); counting graves is a future
-      // amendment. This walk stays loud on a FOREIGN name here, like every layout dir.
+      // a grave (<id>.json) is tiny and not part of the footprint count (SPEC.md 4
+      // fixes Stats at { entries, bytes, claimed }). This walk stays loud on a
+      // FOREIGN name here, like every layout dir.
     }
     return { entries, bytes, claimed };
   }
@@ -760,7 +760,7 @@ export class DiskBackend {
   }
 
   // #condemn(id, kind, repaired) -- destroy a damaged entry: remove() deletes the
-  // sidecar BEFORE the blob (the M2 order -- a crash between them leaves an
+  // sidecar BEFORE the blob (sidecar-before-blob order -- a crash between them leaves an
   // invisible blob orphan the next verify reaps, never a served half-entry).
   async #condemn(id, kind, repaired) {
     await this.remove(id);
@@ -816,8 +816,7 @@ export class DiskBackend {
   // push -- CWE-367); one AGED past the grace is a crashed write's orphan --
   // reported as orphan-tmp and, under repair, discarded (parent re-resolved). Every
   // walk (meta/, blobs/, claims/) routes its `.tmp` handling here so none can strand
-  // a stale temp the others reap (the meta/ and claims/ walks once skipped `.tmp`
-  // unconditionally). Returns true when `name` was a `.tmp` -- the caller skips it.
+  // a stale temp the others reap. Returns true when `name` was a `.tmp` -- the caller skips it.
   async #auditOrphanTmp(subdir, dir, name, now, opts, findings, repaired) {
     if (!name.endsWith(".tmp")) return false;
     let tmpStat = null;
@@ -1149,7 +1148,7 @@ export class DiskBackend {
       await _retryTransient(() => link(join(blobDir, id), claimPath));
     } catch (err) {
       // EEXIST: another pop already claimed it. ENOENT: the blob left blobs/ (a
-      // committed pop, or a drop) -- disambiguate (fragile area 1), never report
+      // committed pop, or a drop) -- disambiguate, never report
       // not-found without checking the claim first.
       if (err && err.code === "EEXIST") throw new RefClaimed();
       if (err && err.code === "ENOENT") {
@@ -1166,8 +1165,8 @@ export class DiskBackend {
     // Won the claim: drop the original name; the blob now lives only at claims/<id>.
     await _retryTransient(() => rm(join(blobDir, id), { force: true }));
     // link does not touch mtime, so stamp claimedAt explicitly -- otherwise every
-    // claim on an older entry would look instantly stale to recovery (fragile
-    // area 3). A crash in the window before this leaves the old mtime, which
+    // claim on an older entry would look instantly stale to recovery. A crash in
+    // the window before this leaves the old mtime, which
     // recovery resolves per policy -- both directions are the configured policy.
     // lutimes, NOT utimes: a hostile blobs/<id> symlink is hard-linked into
     // claims/ as a link to the symlink, and a path utimes would FOLLOW it and
@@ -1200,7 +1199,7 @@ export class DiskBackend {
   // occupant is the SAME inode as the claim, which is an interrupted claim (a
   // crash after link() before the original name was removed left a duplicate
   // link): the entry is already live, so the redundant claim name is dropped. A
-  // different inode is genuine corruption (fragile area 7). A missing claim is
+  // different inode is genuine corruption. A missing claim is
   // RefNotFound.
   async restore(id) {
     assertValid(id);
@@ -1276,8 +1275,7 @@ export class DiskBackend {
   // blob -- the same delete order as remove(), so a crash between them leaves a
   // claim without a sidecar, which recovery reads as an interrupted commit and
   // COMPLETES (never restores a sidecar-less blob into blobs/). Force-removes,
-  // so it is idempotent -- which is what lets recovery finish a partial commit
-  // (fragile area 6).
+  // so it is idempotent -- which is what lets recovery finish a partial commit.
   async commit(id) {
     assertValid(id);
     const metaDir = await this.#containedDir("meta");
@@ -1347,7 +1345,7 @@ export class DiskBackend {
   // readsLeft literal here -- the guard-shape tripwire). The sidecar is rewritten
   // atomically over the old one; persisting BEFORE the caller restores the blob
   // means a crash after this leaves a correctly-decremented entry, so a completed
-  // drain is always paid for (fragile area 5).
+  // drain is always paid for.
   async consumeRead(id) {
     assertValid(id);
     const metaDir = await this.#containedDir("meta");
@@ -1362,7 +1360,7 @@ export class DiskBackend {
     // concurrent drop had just removed. spend() owns the arithmetic (no readsLeft
     // literal here -- the guard-shape tripwire). Persisting the debit before the
     // caller restores the blob means a crash after this leaves a correctly
-    // decremented entry, so a completed drain is always paid for (fragile area 5).
+    // decremented entry, so a completed drain is always paid for.
     const fh = await this.#openStored(sidecarPath, () => new RefNotFound(), damaged, WRITE_FLAGS);
     try {
       const next = spend(await this.#readSidecar(fh, id));

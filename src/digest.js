@@ -38,8 +38,8 @@ export const DIGESTS = Object.freeze({
   shake256: Object.freeze({ hash: "shake256", bytes: 64, opts: Object.freeze({ outputLength: 64 }) }),
 });
 
-// The default keeps every existing store byte-identical: sha256, the algorithm
-// M1-M8 shipped, so an omitted `digest` option changes nothing.
+// The default keeps every existing store byte-identical: sha256, so an omitted
+// `digest` option changes nothing.
 export const DEFAULT_DIGEST = "sha256";
 
 // digestHash(algo) -> a fresh node:crypto Hash for the algorithm. Caller has
@@ -110,7 +110,7 @@ export function algoOf(stored) {
 
 // assertDigestAlgo(value, label) -> algo | throws TypeError. Config-time
 // validation of the `digest` constructor option: a value outside the registry is
-// a boot-time typo, not a runtime verdict (three-tier validation, tier 1). The
+// a boot-time typo, not a runtime verdict. The
 // closed-enum "expected one of" shape is owned by validate.oneOf (a re-inline is
 // a gate failure), so this composes it over the registry's algorithm names.
 export function assertDigestAlgo(value, label = "digest") {

@@ -189,7 +189,7 @@ The complete delivery plan (`SPEC.md` section 12), plus digest agility, the `sta
   (`"algo:hex"`), so reads and `verify()` hash with each entry's own algorithm and a
   store may mix algorithms; the default leaves every existing store byte-identical.
 
-Every option `SPEC.md` defines is now accepted and enforced; an unknown option is a
+Every option `SPEC.md` defines is accepted and enforced; an unknown option is a
 config-time `TypeError`.
 
 The `SPEC.md` section 12 delivery plan is complete; the store is feature-complete

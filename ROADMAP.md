@@ -185,6 +185,16 @@ direction -- and the README shows materializing an entry to a file in a single,
 digest-verified copy (there is no `materializeTo`: piping the verified stream is already
 single-copy and backend-agnostic).
 
+## Documentation and comment clarity -- SHIPPED (0.1.18)
+
+A sweep of the tarball's prose -- source comments, the threat model, and the
+architecture and spec docs -- so every shipped explanation describes what the
+store does and how to use it, readable with no prior context. Comments that
+named internal build artifacts a reader cannot resolve, narrated when a feature
+was added rather than what it does, or described not-yet-shipped work now state
+the current, shipped behavior directly. No API, behavior, on-disk format, or
+documented guarantee changed -- prose only.
+
 ## Standing constraints
 
 Every milestone honors the one rule (no decrypt capability), zero

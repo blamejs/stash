@@ -13,7 +13,7 @@ services:
     build:
       context: ../..
       dockerfile: examples/wiki/Dockerfile
-    image: blamejs-stash-wiki:0.1.17
+    image: blamejs-stash-wiki:0.1.18
     container_name: stash-wiki
     restart: unless-stopped
     ports:

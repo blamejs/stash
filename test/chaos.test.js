@@ -239,7 +239,7 @@ for (const { name, create } of BACKENDS) {
 
     test("a FAULTED expired-restore in the claim window releases the live-claim guard, so recovery still reclaims the orphan (SPEC.md 6)", { timeout: 10000 }, async () => {
       // The early-expiry path in a claimed read (an entry live at the advisory #statLive
-      // but lapsed by the time the claim is won -- fragile area 4) restores the claim and
+      // but lapsed by the time the claim is won) restores the claim and
       // drops the live-claim guard. If that restore FAULTS, the guard must still be
       // released -- otherwise the now-orphaned claim is pinned in the live set forever and
       // #recover can never reclaim it. A young crash-orphan schedules the re-scan that

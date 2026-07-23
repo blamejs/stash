@@ -45,7 +45,7 @@ The load-bearing split is SPEC.md section 9: **`Stash` holds the policy; the bac
 
 Because the policy layer never touches storage directly, both backends run the same conformance test suite, and a behavior implemented once in `Stash` (lazy expiry, budget accounting, the claim cycle) cannot diverge between them.
 
-Two backends are the complete v1 set -- disk and memory, per the spec's "no cloud backends" rule. **MemoryBackend** (shipped) is Map-backed with no persistence and no pretense; it exists so tests and consumers can exercise the full contract without a filesystem. **DiskBackend** (shipped, M2) uses sidecar metadata files rather than a central index -- no index to corrupt, no lock contention, crash-safe by construction -- with tmp-fsync-rename writes so a reader never sees a partial blob, realpath containment that refuses planted symlinks, strict size-bounded sidecar validation, and `0700` / `0600` modes throughout.
+Two backends are the complete v1 set -- disk and memory, per the spec's "no cloud backends" rule. **MemoryBackend** is Map-backed with no persistence and no pretense; it exists so tests and consumers can exercise the full contract without a filesystem. **DiskBackend** uses sidecar metadata files rather than a central index -- no index to corrupt, no lock contention, crash-safe by construction -- with tmp-fsync-rename writes so a reader never sees a partial blob, realpath containment that refuses planted symlinks, strict size-bounded sidecar validation, and `0700` / `0600` modes throughout.
 
 ## Refs are capabilities, not addresses
 
@@ -100,16 +100,19 @@ SPEC.md section 3 is load-bearing and binds contributors and maintainer alike. T
 
 ## Implementation status
 
-The SPEC.md section 12 delivery plan (M1-M8) is **complete** as of 0.1.10; the store is feature-complete pre-1.0. Everything this document describes is shipped code:
+The store is feature-complete pre-1.0; everything this document describes is shipped code:
 
-- **M1 skeleton** -- typed errors, ref generation + whitelist, `MemoryBackend`, `push` / `apply` / `show` / `list` / `drop` / `clear`.
-- **M2 disk** -- `DiskBackend`: sidecar metadata, atomic tmp-fsync-rename, `0700`/`0600`, realpath containment, size-bounded sidecar validation.
-- **M3 expiry** -- `ttl`, lazy expiry, `prune()`, the `unref()`'d sweep timer, `close()` / `Symbol.asyncDispose`.
-- **M4 limits** -- `maxSize` (mid-stream), `maxEntries` / `maxTotal`, `StashFull`, `stats()`.
-- **M5 pop & budgets** -- `pop`, the claim lifecycle, `reads` budgets, `onPopFailure`, crash recovery.
-- **M6 audit** -- `has` / `stats` / `verify`, the event set (`pushed` / `popped` / `dropped` / `expired` / `sweepError`), async-iterable.
-- **M7 replication** -- tombstones, `store()`, `tombstones()`, `tombstoneTtl`.
-- **M8 docs** -- README polish, runnable examples, generated error-code table.
+- **Typed errors and refs** -- the frozen `StashError` code set, and refs generated as 256-bit random capabilities validated against a whitelist before any storage access.
+- **Two backends** -- `MemoryBackend` (Map-backed, no persistence) and `DiskBackend` (sidecar metadata, atomic tmp-fsync-rename writes, `0700`/`0600` modes, realpath containment, size-bounded sidecar validation), both driven through one conformance suite.
+- **The verb set** -- `push` / `apply` / `show` / `list` / `drop` / `clear`, plus `pop` and `store`.
+- **Expiry** -- per-entry `ttl`, lazy expiry on read, `prune()`, the `unref()`'d sweep timer, and `close()` / `Symbol.asyncDispose`.
+- **Size and count limits** -- `maxSize` enforced mid-stream, `maxEntries` / `maxTotal`, `StashFull`, and `stats()`.
+- **Pop and read budgets** -- the claim lifecycle, `reads` budgets, `onPopFailure`, and crash recovery of orphaned claims.
+- **Audit and lifecycle events** -- `has` / `verify`, the event set (`pushed` / `popped` / `dropped` / `expired` / `sweepError`), and async iteration.
+- **Replication** -- tombstones, `store()`, `tombstones()`, and `tombstoneTtl`.
+- **Digest agility** -- a selectable integrity hash (`sha256` default, `sha512`, `sha3-256`, `sha3-512`, `shake256`) with a self-describing stored digest, so a single store can mix algorithms.
+- **The `stashjs` CLI** -- inspect and maintain a disk-backed stash from the shell (`verify`, `stats`, `prune`, `list`, `tombstones`, `has`).
+- **A consumable backend conformance contract** -- the same cases run against every backend, unmodified.
 
 ## Where to read first
 

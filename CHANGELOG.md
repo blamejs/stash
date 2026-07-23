@@ -2,6 +2,32 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 0.1.18 — 2026-07-23
+
+A sweep of the tarball's prose -- the source comments, the threat model, the
+architecture and spec docs -- to remove development-process voice in favor of
+plain descriptions of the store's behavior. Comments that named internal
+build artifacts a reader cannot resolve (numbered internal-rule and
+fragile-area references), narrated when a feature was added rather than what
+it does (milestone and version tags like `(M4)` or `implemented in M2`), or
+described planned-but-not-yet work now state the current, shipped behavior
+directly. The code, the API surface, the on-disk format, and every documented
+guarantee are unchanged -- this release only makes the shipped explanations
+read for someone encountering the store for the first time.
+
+### Changed
+
+- Source comments and the operator-facing docs (SPEC.md, THREAT-MODEL.md,
+  ARCHITECTURE.md, README.md, CONTRIBUTING.md) now describe the store's
+  behavior and how to use it rather than how it was built: internal
+  build-order and milestone tags, references to internal development
+  conventions a reader cannot resolve, and phrasing that narrated
+  version-to-version change were replaced with plain statements of the
+  current shipped behavior. The threat model states each defense as
+  implemented fact without per-defense build-provenance tags; the
+  architecture doc presents the shipped surface as a capability list. No API,
+  behavior, format, or guarantee changed -- prose only.
+
 ## 0.1.17 — 2026-07-23
 
 The default `'restore'` policy has always kept a failed read's entry for
