@@ -365,7 +365,9 @@ So `pop` is a claim → stream → commit cycle:
 - `'restore'` **(default)** — rename the entry back. It survives and the read can be retried.
   Losing data by default would be hostile.
 - `'burn'` — delete it anyway, on the assumption that any read attempt means the bytes may have
-  been observed and the entry shouldn't survive to be read again. This must be opt-in.
+  been observed and the entry shouldn't survive to be read again. This must be opt-in. It governs
+  a **live** read that fails; a claim orphaned by a *crash* is always restored, never burned (see
+  *Crash recovery*).
 
 **When is `'burn'` sound?** `'burn'` deliberately reinstates the naive-`pop` hazard above: a
 reader whose connection drops at 60% loses the entry *and* got only half the bytes. So the
@@ -379,9 +381,9 @@ bug for your caller, the entry is irreplaceable and `'burn'` is the wrong policy
 ### Crash recovery
 
 If the process dies mid-`pop`, claimed entries are left orphaned. On the first operation after
-construction, `Stash` scans for claims older than `claimTimeout` (default `10m`) and resolves
-each per `onPopFailure`. The scan is lazy — it runs on first use, not in the constructor,
-because constructors don't do I/O.
+construction, `Stash` scans for claims older than `claimTimeout` (default `10m`) and **restores**
+each — recovery always restores a stale orphan and never burns, even under `'burn'` (see below).
+The scan is lazy — it runs on first use, not in the constructor, because constructors don't do I/O.
 
 This is a **single-writer-per-root** model: one process opens a disk root at a time, so that
 process is the sole claimant and knows which claims its own live `pop`/budgeted reads currently
@@ -390,8 +392,8 @@ age-reclaimed; the age of a claim — its file mtime measured against the wall c
 only for an **orphan**, a claim with no live holder, which under the single-writer model can only
 be a crashed prior run's. This matters because the wall clock is not monotonic: a forward step (an
 NTP correction, a VM-snapshot resume) can age a young claim past `claimTimeout`, and without the
-live-holder rule that step would let recovery burn or restore a once-only read out from under an
-active drain. A crashed process leaves its live-claim set behind with it, so the next process
+live-holder rule that step would let recovery restore a once-only read out from under an active
+drain — resurrecting bytes a reader is mid-way through. A crashed process leaves its live-claim set behind with it, so the next process
 starts empty and still reclaims every genuine orphan purely by age — crash recovery is unchanged.
 
 **Crash recovery always restores, never burns.** `onPopFailure` governs a **live** read that

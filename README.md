@@ -243,22 +243,24 @@ throws a native `TypeError` at the call, before any storage is touched.
 ## Recipes
 
 **Materialize an entry to a file, in one copy.** There is deliberately no `materializeTo(dest)`
-method: `apply` and `pop` already return a digest-verified stream, so piping it to a destination is
-a single copy the store never buffers, the bytes are verified end to end, it works against any
-backend, and the write lands inside the caller's own filesystem grant. A store-side copy would give
-up the digest-verified read, cross the write-scope boundary (the store writes only within its own
-root), and only work on a filesystem backend.
+method: `apply` already returns a digest-verified stream, so piping it to a destination is a single
+copy the store never buffers, the bytes are verified end to end, it works against any backend, and
+the write lands inside the caller's own filesystem grant. A store-side copy would give up the
+digest-verified read, cross the write-scope boundary (the store writes only within its own root),
+and only work on a filesystem backend. Use `apply` — it is non-destructive, so a failed write
+leaves the entry intact to retry; if the destination write throws, the source is still there.
 
 ```js
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 
-// non-destructive: read a verified copy, leave the entry in place
+// non-destructive: read a verified copy to the destination, leaving the entry in place
 await pipeline(await stash.apply(ref), createWriteStream(dest));
-
-// or destroy-on-read: the entry is gone once the file is written
-await pipeline(await stash.pop(ref), createWriteStream(dest));
 ```
+
+To *move* an entry out of the store, materialize it with `apply` and then `drop(ref)` once the
+write has durably landed — never `pop` into a file, since a failed write would leave the entry
+destroyed and the file incomplete.
 
 ## Runnable examples
 
