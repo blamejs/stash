@@ -9,7 +9,13 @@
 //   (b) nothing from the internal-only set (test/, scripts/, examples/,
 //       release-notes/, api-snapshot.json, dot-directories) ships;
 //   (c) every package.json `files` allowlist entry exists on disk, so a
-//       renamed or deleted path cannot silently drop out of the tarball.
+//       renamed or deleted path cannot silently drop out of the tarball;
+//   (d) every relative markdown cross-reference in a packed doc resolves to
+//       another packed file. A shipped doc that links to a repo file the
+//       tarball omits is a broken local link for anyone reading the extracted
+//       package -- the reference points at nothing. Scope: link targets ending
+//       in `.md` (documentation cross-references); an anchor suffix is ignored
+//       and an absolute URL or a pure `#anchor` is skipped.
 //
 // The inner pack call passes --ignore-scripts so the prepack hook that
 // invokes this gate does not recurse.
@@ -60,6 +66,38 @@ function isInternal(p) {
     }
   }
   return null;
+}
+
+// Every relative markdown cross-reference in a packed doc must land on another
+// packed file. A link's target is resolved relative to the linking doc, its
+// anchor stripped; absolute URLs and pure in-page anchors are skipped, and the
+// scope is targets ending in `.md` so a shipped doc's cross-references stay
+// inside the tarball. A hit is a broken local link for a package consumer.
+function checkDocLinks(packedSet, violations) {
+  const LINK = /\]\(([^)\s]+)\)/g;
+  for (const doc of packedSet) {
+    if (!doc.endsWith(".md")) continue;
+    let text;
+    try {
+      text = readFileSync(join(ROOT, doc), "utf8");
+    } catch {
+      continue;
+    }
+    let m;
+    while ((m = LINK.exec(text)) !== null) {
+      let target = m[1];
+      if (/^[a-z][a-z0-9+.-]*:/i.test(target)) continue; // absolute URL (has a scheme)
+      if (target.startsWith("#")) continue;              // pure in-page anchor
+      const hash = target.indexOf("#");
+      if (hash !== -1) target = target.slice(0, hash);
+      if (!target.endsWith(".md")) continue;             // scope: doc cross-references
+      const resolved = join(dirname(doc), target).replace(/\\/g, "/").replace(/^\.\//, "");
+      if (!packedSet.has(resolved)) {
+        violations.push(doc + " links to " + JSON.stringify(target) +
+          " which the tarball omits -- a broken local link for package consumers");
+      }
+    }
+  }
 }
 
 function main() {
@@ -119,6 +157,8 @@ function main() {
       violations.push("package.json files entry " + JSON.stringify(item) + " does not exist on disk");
     }
   }
+
+  checkDocLinks(new Set(packed), violations);
 
   if (violations.length > 0) {
     process.stderr.write("[pack-gate] " + violations.length + " violation(s):\n");

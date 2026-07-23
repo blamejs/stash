@@ -299,7 +299,7 @@ function _positiveCount(value, label) {
  * @primitive  stash.Stash
  * @signature  new Stash(opts) -> Stash
  * @since      0.1.0
- * @status     experimental
+ * @status     stable
  * @spec       SPEC.md 4, SPEC.md 7, SPEC.md 7.1
  * @defends    CWE-1188
  * @related    stash.backends.MemoryBackend
@@ -848,7 +848,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.push
    * @signature  stash.push(source, opts) -> Promise<string>
    * @since      0.1.0
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4, SPEC.md 5, FIPS 180-4, FIPS 202, RFC 4648, RFC 8259
    * @defends    CWE-330
    * @related    stash.apply, stash.show, stash.drop
@@ -963,7 +963,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.apply
    * @signature  stash.apply(ref) -> Promise<Readable>
    * @since      0.1.0
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4, FIPS 180-4, FIPS 202
    * @defends    CWE-354, CWE-208
    * @related    stash.push, stash.show
@@ -1030,7 +1030,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.pop
    * @signature  stash.pop(ref) -> Promise<Readable>
    * @since      0.1.7
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4, SPEC.md 6, FIPS 180-4, FIPS 202
    * @defends    CWE-362, CWE-367, CWE-354
    * @related    stash.apply, stash.drop
@@ -1065,7 +1065,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.store
    * @signature  stash.store(entry, source) -> Promise<boolean>
    * @since      0.1.9
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4, SPEC.md 4.4, FIPS 180-4, FIPS 202, RFC 8259
    * @defends    CWE-345, CWE-354, CWE-20
    * @related    stash.push, stash.tombstones, stash.drop
@@ -1286,7 +1286,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.show
    * @signature  stash.show(ref) -> Promise<Entry>
    * @since      0.1.0
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4
    * @related    stash.list, stash.apply
    *
@@ -1309,7 +1309,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.has
    * @signature  stash.has(ref) -> Promise<boolean>
    * @since      0.1.8
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4, SPEC.md 5, SPEC.md 7
    * @related    stash.show, stash.list
    *
@@ -1339,7 +1339,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.stats
    * @signature  stash.stats() -> Promise<{ entries, bytes, claimed }>
    * @since      0.1.8
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4, SPEC.md 9
    * @related    stash.list, stash.verify
    *
@@ -1364,7 +1364,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.tombstones
    * @signature  stash.tombstones() -> Promise<Tombstone[]>
    * @since      0.1.9
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4, SPEC.md 4.4
    * @related    stash.store, stash.drop
    *
@@ -1388,7 +1388,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.verify
    * @signature  stash.verify(opts?) -> Promise<Report>
    * @since      0.1.8
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4, FIPS 180-4, FIPS 202
    * @related    stash.stats, stash.prune
    *
@@ -1441,7 +1441,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.list
    * @signature  stash.list(opts) -> Promise<Entry[]>
    * @since      0.1.0
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4
    * @related    stash.show, stash.clear
    *
@@ -1475,7 +1475,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.reconcilable
    * @signature  stash.reconcilable() -> Promise<{ entries: Entry[], corrupt: string[] }>
    * @since      0.1.15
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4, SPEC.md 4.4
    * @related    stash.list, stash.tombstones, stash.store, stash.verify
    *
@@ -1514,7 +1514,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.drop
    * @signature  stash.drop(ref) -> Promise<boolean>
    * @since      0.1.0
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4
    * @related    stash.clear, stash.list
    *
@@ -1584,7 +1584,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.clear
    * @signature  stash.clear() -> Promise<number>
    * @since      0.1.0
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4
    * @related    stash.drop, stash.list
    *
@@ -1624,7 +1624,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.prune
    * @signature  stash.prune() -> Promise<number>
    * @since      0.1.5
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 4, SPEC.md 7
    * @related    stash.clear, stash.list
    *
@@ -1675,7 +1675,7 @@ export class Stash extends EventEmitter {
    * @primitive  stash.close
    * @signature  stash.close() -> Promise<void>
    * @since      0.1.5
-   * @status     experimental
+   * @status     stable
    * @spec       SPEC.md 7, SPEC.md 7.1
    * @related    stash.prune
    *

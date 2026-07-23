@@ -195,6 +195,17 @@ was added rather than what it does, or described not-yet-shipped work now state
 the current, shipped behavior directly. No API, behavior, on-disk format, or
 documented guarantee changed -- prose only.
 
+## v1.0 -- Stable -- SHIPPED (1.0.0)
+
+The `SPEC.md` section 12 delivery plan is complete and the public surface is
+declared stable. Every verb, option, error code, and on-disk format now carries
+a semantic-versioning commitment: a breaking change ships a new major, preceded
+by a deprecation warning at least one minor ahead ([MIGRATING.md](MIGRATING.md))
+and covered by the support window in [LTS-CALENDAR.md](LTS-CALENDAR.md). `v1.0`
+is the final `v0.1.x` store unchanged -- no API, behavior, or format change --
+with that commitment attached, so consumers upgrade with `npm install
+@blamejs/stash@1` and no code changes.
+
 ## Standing constraints
 
 Every milestone honors the one rule (no decrypt capability), zero

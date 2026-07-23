@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "date": "2026-07-23",
+  "headline": "1.0: the public surface is stable. Every verb, option, error code, and on-disk format now carries a semantic-versioning commitment, and the LTS calendar and deprecation policy take effect. Not a breaking change -- the same feature-complete store as the final 0.1.x, with a stability guarantee attached.",
+  "summary": "The store is feature-complete and the surface it presents is now a contract. Bytes in, a random-capability ref out, bytes out once and they're gone: the git-stash verb set, per-entry expiry and read budgets, streaming size and store-wide limits, integrity verification and audit, tombstone-based replication, digest agility, and the operational CLI are all shipped and frozen against breaking change. From 1.0, a breaking change ships a new major preceded by a deprecation warning at least one minor ahead, and each major carries a 24-month security-patch window after its successor ships. Nothing about the code, the API, the on-disk format, or any documented guarantee changed in this release -- 1.0 is the final 0.1.x store with a commitment attached, so consumers upgrade with `npm install @blamejs/stash@1` and no code changes. The one load-bearing property is unchanged and now permanent: there is nowhere in the store to put a key, so it can never decrypt, and no operator can be compelled to.",
+  "sections": {
+    "Changed": [
+      "The public API surface is declared stable under semantic versioning. Every verb (`push`, `apply`, `pop`, `show`, `has`, `list`, `reconcilable`, `stats`, `tombstones`, `store`, `drop`, `clear`, `verify`, `prune`, `close`), every constructor option, every typed error code, the ref format, and the on-disk sidecar format are covered: a breaking change ships a new major, preceded by a deprecation warning at least one minor ahead and a migration recipe. See MIGRATING.md and LTS-CALENDAR.md.",
+      "The support policy takes effect: each major receives 24 months of security-only patches beginning when its successor ships, on the zero-dependency posture (no third-party CVE lane -- a vulnerability is in this library's code or in Node itself). The Node floor is 24.18.0.",
+      "The published package now includes the support-window calendar (LTS-CALENDAR.md), the vulnerability-disclosure policy (SECURITY.md), and the roadmap (ROADMAP.md) alongside the changelog, migration guide, and spec, so every cross-reference in the packaged README resolves for a consumer reading the extracted tarball rather than pointing at a file the package omits."
+    ]
+  }
+}

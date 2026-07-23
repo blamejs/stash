@@ -192,8 +192,12 @@ The complete delivery plan (`SPEC.md` section 12), plus digest agility, the `sta
 Every option `SPEC.md` defines is accepted and enforced; an unknown option is a
 config-time `TypeError`.
 
-The `SPEC.md` section 12 delivery plan is complete; the store is feature-complete
-pre-1.0. `SPEC.md` is the contract.
+The `SPEC.md` section 12 delivery plan is complete, and the public surface is
+stable as of `v1.0`: every verb, option, error code, and on-disk format carries
+a semantic-versioning commitment -- a breaking change ships a new major with a
+deprecation warning at least one minor ahead ([MIGRATING.md](MIGRATING.md)),
+under the support window in [LTS-CALENDAR.md](LTS-CALENDAR.md). `SPEC.md` is the
+contract.
 
 ## The verbs
 
