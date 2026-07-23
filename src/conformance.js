@@ -71,7 +71,7 @@ async function retryOnClaimed(fn) {
  * @primitive  stash.conformance.runBackendConformance
  * @signature  runBackendConformance(factory, options) -> void
  * @since      0.1.16
- * @status     experimental
+ * @status     stable
  * @spec       SPEC.md 9, SPEC.md 13
  * @related    stash.Stash, stash.backends.MemoryBackend
  *

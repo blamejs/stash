@@ -39,7 +39,7 @@ import { assertValid, constantTimeEqual } from "../ref.js";
  * @primitive  stash.backends.MemoryBackend
  * @signature  new MemoryBackend() -> MemoryBackend
  * @since      0.1.0
- * @status     experimental
+ * @status     stable
  * @spec       SPEC.md 9
  * @related    stash.Stash
  *

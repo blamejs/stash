@@ -193,7 +193,7 @@ export async function verifyDescriptorAgainstName(openedStat, path, damaged) {
  * @primitive  stash.backends.DiskBackend
  * @signature  new DiskBackend(opts) -> DiskBackend
  * @since      0.1.1
- * @status     experimental
+ * @status     stable
  * @spec       SPEC.md 9, SPEC.md 2.1, RFC 8259
  * @defends    CWE-22, CWE-59, CWE-367, CWE-377, CWE-770, path traversal (CWE-23)
  * @related    stash.backends.MemoryBackend, stash.Stash

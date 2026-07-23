@@ -2,6 +2,37 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 1.0.0 — 2026-07-23
+
+The store is feature-complete and the surface it presents is now a contract.
+Bytes in, a random-capability ref out, bytes out once and they're gone: the
+git-stash verb set, per-entry expiry and read budgets, streaming size and
+store-wide limits, integrity verification and audit, tombstone-based
+replication, digest agility, and the operational CLI are all shipped and
+frozen against breaking change. From 1.0, a breaking change ships a new major
+preceded by a deprecation warning at least one minor ahead, and each major
+carries a 24-month security-patch window after its successor ships. Nothing
+about the code, the API, the on-disk format, or any documented guarantee
+changed in this release -- 1.0 is the final 0.1.x store with a commitment
+attached, so consumers upgrade with `npm install @blamejs/stash@1` and no
+code changes. The one load-bearing property is unchanged and now permanent:
+there is nowhere in the store to put a key, so it can never decrypt, and no
+operator can be compelled to.
+
+### Changed
+
+- The public API surface is declared stable under semantic versioning. Every
+  verb (`push`, `apply`, `pop`, `show`, `has`, `list`, `reconcilable`,
+  `stats`, `tombstones`, `store`, `drop`, `clear`, `verify`, `prune`,
+  `close`), every constructor option, every typed error code, the ref format,
+  and the on-disk sidecar format are covered: a breaking change ships a new
+  major, preceded by a deprecation warning at least one minor ahead and a
+  migration recipe. See MIGRATING.md and LTS-CALENDAR.md.
+- The support policy takes effect: each major receives 24 months of
+  security-only patches beginning when its successor ships, on the
+  zero-dependency posture (no third-party CVE lane -- a vulnerability is in
+  this library's code or in Node itself). The Node floor is 24.18.0.
+
 ## 0.1.18 — 2026-07-23
 
 A sweep of the tarball's prose -- the source comments, the threat model, the
