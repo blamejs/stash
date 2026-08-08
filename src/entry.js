@@ -77,7 +77,11 @@ export function assertShape(value, ErrorClass) {
   // it is exhausted-but-undestroyed, a malformed shape a replica must not be able to
   // smuggle in (store() would otherwise accept it, and applying it streams the bytes
   // then throws a bare TypeError from the debit and orphans the claim). Reject it here.
-  if (budgeted && (!(Number.isSafeInteger(value.readsLeft) && value.readsLeft > 0) || value.readsLeft > value.reads)) {
+  if (
+    budgeted &&
+    (!(Number.isSafeInteger(value.readsLeft) && value.readsLeft > 0) ||
+      value.readsLeft > value.reads)
+  ) {
     throw new ErrorClass("stored entry rejected: readsLeft");
   }
   if (!_isPlainObject(value.meta)) throw new ErrorClass("stored entry rejected: meta");
@@ -169,7 +173,8 @@ export function makeTombstone(id, cause) {
 export function assertTombstoneShape(value, ErrorClass) {
   if (!_isPlainObject(value)) throw new ErrorClass("stored tombstone rejected: not an object");
   const keys = Object.keys(value);
-  if (keys.length !== TOMBSTONE_FIELDS.length) throw new ErrorClass("stored tombstone rejected: field set");
+  if (keys.length !== TOMBSTONE_FIELDS.length)
+    throw new ErrorClass("stored tombstone rejected: field set");
   for (const field of TOMBSTONE_FIELDS) {
     if (!(field in value)) throw new ErrorClass("stored tombstone rejected: field set");
   }

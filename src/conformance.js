@@ -77,7 +77,10 @@ async function retryOnClaimed(fn) {
  *
  * Register the SPEC.md 9 backend conformance suite against a backend
  * `factory` -- `{ name, create() }`, where `create()` returns a fresh
- * backend per case. `options.test` is your runner's test function
+ * backend per case and `name` is a required non-empty string that labels
+ * every case this registers (`"<name>: <case>"`), so two backends certified
+ * in one run produce two distinguishable suites. A factory missing either
+ * member is a `TypeError`. `options.test` is your runner's test function
  * (`(title, fn) => void`); `options.assert` is a `node:assert/strict`-shaped
  * assertion object, defaulting to the built-in when omitted. Every case
  * drives the shipped `Stash` consumer path against a `Stash` wrapping the
@@ -97,14 +100,27 @@ async function retryOnClaimed(fn) {
  */
 export function runBackendConformance(factory, options) {
   const opts = options || {};
-  const test = opts.test;
+  const register = opts.test;
   const assert = opts.assert || defaultAssert;
-  if (typeof test !== "function") {
-    throw new TypeError("runBackendConformance(factory, { test }): `test` must be your test runner's registration function");
+  if (typeof register !== "function") {
+    throw new TypeError(
+      "runBackendConformance(factory, { test }): `test` must be your test runner's registration function",
+    );
   }
-  if (factory === null || typeof factory !== "object" || typeof factory.create !== "function") {
+  if (
+    factory === null ||
+    typeof factory !== "object" ||
+    typeof factory.create !== "function" ||
+    typeof factory.name !== "string" ||
+    factory.name.length === 0
+  ) {
     throw new TypeError("runBackendConformance(factory, ...): factory must be { name, create() }");
   }
+  // `name` labels every case this harness registers. Certifying two backends in one
+  // run otherwise produces two byte-identical title sets, and a failure names no
+  // backend -- so the name is required, and required means enforced here rather than
+  // only described in the docs.
+  const test = (title, fn) => register(factory.name + ": " + title, fn);
   // Call create AS A METHOD of the factory, never a bare extracted reference: the
   // documented contract is `{ name, create() }`, so an author may legitimately write
   // create() as an object method that reads its own config through `this` (a root
@@ -266,7 +282,10 @@ export function runBackendConformance(factory, options) {
     assert.deepEqual((await stash.list()).map((e) => e.id).sort(), [keep, gone].sort());
     assert.equal(await stash.drop(gone), true);
     assert.equal(await stash.drop(gone), false); // absent is a fact, not a failure
-    assert.deepEqual((await stash.list()).map((e) => e.id), [keep]);
+    assert.deepEqual(
+      (await stash.list()).map((e) => e.id),
+      [keep],
+    );
   });
 
   test("clear destroys everything and counts it", async () => {
@@ -283,8 +302,14 @@ export function runBackendConformance(factory, options) {
     const stash = new Stash({ backend: create() });
     const absent = await stash.push("transient");
     assert.equal(await stash.drop(absent), true); // well-formed, now absent
-    await assert.rejects(stash.apply(absent), (err) => err instanceof RefNotFound && err.code === "ENOREF");
-    await assert.rejects(stash.show(absent), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+    await assert.rejects(
+      stash.apply(absent),
+      (err) => err instanceof RefNotFound && err.code === "ENOREF",
+    );
+    await assert.rejects(
+      stash.show(absent),
+      (err) => err instanceof RefNotFound && err.code === "ENOREF",
+    );
   });
 
   test("a dropped entry is gone from every read path", async () => {
@@ -301,9 +326,15 @@ export function runBackendConformance(factory, options) {
   test("an expired entry is RefNotFound from apply and show, before any sweep runs", async () => {
     const stash = new Stash({ backend: create() }); // no sweepInterval
     const ref = await stash.push("gone at birth", { ttl: 0 });
-    await assert.rejects(stash.apply(ref), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+    await assert.rejects(
+      stash.apply(ref),
+      (err) => err instanceof RefNotFound && err.code === "ENOREF",
+    );
     const other = await stash.push("also gone", { ttl: 0 });
-    await assert.rejects(stash.show(other), (err) => err instanceof RefNotFound && err.code === "ENOREF");
+    await assert.rejects(
+      stash.show(other),
+      (err) => err instanceof RefNotFound && err.code === "ENOREF",
+    );
   });
 
   // ---- Limits: bounded mid-stream, refused before eviction ----
@@ -312,16 +343,29 @@ export function runBackendConformance(factory, options) {
     const stash = new Stash({ backend: create(), maxSize: 16 });
     const ref = await stash.push(Buffer.alloc(16, 7));
     assert.equal((await drain(await stash.apply(ref))).length, 16);
-    await assert.rejects(stash.push(Buffer.alloc(17, 7)), (e) => e instanceof SizeExceeded && e.code === "E2BIG");
+    await assert.rejects(
+      stash.push(Buffer.alloc(17, 7)),
+      (e) => e instanceof SizeExceeded && e.code === "E2BIG",
+    );
   });
 
   test("maxEntries: a full store is StashFull (EFULL) before the stream starts; drop frees a slot", async () => {
     const stash = new Stash({ backend: create(), maxEntries: 1 });
     const first = await stash.push("a");
     let pulled = false;
-    async function* watched() { pulled = true; yield Buffer.from("b"); }
-    await assert.rejects(stash.push(watched()), (e) => e instanceof StashFull && e.code === "EFULL");
-    assert.equal(pulled, false, "rejected before the source was pulled -- no eviction, no wasted read");
+    async function* watched() {
+      pulled = true;
+      yield Buffer.from("b");
+    }
+    await assert.rejects(
+      stash.push(watched()),
+      (e) => e instanceof StashFull && e.code === "EFULL",
+    );
+    assert.equal(
+      pulled,
+      false,
+      "rejected before the source was pulled -- no eviction, no wasted read",
+    );
     await stash.drop(first);
     assert.equal(typeof (await stash.push("b")), "string");
   });
@@ -383,15 +427,19 @@ export function runBackendConformance(factory, options) {
     const ref = await stash.push("shared", { reads: 2 });
     let drained = 0;
     // race more readers than credits; losers retry the claim until exhausted
-    await Promise.all(Array.from({ length: 6 }, () => (async () => {
-      try {
-        const bytes = await retryOnClaimed(async () => drain(await stash.apply(ref)));
-        assert.deepEqual(bytes, Buffer.from("shared"));
-        drained += 1;
-      } catch (err) {
-        if (!(err instanceof RefNotFound)) throw err; // the budget is spent -- expected
-      }
-    })()));
+    await Promise.all(
+      Array.from({ length: 6 }, () =>
+        (async () => {
+          try {
+            const bytes = await retryOnClaimed(async () => drain(await stash.apply(ref)));
+            assert.deepEqual(bytes, Buffer.from("shared"));
+            drained += 1;
+          } catch (err) {
+            if (!(err instanceof RefNotFound)) throw err; // the budget is spent -- expected
+          }
+        })(),
+      ),
+    );
     assert.equal(drained, 2, "a reads:2 entry served exactly twice under contention");
     await assert.rejects(stash.show(ref), RefNotFound);
   });
@@ -417,7 +465,11 @@ export function runBackendConformance(factory, options) {
     const ref = await stash.push(bytes);
     const entry = await stash.show(ref);
     assert.equal(await stash.drop(ref), true); // destruction writes a tombstone
-    assert.equal(await stash.store(entry, bytes), false, "a tombstoned id is refused, writing nothing");
+    assert.equal(
+      await stash.store(entry, bytes),
+      false,
+      "a tombstoned id is refused, writing nothing",
+    );
     await assert.rejects(stash.apply(ref), (e) => e instanceof RefNotFound && e.code === "ENOREF");
   });
 }

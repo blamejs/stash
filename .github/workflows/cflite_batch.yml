@@ -1,3 +1,18 @@
+# DORMANT -- manual dispatch only. ClusterFuzzLite cannot build a JavaScript
+# project at any sanitizer value: its action validates the `sanitizer` input
+# against [address, memory, undefined, coverage] and rejects `none`, while the
+# oss-fuzz JavaScript build refuses every one of those with "JavaScript projects
+# cannot be fuzzed with sanitizers". `none` is the value an oss-fuzz
+# project.yaml uses for JavaScript, so the two halves disagree and no setting
+# satisfies both. The action input defaults to `address` on upstream main, so
+# neither omitting it nor bumping the pin helps.
+#
+# The triggers are removed rather than left failing: a gate that cannot pass is
+# noise that trains everyone to ignore a red check. Continuous fuzzing runs
+# through .github/workflows/fuzz.yml, which drives the SAME targets under
+# jazzer.js directly. These files stay so the corpus-persisting, long-run setup
+# can be restored the day upstream accepts a JavaScript build.
+#
 # ClusterFuzzLite batch fuzzing: a scheduled long run over the whole
 # corpus, followed by corpus pruning (batch fuzzing without pruning grows
 # the corpus without bound). Crashes and the grown corpus persist as run
@@ -10,8 +25,6 @@
 name: ClusterFuzzLite batch fuzzing
 
 on:
-  schedule:
-    - cron: "43 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -32,9 +45,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # jazzer.js targets carry no native code; "none" is the oss-fuzz
-        # sanitizer for javascript projects.
-        sanitizer: [none]
+        # jazzer.js targets carry no native code, so the sanitizer is inert here --
+        # but ClusterFuzzLite validates this input against a fixed list
+        # (address / memory / undefined / coverage) and rejects "none", which is
+        # the value oss-fuzz project.yaml uses. Pick the list default.
+        sanitizer: [address]
     steps:
       - name: Build fuzzers (${{ matrix.sanitizer }})
         id: build
@@ -68,7 +83,7 @@ jobs:
         with:
           language: javascript
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          sanitizer: none
+          sanitizer: address
 
       - name: Prune corpus
         id: run
@@ -77,4 +92,4 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fuzz-seconds: 600
           mode: "prune"
-          sanitizer: none
+          sanitizer: address

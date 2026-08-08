@@ -40,9 +40,17 @@
 
 import { EventEmitter } from "node:events";
 import { Transform, pipeline } from "node:stream";
+import { isUint8Array } from "node:util/types";
 
 import { C } from "./constants.js";
-import { DEFAULT_DIGEST, algoOf, assertDigestAlgo, digestHash, digestMarker, finalize } from "./digest.js";
+import {
+  DEFAULT_DIGEST,
+  algoOf,
+  assertDigestAlgo,
+  digestHash,
+  digestMarker,
+  finalize,
+} from "./digest.js";
 import { parse } from "./duration.js";
 import { assertShape, isExpired, make, makeTombstone } from "./entry.js";
 import { IntegrityError, RefClaimed, RefNotFound, SizeExceeded, StashFull } from "./errors.js";
@@ -64,9 +72,24 @@ const DEFAULT_TOMBSTONE_TTL = "30d";
 // The backend surface Stash drives today. Validated at construction so a
 // misassembled backend fails at boot, not at first push.
 const REQUIRED_BACKEND_METHODS = [
-  "write", "read", "remove", "stat", "list", "listReconcilable", "stats", "verify",
-  "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
-  "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone",
+  "write",
+  "read",
+  "remove",
+  "stat",
+  "list",
+  "listReconcilable",
+  "stats",
+  "verify",
+  "claim",
+  "restore",
+  "commit",
+  "listClaims",
+  "consumeRead",
+  "isClaimed",
+  "writeTombstone",
+  "hasTombstone",
+  "listTombstones",
+  "removeTombstone",
 ];
 
 // onPopFailure resolves a pop (or a budgeted read) that fails to fully drain
@@ -84,14 +107,33 @@ const DEFAULT_CLAIM_TIMEOUT = "10m";
 // Normalize a push source to an async-iterable of byte chunks, or throw a
 // config-time TypeError. Accepted: Buffer | Uint8Array | string | Readable |
 // AsyncIterable. Never buffers -- a stream source passes through as-is.
+//
+// isUint8Array is the brand check, not `instanceof`: a typed array minted in
+// another realm (a vm context, a second loader) is a genuine Uint8Array whose
+// prototype is that realm's, so `instanceof` reads only this realm's intrinsic
+// and refuses a value the documented source set promises to take. It covers
+// Buffer too (a Buffer IS a Uint8Array), so both collapse to one branch.
+// NOT ArrayBuffer.isView here: that also admits a Uint16Array, and
+// Buffer.from(uint16array) copies each ELEMENT mod 256 -- storing bytes the
+// caller never handed over. Only an 8-bit unsigned view may pass.
+//
+// copyBytesFrom, not Buffer.from: `.length` on a typed array is an ordinary
+// property, and a subclass may override it. Buffer.from reads that PROPERTY, so a
+// view holding 2 bytes but reporting 512 allocates 512 out of the shared pool and
+// writes only the real 2 -- padding the entry with whatever the pool last held,
+// which in a multi-tenant embedding is another entry's plaintext. The store would
+// then certify a size and a digest over bytes the caller never supplied.
+// copyBytesFrom reads the view's internal byteLength slot, which no property can
+// forge, and honours byteOffset so a window is copied from its own range.
 function _toChunkSource(source) {
   if (typeof source === "string") return [Buffer.from(source, "utf8")];
-  if (Buffer.isBuffer(source)) return [Buffer.from(source)];
-  if (source instanceof Uint8Array) return [Buffer.from(source)];
+  if (isUint8Array(source)) return [Buffer.copyBytesFrom(source)];
   if (source !== null && typeof source === "object" && Symbol.asyncIterator in source) {
     return source;
   }
-  throw new TypeError("push: source must be a Buffer, Uint8Array, string, Readable, or AsyncIterable");
+  // No verb in the message: push() and store() both reach this line, so it cannot
+  // know which one the caller invoked.
+  throw new TypeError("source must be a Buffer, Uint8Array, string, Readable, or AsyncIterable");
 }
 
 // Wrap a backend read stream in a digest-verifying passthrough. The hash is
@@ -138,7 +180,12 @@ function _verifiedStream(entry, source, verdict) {
         // fail-open) and hand it straight to the single flush callback: a commit
         // fault surfaces on the stream, and recovery resolves the still-standing
         // claim later.
-        callback(await verdict.onCommit().then(() => null, (err) => err));
+        callback(
+          await verdict.onCommit().then(
+            () => null,
+            (err) => err,
+          ),
+        );
         return;
       }
       callback();
@@ -186,16 +233,13 @@ async function* _verifiedInbound(source, entry) {
   if (!constantTimeEqual(finalize(hash, algo), entry.digest)) throw new IntegrityError();
 }
 
-// Run a claim-resolution hook, swallowing its own failure: a restore/burn that
+// Run a claim-resolution hook. Drop-silent -- by design: a restore/burn that
 // cannot land must not throw into a stream teardown or an unhandledRejection. A
 // claim it leaves standing is exactly what the lazy recovery scan resolves on
 // the next construction over the store.
 async function _settle(hook) {
-  // Drop-silent by design: a restore/burn
-  // that cannot land must not throw into a stream teardown or an
-  // unhandledRejection. A claim it leaves standing is exactly what the lazy
-  // recovery scan resolves on the next construction. The hook is an async call,
-  // so its rejection routes through `.catch`, never a synchronous throw.
+  // The hook is an async call, so its rejection routes through `.catch`, never a
+  // synchronous throw.
   await hook().catch(() => {});
 }
 
@@ -214,18 +258,7 @@ function _dispose(source) {
   source.destroy();
 }
 
-// _boundedSource(source, maxSize, residual) -- wrap a push's chunk source so the
-// size limits are enforced DURING the stream, in the policy layer, never in a
-// backend. Each chunk is converted to a Buffer first (so a multibyte string is
-// counted as its encoded bytes, and the counted bytes are exactly the bytes
-// yielded to the backend), the running total is checked BEFORE the chunk is
-// yielded, and the typed verdict is thrown the instant a bound is crossed -- so
-// the crossing chunk never reaches the backend's tmp file and an unbounded
-// source is abandoned at the boundary rather than drained. maxSize is the
-// per-entry bound, `residual` the remaining stash-wide headroom (maxTotal minus
-// what is already stored); either is null for "no bound". SizeExceeded is
-// reported before StashFull when one chunk crosses both: a per-entry overflow is
-// a permanent verdict a retry can't fix, while a full stash may later clear.
+// _isArrayBuffer(value) -> boolean.
 // True for a raw ArrayBuffer or SharedArrayBuffer from ANY realm. Buffer.from()
 // stores these by their byteLength, so _boundedSource must measure them that way
 // -- a bare `instanceof ArrayBuffer` misses SharedArrayBuffer and a buffer from
@@ -239,6 +272,18 @@ function _isArrayBuffer(value) {
   return tag === "[object ArrayBuffer]" || tag === "[object SharedArrayBuffer]";
 }
 
+// _boundedSource(source, maxSize, residual) -- wrap a push's chunk source so the
+// size limits are enforced DURING the stream, in the policy layer, never in a
+// backend. Each chunk is converted to a Buffer first (so a multibyte string is
+// counted as its encoded bytes, and the counted bytes are exactly the bytes
+// yielded to the backend), the running total is checked BEFORE the chunk is
+// yielded, and the typed verdict is thrown the instant a bound is crossed -- so
+// the crossing chunk never reaches the backend's tmp file and an unbounded
+// source is abandoned at the boundary rather than drained. maxSize is the
+// per-entry bound, `residual` the remaining stash-wide headroom (maxTotal minus
+// what is already stored); either is null for "no bound". SizeExceeded is
+// reported before StashFull when one chunk crosses both: a per-entry overflow is
+// a permanent verdict a retry can't fix, while a full stash may later clear.
 async function* _boundedSource(source, maxSize, residual) {
   let total = 0;
   for await (const chunk of source) {
@@ -266,7 +311,8 @@ async function* _boundedSource(source, maxSize, residual) {
     // backing buffer so its real bytes are stored, not its element values
     // reinterpreted (Buffer.from(uint16array) would copy each element mod 256).
     if (typeof chunk === "string") yield Buffer.from(chunk, "utf8");
-    else if (ArrayBuffer.isView(chunk)) yield Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    else if (ArrayBuffer.isView(chunk))
+      yield Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
     else yield Buffer.from(chunk);
   }
 }
@@ -393,7 +439,8 @@ export class Stash extends EventEmitter {
   #tombstoneTtlMs = null;
   // The integrity-hash algorithm for NEW writes (push). Reads are self-describing
   // (they verify with the entry's own stored algorithm), so this only picks what a
-  // fresh push records. The default is sha256, so a push that names no algorithm records a sha256 digest.
+  // fresh push records. Construct-time only -- push takes no algorithm option -- so
+  // a store built without `digest` records sha256.
   #digestAlgo = DEFAULT_DIGEST;
   // The lazy crash-recovery scan, memoized: resolved on the first public verb
   // (never in the constructor -- constructors do no I/O), mirroring the disk
@@ -432,7 +479,6 @@ export class Stash extends EventEmitter {
   // backend.claim race releases its guard, and a refcount keeps that release from
   // clearing the winner's.
   #liveClaims; // id -> live-holder count; bound LAZILY (#ensureGuardBound) from the shared registry
-  #guardIdentity; // the key this instance holds in CLAIM_GUARDS: the backend's identity, or the backend object
 
   // Bind this instance to the store's shared guard, once, on the first #recover -- when a
   // canonical backend identity is stable (its lazy init has run). The key is the backend's
@@ -449,11 +495,14 @@ export class Stash extends EventEmitter {
       CLAIM_GUARDS.set(key, shared);
     }
     shared.holders += 1;
-    this.#guardIdentity = key;
     this.#liveClaims = shared.guard;
+    // GUARD_REAP carries `key` as the held value, so the reaper needs no field on
+    // this instance to find the registry entry it must release.
     GUARD_REAP.register(this, key);
   }
-  #guardClaim(ref) { this.#liveClaims.set(ref, (this.#liveClaims.get(ref) ?? 0) + 1); }
+  #guardClaim(ref) {
+    this.#liveClaims.set(ref, (this.#liveClaims.get(ref) ?? 0) + 1);
+  }
   #unguardClaim(ref) {
     const n = (this.#liveClaims.get(ref) ?? 0) - 1;
     if (n > 0) this.#liveClaims.set(ref, n);
@@ -466,12 +515,26 @@ export class Stash extends EventEmitter {
   // concurrent claim never scheduled one at all. Without this, such an orphan is
   // stranded ECLAIMED until restart. A due deadline is harmless when nothing orphaned
   // (the next scan finds no stale claim and reschedules).
-  #scheduleRecover() { this.#nextRecoverAt = 0; this.#recoverGen++; }
+  #scheduleRecover() {
+    this.#nextRecoverAt = 0;
+    this.#recoverGen++;
+  }
 
   constructor(opts) {
     super();
     options(opts, "new Stash", {
-      allowed: ["backend", "ttl", "sweepInterval", "maxSize", "maxEntries", "maxTotal", "onPopFailure", "claimTimeout", "tombstoneTtl", "digest"],
+      allowed: [
+        "backend",
+        "ttl",
+        "sweepInterval",
+        "maxSize",
+        "maxEntries",
+        "maxTotal",
+        "onPopFailure",
+        "claimTimeout",
+        "tombstoneTtl",
+        "digest",
+      ],
     });
     const backend = opts.backend;
     if (backend === null || typeof backend !== "object") {
@@ -487,7 +550,7 @@ export class Stash extends EventEmitter {
     // a backend's canonical identity (e.g. the disk root's realpath) is only stable after
     // its lazy init has run, and the constructor does no backend I/O. Until then this
     // instance has no claims to guard.
-    this.#ttlMs = parse(opts.ttl, "ttl");
+    this.#ttlMs = parse(opts.ttl, "new Stash: ttl");
     // A ttl can be a valid duration yet place expiresAt (createdAt + ttl) past
     // the safe integer range, which make() refuses at push. Catch an unusable
     // DEFAULT here, against the current clock, so a bad configuration fails at
@@ -497,24 +560,28 @@ export class Stash extends EventEmitter {
     }
     // Size and count bounds, resolved and validated before the sweep timer is
     // armed so a malformed bound throws without leaving a timer behind.
-    this.#maxSize = _positiveBytes(opts.maxSize, "maxSize");
-    this.#maxTotal = _positiveBytes(opts.maxTotal, "maxTotal");
-    this.#maxEntries = _positiveCount(opts.maxEntries, "maxEntries");
+    this.#maxSize = _positiveBytes(opts.maxSize, "new Stash: maxSize");
+    this.#maxTotal = _positiveBytes(opts.maxTotal, "new Stash: maxTotal");
+    this.#maxEntries = _positiveCount(opts.maxEntries, "new Stash: maxEntries");
     // A per-entry cap larger than the whole-store cap can never bind: an empty
     // store admits at most maxTotal bytes, so a maxSize above it is dead
     // configuration. Refuse it at boot rather than accept a check that never
     // fires (SPEC.md 8.2).
     if (this.#maxSize !== null && this.#maxTotal !== null && this.#maxSize > this.#maxTotal) {
-      throw new TypeError("new Stash: maxSize must not exceed maxTotal -- a per-entry cap above the whole-store cap can never bind");
+      throw new TypeError(
+        "new Stash: maxSize must not exceed maxTotal -- a per-entry cap above the whole-store cap can never bind",
+      );
     }
     // Pop lifecycle: onPopFailure is a closed enum (restore | burn), claimTimeout
     // the crash-recovery staleness threshold. Both validated at config time -- an
     // unrecognized policy or a NaN threshold is a silently-disabled recovery scan.
-    this.#onPopFailure = opts.onPopFailure === undefined
-      ? "restore"
-      : oneOf(opts.onPopFailure, "new Stash: onPopFailure", ON_POP_FAILURE);
-    const claimTimeout = opts.claimTimeout === undefined ? DEFAULT_CLAIM_TIMEOUT : opts.claimTimeout;
-    this.#claimTimeoutMs = parse(claimTimeout, "claimTimeout");
+    this.#onPopFailure =
+      opts.onPopFailure === undefined
+        ? "restore"
+        : oneOf(opts.onPopFailure, "new Stash: onPopFailure", ON_POP_FAILURE);
+    const claimTimeout =
+      opts.claimTimeout === undefined ? DEFAULT_CLAIM_TIMEOUT : opts.claimTimeout;
+    this.#claimTimeoutMs = parse(claimTimeout, "new Stash: claimTimeout");
     // Strictly POSITIVE: with a zero (or negative) lease staleAt == claimedAt, so
     // recovery would treat EVERY orphan as abandoned the instant it appears --
     // collapsing the orphan grace to nothing. A live in-process reader's own claim is
@@ -528,19 +595,28 @@ export class Stash extends EventEmitter {
     // Tombstone lifetime: a grave is pruned once older than this (SPEC.md 4.4),
     // riding the same prune()/sweeper as expiry -- no second timer. An explicit
     // null never prunes (graves live forever); an absent option inherits '30d'.
-    const tombstoneTtl = opts.tombstoneTtl === undefined ? DEFAULT_TOMBSTONE_TTL : opts.tombstoneTtl;
-    this.#tombstoneTtlMs = parse(tombstoneTtl, "tombstoneTtl");
+    const tombstoneTtl =
+      opts.tombstoneTtl === undefined ? DEFAULT_TOMBSTONE_TTL : opts.tombstoneTtl;
+    this.#tombstoneTtlMs = parse(tombstoneTtl, "new Stash: tombstoneTtl");
     // The integrity hash for new writes: a registry algorithm (default sha256).
-    this.#digestAlgo = assertDigestAlgo(opts.digest === undefined ? DEFAULT_DIGEST : opts.digest, "new Stash: digest");
-    const sweepMs = parse(opts.sweepInterval, "sweepInterval");
+    this.#digestAlgo = assertDigestAlgo(
+      opts.digest === undefined ? DEFAULT_DIGEST : opts.digest,
+      "new Stash: digest",
+    );
+    const sweepMs = parse(opts.sweepInterval, "new Stash: sweepInterval");
     if (sweepMs !== null) {
       if (sweepMs <= 0 || sweepMs > C.TIME.MAX_TIMER_MS) {
-        throw new TypeError("new Stash: sweepInterval must be a positive duration no larger than " +
-          C.TIME.MAX_TIMER_MS + "ms (Node's timer ceiling); for anything rarer, call prune() on your own schedule");
+        throw new TypeError(
+          "new Stash: sweepInterval must be a positive duration no larger than " +
+            C.TIME.MAX_TIMER_MS +
+            "ms (Node's timer ceiling); for anything rarer, call prune() on your own schedule",
+        );
       }
       // Arming a timer is not I/O -- the constructor-does-no-I/O rule holds; the
       // I/O is in the sweep callback. unref() so this never pins the event loop.
-      this.#sweepTimer = setInterval(() => { void this.#sweep(); }, sweepMs);
+      this.#sweepTimer = setInterval(() => {
+        void this.#sweep();
+      }, sweepMs);
       this.#sweepTimer.unref();
     }
   }
@@ -559,7 +635,10 @@ export class Stash extends EventEmitter {
   async #sweep() {
     if (this.#sweepInFlight !== null) return;
     const work = this.prune();
-    this.#sweepInFlight = work.then(() => {}, () => {});
+    this.#sweepInFlight = work.then(
+      () => {},
+      () => {},
+    );
     // A rejected background sweep must never become an unhandledRejection (fatal
     // on Node -- the exact outcome SPEC.md 4.3 exists to prevent): surface it as
     // 'sweepError' (NEVER 'error' -- an unhandled 'error' crashes the process; a
@@ -585,7 +664,9 @@ export class Stash extends EventEmitter {
   // when there are no listeners.
   #emitSweepError(err) {
     for (const listener of this.rawListeners("sweepError")) {
-      Promise.resolve().then(() => listener.call(this, err)).catch(() => {});
+      Promise.resolve()
+        .then(() => listener.call(this, err))
+        .catch(() => {});
     }
   }
 
@@ -679,7 +760,8 @@ export class Stash extends EventEmitter {
           nextAt = Math.min(nextAt, staleAt > now ? staleAt : now + this.#claimTimeoutMs);
           continue;
         }
-        if (now < staleAt) { // still within the lease -- maybe a live pop; leave it,
+        if (now < staleAt) {
+          // still within the lease -- maybe a live pop; leave it,
           nextAt = Math.min(nextAt, staleAt); // but re-scan once it would age past the lease
           continue;
         }
@@ -812,9 +894,15 @@ export class Stash extends EventEmitter {
       // _verifiedStream contract). The verdict fires exactly once (the `resolved`
       // latch), so exactly one branch runs and drops the id.
       onCommit: async () => {
-        try { await onCommit(entry); }
-        catch (err) { this.#scheduleRecover(); throw err; } // a faulted commit leaves an interrupted destruction orphan
-        finally { this.#unguardClaim(ref); }
+        try {
+          await onCommit(entry);
+        } catch (err) {
+          this.#scheduleRecover();
+          throw err;
+        } finally {
+          // a faulted commit leaves an interrupted destruction orphan
+          this.#unguardClaim(ref);
+        }
       },
       // 'burn' destroys the entry the read could not consume: it runs the SAME
       // grave-then-commit-then-emit terminal a successful drain runs (a burned
@@ -826,8 +914,13 @@ export class Stash extends EventEmitter {
           await (this.#onPopFailure === "burn"
             ? this.#destroy(ref, entry, destruction.cause, destruction.event)
             : this.#backend.restore(ref));
-        } catch (err) { this.#scheduleRecover(); throw err; } // a faulted burn/restore leaves the claim an orphan
-        finally { this.#unguardClaim(ref); }
+        } catch (err) {
+          this.#scheduleRecover();
+          throw err;
+        } finally {
+          // a faulted burn/restore leaves the claim an orphan
+          this.#unguardClaim(ref);
+        }
       },
     });
   }
@@ -842,6 +935,55 @@ export class Stash extends EventEmitter {
     await this.#backend.writeTombstone(ref, makeTombstone(ref, cause));
     await this.#backend.commit(ref);
     this.#emit(event, entry);
+  }
+
+  // #chargeCapacity(entry) -> Promise<number | null>. The stash-wide capacity
+  // gate, and the ONE place maxEntries / maxTotal are enforced. Both entry paths
+  // charge through it -- a local push and the replication insert store() drives --
+  // so a replica can never be admitted on terms a push would be refused on.
+  // Resolves the maxTotal residual the write streams against, or null when no byte
+  // bound applies; throws StashFull when the entry cannot be admitted.
+  //
+  // Two passes, and by design they do not collapse into one. prune() opens and
+  // parses every sidecar to reap the dead -- it MUST run first, because maxTotal
+  // charges its mid-stream residual against the LIVE footprint: a total that still
+  // counted an expired entry would tighten the residual and reject an entry that
+  // fits once the dead one is reaped (a dead entry blocking a live push). stats()
+  // then totals the PHYSICAL footprint -- blob + sidecar file sizes PLUS orphan
+  // blobs and sidecar-less claim blobs that list() never sees, the maxTotal-bypass
+  // accounting only a layout walk can do. So the reap scan cannot surface the
+  // footprint (deriving it from prune()'s entry list would under-count those
+  // orphans and weaken maxTotal), and the footprint walk cannot subsume the reap
+  // (folding expiry into the backend's walk pushes a policy decision into a backend
+  // that must not interpret it, SPEC.md 9). The full scan is by-design cheap at
+  // maxEntries scale (SPEC.md 3); a central count/index to make the gate O(1) is
+  // exactly the mutable-file coupling the sidecar design rejects.
+  //
+  // Only the bounded path pays this; an unlimited stash reads neither prune nor
+  // stats. Across DIFFERENT ids the stats read and the write are not atomic, so
+  // concurrent inserts can overshoot by the in-flight count -- bounded, and without
+  // a lock the sidecar design omits.
+  async #chargeCapacity(entry) {
+    if (this.#maxEntries === null && this.#maxTotal === null) return null;
+    await this.prune();
+    const stats = await this.#backend.stats();
+    if (this.#maxEntries !== null && stats.entries >= this.#maxEntries) {
+      throw new StashFull();
+    }
+    if (this.#maxTotal === null) return null;
+    // maxTotal bounds the stored footprint -- blob plus sidecar -- so this entry's
+    // own metadata is charged against the headroom before the blob streams. Without
+    // it, a caller slips unbounded `meta` (or an endless run of zero-byte blobs,
+    // each still costing a sidecar) past the limit. On a push the stored sidecar
+    // gains `size`/`digest` after the write, so this under-counts by those fixed
+    // fields -- a bounded sub-100-byte overshoot on the last admitted entry, never
+    // the meta -- and never over-counts, so it cannot reject an entry that would
+    // have fit. A replicated entry arrives in its stored form, so its footprint is
+    // already exact.
+    const sidecarBytes = Buffer.byteLength(JSON.stringify(entry));
+    const residual = this.#maxTotal - stats.bytes - sidecarBytes;
+    if (residual < 0) throw new StashFull();
+    return residual;
   }
 
   /**
@@ -876,7 +1018,10 @@ export class Stash extends EventEmitter {
    *   const ref = await stash.push(ciphertext, { meta: { kind: "drop" }, ttl: "1h" });
    */
   async push(source, opts = {}) {
-    options(opts, "push", { allowed: ["meta", "ttl", "reads"], unimplemented: UNIMPLEMENTED_PUSH_OPTIONS });
+    options(opts, "push", {
+      allowed: ["meta", "ttl", "reads"],
+      unimplemented: UNIMPLEMENTED_PUSH_OPTIONS,
+    });
     let meta = {};
     if (opts.meta !== undefined) {
       plainObject(opts.meta, "push: meta");
@@ -905,48 +1050,10 @@ export class Stash extends EventEmitter {
     // entries are reclaimed BEFORE the store is judged full -- otherwise a
     // dead-but-unswept entry inflates the footprint and rejects a live push,
     // including in the band below maxTotal where the new entry's sidecar alone
-    // would tip it over. Only the bounded path pays this; an unlimited stash
-    // reads neither prune nor stats. The stats read and the write are not
-    // atomic; concurrent pushes can overshoot by the in-flight count, which
-    // bounds the overshoot without a lock the sidecar design omits.
+    // would tip it over. #chargeCapacity owns that reasoning and the arithmetic.
     const id = generate();
     const entry = make(id, meta, ttlMs, reads);
-    let residual = null;
-    if (this.#maxEntries !== null || this.#maxTotal !== null) {
-      // Two passes, and by design they do not collapse into one. prune() opens and
-      // parses every sidecar to reap the dead -- it MUST run first, because maxTotal
-      // charges its mid-stream residual against the LIVE footprint: total stats.bytes
-      // that still counted an expired entry would tighten the residual and reject a
-      // push that fits once the dead one is reaped (a dead entry blocking a live
-      // push). stats() then totals the PHYSICAL footprint -- blob + sidecar file
-      // sizes PLUS orphan blobs and sidecar-less claim blobs that list() never sees,
-      // the maxTotal-bypass accounting only a layout walk can do. So the reap scan
-      // cannot surface the footprint (deriving it from prune()'s entry list would
-      // under-count those orphans and weaken maxTotal), and the footprint walk cannot
-      // subsume the reap (folding expiry into the backend's walk pushes a policy
-      // decision into a backend that must not interpret it, SPEC.md 9). The full scan
-      // is by-design cheap at maxEntries scale (SPEC.md 3); a central count/index to
-      // make the gate O(1) is exactly the mutable-file coupling the sidecar design
-      // rejects.
-      await this.prune();
-      const stats = await this.#backend.stats();
-      if (this.#maxEntries !== null && stats.entries >= this.#maxEntries) {
-        throw new StashFull();
-      }
-      if (this.#maxTotal !== null) {
-        // maxTotal bounds the stored footprint -- blob plus sidecar -- so this
-        // entry's own metadata is charged against the headroom before the blob
-        // streams. Without it, a caller slips unbounded `meta` (or an endless
-        // run of zero-byte blobs, each still costing a sidecar) past the limit.
-        // The stored sidecar serializes this entry with `size`/`digest` filled in
-        // after the write, so this under-counts by those fixed fields -- a bounded
-        // sub-100-byte overshoot on the last admitted entry, never the meta -- and
-        // never over-counts, so it can't reject an entry that would have fit.
-        const sidecarBytes = Buffer.byteLength(JSON.stringify(entry));
-        residual = this.#maxTotal - stats.bytes - sidecarBytes;
-        if (residual < 0) throw new StashFull();
-      }
-    }
+    const residual = await this.#chargeCapacity(entry);
     // Self-describing selection: stamp the entry with the chosen algorithm's pending
     // marker ("<algo>:") so it travels INSIDE the documented write(id, source, entry)
     // contract -- the backend reads it back (algoOf) and computes that hash. Threading
@@ -998,14 +1105,18 @@ export class Stash extends EventEmitter {
     // entry through the SAME commit path as pop. An unbudgeted entry stays
     // lock-free and pays nothing for the feature.
     if (entry.reads !== null) {
-      return this.#claimedRead(ref, async (claimed) => {
-        if (claimed.readsLeft === 1) {
-          await this.#destroy(ref, claimed, "spent", "dropped"); // the last credit: grave + commit + 'dropped'
-        } else {
-          await this.#backend.consumeRead(ref); // persist the debit BEFORE restoring
-          await this.#backend.restore(ref); // a non-terminal read destroys nothing -- no grave, no event
-        }
-      }, { cause: "spent", event: "dropped" }); // a burned budgeted read destroys the entry -> 'dropped'
+      return this.#claimedRead(
+        ref,
+        async (claimed) => {
+          if (claimed.readsLeft === 1) {
+            await this.#destroy(ref, claimed, "spent", "dropped"); // the last credit: grave + commit + 'dropped'
+          } else {
+            await this.#backend.consumeRead(ref); // persist the debit BEFORE restoring
+            await this.#backend.restore(ref); // a non-terminal read destroys nothing -- no grave, no event
+          }
+        },
+        { cause: "spent", event: "dropped" },
+      ); // a burned budgeted read destroys the entry -> 'dropped'
     }
     const source = await this.#backend.read(ref);
     // The gate above and this open are two awaits apart, so a short TTL can
@@ -1056,9 +1167,11 @@ export class Stash extends EventEmitter {
     await this.#recover();
     await this.#rejectIfClaimed(ref); // a concurrent pop's loser bails before the advisory stat
     await this.#statLive(ref); // advisory: reject an expired entry with zero claim taken
-    return this.#claimedRead(ref,
+    return this.#claimedRead(
+      ref,
       (entry) => this.#destroy(ref, entry, "pop", "popped"), // grave + commit + 'popped'
-      { cause: "pop", event: "popped" }); // a burned pop's delete also lands -> a 'pop' grave, 'popped'
+      { cause: "pop", event: "popped" },
+    ); // a burned pop's delete also lands -> a 'pop' grave, 'popped'
   }
 
   /**
@@ -1185,25 +1298,11 @@ export class Stash extends EventEmitter {
     // Capacity gate: a genuinely new entry (existing === null) is charged against the
     // stash bounds exactly as a push is -- otherwise a replica larger than maxSize, or
     // any replica past maxEntries/maxTotal, slips the configured safeguards (replication
-    // input is untrusted). Expired entries are reaped first so a dead-but-unswept entry
-    // never rejects a live replica (the push discipline) -- and the prune-then-stats two
-    // passes are irreducible for the reason push() documents (the reap must precede the
-    // footprint total, and neither scan subsumes the other). Across DIFFERENT ids the
-    // stats read and the write are not atomic (concurrent inserts overshoot by the
-    // in-flight count, as push documents); the per-id chain makes the SAME id exact.
-    let residual = null;
-    if (this.#maxEntries !== null || this.#maxTotal !== null) {
-      await this.prune();
-      const stats = await this.#backend.stats();
-      if (this.#maxEntries !== null && stats.entries >= this.#maxEntries) throw new StashFull();
-      if (this.#maxTotal !== null) {
-        // The replicated sidecar is the entry in its stored form (write re-derives the
-        // same size/digest the stream verifies), so its serialized footprint is exact.
-        const sidecarBytes = Buffer.byteLength(JSON.stringify(entry));
-        residual = this.#maxTotal - stats.bytes - sidecarBytes;
-        if (residual < 0) throw new StashFull();
-      }
-    }
+    // input is untrusted). Routing through the same #chargeCapacity a push uses is what
+    // makes "exactly as a push is" true by construction rather than by convention.
+    // Across DIFFERENT ids the stats read and the write are not atomic (concurrent
+    // inserts overshoot by the in-flight count); the per-id chain makes the SAME id exact.
+    const residual = await this.#chargeCapacity(entry);
 
     // Step 6: write like push, but every field is the caller's. The bytes are bounded
     // by maxSize and the maxTotal residual mid-stream (_boundedSource) AND verified
@@ -1426,7 +1525,10 @@ export class Stash extends EventEmitter {
     // verify() must see the crash residue, not silently clean it. claimTimeout is
     // policy, passed down so the backend can age a stale claim without owning
     // the threshold; the tmp grace is C.AUDIT.
-    return this.#backend.verify({ repair: opts.repair === true, claimTimeoutMs: this.#claimTimeoutMs });
+    return this.#backend.verify({
+      repair: opts.repair === true,
+      claimTimeoutMs: this.#claimTimeoutMs,
+    });
   }
 
   // [Symbol.asyncIterator] -- `for await (const entry of stash)` is sugar over
@@ -1588,7 +1690,12 @@ export class Stash extends EventEmitter {
    * @spec       SPEC.md 4
    * @related    stash.drop, stash.list
    *
-   * Drop everything; resolve to the number of entries destroyed.
+   * Drop everything; resolve to the number of LIVE entries destroyed. Entries
+   * that had already expired are reaped too, but they are not counted -- an
+   * expired entry is already nonexistent on every read surface, so the number
+   * answers "how many live entries did this destroy", not "how many files went
+   * away". Each live destruction leaves a `'clear'` grave, visible through
+   * `tombstones()`, which blocks a later `store()` of that same ref.
    *
    * @example
    *   const destroyed = await stash.clear();
@@ -1656,7 +1763,7 @@ export class Stash extends EventEmitter {
     // never double-counted (SPEC.md 4.3).
     const reaped = [];
     for (const entry of entries) {
-      if (isExpired(entry, now) && await this.#backend.remove(entry.id)) reaped.push(entry);
+      if (isExpired(entry, now) && (await this.#backend.remove(entry.id))) reaped.push(entry);
     }
     for (const entry of reaped) this.#emit("expired", entry);
     // Prune stale graves (SPEC.md 4.4): a tombstone older than tombstoneTtl is
@@ -1665,7 +1772,8 @@ export class Stash extends EventEmitter {
     // the same prune-is-loud-over-corruption discipline the entry scan holds.
     if (this.#tombstoneTtlMs !== null) {
       for (const grave of await this.#backend.listTombstones()) {
-        if (now - grave.destroyedAt >= this.#tombstoneTtlMs) await this.#backend.removeTombstone(grave.id);
+        if (now - grave.destroyedAt >= this.#tombstoneTtlMs)
+          await this.#backend.removeTombstone(grave.id);
       }
     }
     return reaped.length;

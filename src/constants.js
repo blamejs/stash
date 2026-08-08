@@ -27,7 +27,7 @@ const TIME = {
   // wraps to ~1ms and fires in a busy loop (a TimeoutOverflowWarning +
   // backend hammering). A sweepInterval above this is a config error, not a
   // rounding; operators needing rarer sweeps call prune() on their own clock.
-  MAX_TIMER_MS: 2147483647,
+  MAX_TIMER_MS: 2_147_483_647,
 };
 
 export const C = deepFreeze({
@@ -45,9 +45,11 @@ export const C = deepFreeze({
   },
   AUDIT: {
     // A blobs/<id>.tmp younger than this is a push in flight, not a crash
-    // orphan: verify reports such a tmp but NEVER repairs it, so an audit
-    // racing a live writer cannot delete its half-written blob (CWE-367). One
-    // hour is orders of magnitude above any real push, composed from TIME.
+    // orphan: verify neither reports nor repairs it, so an audit racing a live
+    // writer cannot delete its half-written blob (CWE-367). One aged past this
+    // grace is a crashed write's orphan -- reported as orphan-tmp, and
+    // discarded under repair. One hour is orders of magnitude above any real
+    // push, composed from TIME.
     TMP_GRACE_MS: TIME.HOUR,
   },
 });

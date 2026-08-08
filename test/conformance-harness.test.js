@@ -72,32 +72,51 @@ for (const { name, create } of BACKENDS) {
   // GREEN: the shipped backends pass their own contract, driven by a foreign runner.
   test("the harness certifies the in-tree " + name + " backend with a foreign runner", async () => {
     const results = await runCollecting({ name, create });
-    assert.ok(results.length >= 20, "the harness registered its full core (" + results.length + " cases)");
+    assert.ok(
+      results.length >= 20,
+      "the harness registered its full core (" + results.length + " cases)",
+    );
     const failed = results.filter((r) => !r.ok);
     assert.deepEqual(
       failed.map((f) => f.name),
       [],
-      "a conforming backend passes every case" + (failed[0] ? " -- first failure: " + failed[0].err : ""),
+      "a conforming backend passes every case" +
+        (failed[0] ? " -- first failure: " + failed[0].err : ""),
     );
   });
 
   // RED: silent data loss on write is caught by the round-trip fidelity cases.
-  test("the harness CATCHES a " + name + " backend that silently drops bytes on write", async () => {
-    const results = await runCollecting({ name: "dropping-" + name, create: () => droppingWriteBackend(create()) });
-    const failed = results.filter((r) => !r.ok);
-    assert.ok(failed.length > 0, "silent data loss must fail at least one case, not certify clean");
-    assert.ok(
-      failed.some((f) => f.name.includes("round-trips a Buffer")),
-      "the Buffer round-trip is one of the failures",
-    );
-  });
+  test(
+    "the harness CATCHES a " + name + " backend that silently drops bytes on write",
+    async () => {
+      const results = await runCollecting({
+        name: "dropping-" + name,
+        create: () => droppingWriteBackend(create()),
+      });
+      const failed = results.filter((r) => !r.ok);
+      assert.ok(
+        failed.length > 0,
+        "silent data loss must fail at least one case, not certify clean",
+      );
+      assert.ok(
+        failed.some((f) => f.name.includes("round-trips a Buffer")),
+        "the Buffer round-trip is one of the failures",
+      );
+    },
+  );
 
   // RED: tampered bytes on read are caught (digest verification -> the case rejects).
-  test("the harness CATCHES a " + name + " backend that serves tampered bytes on read", async () => {
-    const results = await runCollecting({ name: "corrupting-" + name, create: () => corruptingReadBackend(create()) });
-    const failed = results.filter((r) => !r.ok);
-    assert.ok(failed.length > 0, "a read that returns tampered bytes must fail the suite");
-  });
+  test(
+    "the harness CATCHES a " + name + " backend that serves tampered bytes on read",
+    async () => {
+      const results = await runCollecting({
+        name: "corrupting-" + name,
+        create: () => corruptingReadBackend(create()),
+      });
+      const failed = results.filter((r) => !r.ok);
+      assert.ok(failed.length > 0, "a read that returns tampered bytes must fail the suite");
+    },
+  );
 }
 
 // The harness must call create AS A METHOD of the factory, preserving `this`: the
@@ -108,22 +127,68 @@ test("the harness preserves the factory receiver: a create() method that uses `t
   const factory = {
     name: "receiver-bound",
     make: BACKENDS.find((b) => b.name === "memory").create,
-    create() { return this.make(); }, // uses `this`; a bare call would throw on `this.make`
+    create() {
+      return this.make();
+    }, // uses `this`; a bare call would throw on `this.make`
   };
   const results = await runCollecting(factory);
   const failed = results.filter((r) => !r.ok);
   assert.deepEqual(
     failed.map((f) => f.name),
     [],
-    "a receiver-bound factory certifies clean" + (failed[0] ? " -- first failure: " + failed[0].err : ""),
+    "a receiver-bound factory certifies clean" +
+      (failed[0] ? " -- first failure: " + failed[0].err : ""),
   );
 });
 
 // Guard the input contract: the harness fails loud on a missing runner or a
 // malformed factory rather than silently registering nothing.
 test("runBackendConformance rejects a missing test runner and a malformed factory", () => {
-  assert.throws(() => runBackendConformance({ name: "x", create: () => new Object() }, {}), TypeError);
+  assert.throws(
+    () => runBackendConformance({ name: "x", create: () => new Object() }, {}),
+    TypeError,
+  );
   assert.throws(() => runBackendConformance({ name: "x", create: () => new Object() }), TypeError);
   assert.throws(() => runBackendConformance({ name: "x" }, { test: () => {} }), TypeError);
   assert.throws(() => runBackendConformance(null, { test: () => {} }), TypeError);
+});
+
+// `name` is half the documented `{ name, create() }` contract, and the harness
+// labels every case with it. A factory that omits it, or supplies something that
+// cannot be a label, is refused at the entry point rather than registering a suite
+// whose cases are indistinguishable from another backend's.
+test("runBackendConformance rejects a factory whose name is missing, empty, or not a string", () => {
+  const create = BACKENDS.find((b) => b.name === "memory").create;
+  for (const factory of [
+    { create },
+    { name: "", create },
+    { name: 42, create },
+    { name: null, create },
+    { name: {}, create },
+  ]) {
+    assert.throws(() => runBackendConformance(factory, { test: () => {} }), TypeError);
+  }
+});
+
+test("every registered case is labelled with the factory name", async () => {
+  // MIGRATING promises operators the literal shape `<name>: <case>`; pin it, so
+  // certifying two backends in one run can never produce two identical title sets.
+  const memory = BACKENDS.find((b) => b.name === "memory");
+  const results = await runCollecting({ name: "labelled", create: memory.create });
+  assert.ok(results.length > 0, "the harness registered cases");
+  // Assert the cases actually RAN clean as well as being labelled -- a title-only
+  // assertion passes even when every case threw, which would make this hollow.
+  assert.deepEqual(
+    results.filter((r) => !r.ok).map((r) => r.name + ": " + r.err),
+    [],
+  );
+  const unlabelled = results.filter((r) => !r.name.startsWith("labelled: "));
+  assert.deepEqual(
+    unlabelled.map((r) => r.name),
+    [],
+    "every case title must start with the factory name",
+  );
+  // and the label is the factory's, not a constant
+  const other = await runCollecting({ name: "other", create: memory.create });
+  assert.ok(other.every((r) => r.name.startsWith("other: ")));
 });

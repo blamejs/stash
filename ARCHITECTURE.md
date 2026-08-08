@@ -90,7 +90,7 @@ This is the crypto-agnosticism argument enforced by the runtime instead of by di
 
 1. **Zero dependencies -- including dev dependencies.** Node builtins only; tests are `node:test` + `node:assert/strict` run with plain `node --test`.
 2. **Crypto-agnostic.** `node:crypto` is imported for `createHash`, `randomBytes`, and `timingSafeEqual` only. There is no key parameter on any method and nowhere for one to live -- the store cannot decrypt what it holds, by construction.
-3. **ESM, plain JavaScript, no build step.** What ships is what runs, on Node 24.18.0 as a floor.
+3. **ESM, plain JavaScript, no build step.** What ships is what runs, on Node 24.19.0 as a floor.
 4. **Streaming-first.** No method buffers an entire blob; limits are enforced mid-stream and a rejected write cleans up its partial.
 5. **Fail loud.** When full, `push` throws `StashFull` -- there is no eviction, because stash entries are promises, not cache hints, and silently destroying the oldest entry would turn a push flood into an attack on other people's data.
 

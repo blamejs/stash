@@ -66,7 +66,12 @@ for (const [token, entry] of Object.entries(ledger)) {
     continue;
   }
   if (statuses.get(token) !== "experimental") {
-    problems.push(token + ": graduated to '" + statuses.get(token) + "' but still carries a ledger entry -- remove it");
+    problems.push(
+      token +
+        ": graduated to '" +
+        statuses.get(token) +
+        "' but still carries a ledger entry -- remove it",
+    );
   }
   if (entry.decision !== "keep-experimental") {
     problems.push(token + ": unknown decision '" + entry.decision + "'");
@@ -77,7 +82,14 @@ for (const [token, entry] of Object.entries(ledger)) {
   if (typeof entry.reviewBy !== "string" || !/^\d+\.\d+\.\d+$/.test(entry.reviewBy)) {
     problems.push(token + ": reviewBy must be a version horizon");
   } else if (versionAtLeast(pkg.version, entry.reviewBy)) {
-    problems.push(token + ": review DUE (reviewBy " + entry.reviewBy + " <= current " + pkg.version + ") -- graduate, extend with a reason, or remove");
+    problems.push(
+      token +
+        ": review DUE (reviewBy " +
+        entry.reviewBy +
+        " <= current " +
+        pkg.version +
+        ") -- graduate, extend with a reason, or remove",
+    );
   }
 }
 
@@ -85,4 +97,9 @@ if (problems.length > 0) {
   for (const p of problems) console.error("status-lifecycle: " + p);
   process.exit(1);
 }
-console.log("status-lifecycle: " + Object.keys(ledger).length + " experimental primitive(s) reviewed, none due before " + pkg.version);
+console.log(
+  "status-lifecycle: " +
+    Object.keys(ledger).length +
+    " experimental primitive(s) reviewed, none due before " +
+    pkg.version,
+);

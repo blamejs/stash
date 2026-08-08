@@ -9,6 +9,7 @@
 !.gitattributes
 !.github/
 !.editorconfig
+!.prettierrc
 !.nvmrc
 !.node-version
 !.npmrc

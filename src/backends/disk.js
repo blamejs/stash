@@ -21,10 +21,39 @@ import { options } from "../validate.js";
 
 // The disk layout's required directories, in one place: #init creates every one,
 // and a consumer that must recognize a real stash root (the CLI's layout pre-check)
-// validates against THIS set, so a new layout directory extends both at once.
-// The directories every disk stash root carries -- created by #init and required by the
-// CLI's layout check, so a partial or wrong directory is refused rather than filled in.
+// validates against THIS set, so a new layout directory extends both at once and a
+// partial or wrong root is refused rather than filled in.
 export const SUBDIRS = ["blobs", "meta", "claims", "tombstones"];
+
+// The sidecar naming rule, and its ONE owner. meta/ and tombstones/ hold one JSON
+// file per entry, named "<ref>.json"; every walk that reads a directory entry back
+// into a ref, and every path that builds one, goes through the three helpers below.
+// These names become paths, so the rule is containment-adjacent: a change to it (a
+// versioned suffix, a shard directory) must land once rather than in the six walks
+// and eleven joins that used to spell it out.
+const SIDECAR_EXT = ".json";
+
+// _sidecarName(id) -> "<id>.json". The forward direction.
+function _sidecarName(id) {
+  return id + SIDECAR_EXT;
+}
+
+// _sidecarId(name) -> id | null. The inverse; null when `name` is not a sidecar.
+// Does NOT validate the id -- callers that must keep walking (verify's audits)
+// record a finding on a bad one instead of throwing.
+function _sidecarId(name) {
+  return name.endsWith(SIDECAR_EXT) ? name.slice(0, -SIDECAR_EXT.length) : null;
+}
+
+// _requireSidecarId(name) -> id. The inverse for the paths that cannot continue on
+// a malformed name. The layout is this backend's OWN output, so a name that is not
+// a well-formed "<ref>.json" means the directory was written by something else --
+// a damaged store, not a caller error, hence IntegrityError.
+function _requireSidecarId(name) {
+  const id = _sidecarId(name);
+  if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
+  return id;
+}
 
 // A sidecar is one Entry's JSON: id + counters + caller meta. Far above
 // any legitimate sidecar, far below a parser-DoS payload -- a sidecar
@@ -114,7 +143,12 @@ async function _retryTransient(fn) {
 export async function _writeAll(fh, bytes, position) {
   let written = 0;
   while (written < bytes.length) {
-    const { bytesWritten } = await fh.write(bytes, written, bytes.length - written, position + written);
+    const { bytesWritten } = await fh.write(
+      bytes,
+      written,
+      bytes.length - written,
+      position + written,
+    );
     if (bytesWritten === 0) throw new IntegrityError("store write made no progress");
     written += bytesWritten;
   }
@@ -158,8 +192,7 @@ export function descriptorMatchesName(opened, named) {
 // @enforced-by guard-shape-reinlined
 // @guard-shape \.ino\s*===
 export function sameFile(a, b) {
-  return a.dev === b.dev && a.ino === b.ino &&
-    a.size === b.size && a.birthtimeMs === b.birthtimeMs;
+  return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.birthtimeMs === b.birthtimeMs;
 }
 
 // verifyDescriptorAgainstName(openedStat, path, damaged) -> boolean. The fallback
@@ -246,7 +279,9 @@ export class DiskBackend {
   // canonical value. The resolved path is only a placeholder for a read before init (which
   // the lazy binding avoids). This is a coordination KEY only -- never the containment
   // realpath (#containedDir); no operation trusts a path from here.
-  get identity() { return "disk:" + (this.#realRoot ?? this.#root); }
+  get identity() {
+    return "disk:" + (this.#realRoot ?? this.#root);
+  }
 
   // Lazy, memoized layout creation (constructors do no I/O). A failed
   // init clears the memo so the next operation retries instead of
@@ -423,11 +458,19 @@ export class DiskBackend {
     const sidecar = Buffer.from(JSON.stringify(stored), "utf8");
     if (sidecar.length > MAX_SIDECAR_BYTES) {
       await rm(blobPath, { force: true });
-      throw new TypeError("push: meta too large for a sidecar");
+      // IntegrityError, not TypeError: write() serves BOTH entry paths -- a local
+      // push and the replication insert store() drives -- and a replicated entry is
+      // untrusted stored input, not a caller argument, so an oversized sidecar is a
+      // content verdict (the three-tier rule). It also matches the READ side of this
+      // same bound, which rejects an over-large sidecar as IntegrityError; a bound
+      // enforced as two different tiers depending on direction is one a caller cannot
+      // reason about. The message names no verb: this line cannot tell which one
+      // called it.
+      throw new IntegrityError("stored entry rejected: meta size");
     }
     try {
       const metaDir = await this.#containedDir("meta");
-      await this.#writeAtomic(metaDir, id + ".json", sidecar);
+      await this.#writeAtomic(metaDir, _sidecarName(id), sidecar);
     } catch (err) {
       await rm(blobPath, { force: true });
       throw err;
@@ -516,9 +559,10 @@ export class DiskBackend {
         // (CWE-59/367); the exactly-once witness is #reaped (in-process), not this
         // op's atomicity. _retryTransient absorbs a Windows EPERM against a lingering
         // handle.
-        await _retryTransient(() => rm(join(metaDir, id + ".json"), { recursive: true }));
+        await _retryTransient(() => rm(join(metaDir, _sidecarName(id)), { recursive: true }));
       } catch (err) {
-        if (_absent(err)) had = false; // already gone (an external / cross-process removal) -- not us
+        if (_absent(err))
+          had = false; // already gone (an external / cross-process removal) -- not us
         else throw err;
       }
       const blobDir = await this.#containedDir("blobs");
@@ -543,8 +587,12 @@ export class DiskBackend {
   async stat(id) {
     assertValid(id);
     const metaDir = await this.#containedDir("meta");
-    const sidecarPath = join(metaDir, id + ".json");
-    const fh = await this.#openStored(sidecarPath, () => new RefNotFound(), "sidecar storage shape is damaged");
+    const sidecarPath = join(metaDir, _sidecarName(id));
+    const fh = await this.#openStored(
+      sidecarPath,
+      () => new RefNotFound(),
+      "sidecar storage shape is damaged",
+    );
     try {
       return await this.#readSidecar(fh, id);
     } finally {
@@ -594,8 +642,7 @@ export class DiskBackend {
     const corrupt = [];
     for (const name of await readdir(metaDir)) {
       if (name.endsWith(".tmp")) continue;
-      const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
-      if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
+      const id = _requireSidecarId(name);
       let entry;
       try {
         entry = await this.stat(id);
@@ -666,14 +713,13 @@ export class DiskBackend {
     const counted = new Set();
     for (const name of await readdir(metaDir)) {
       if (name.endsWith(".tmp")) continue;
-      const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
-      if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
+      const id = _requireSidecarId(name);
       let sidecarSize;
       try {
         sidecarSize = (await lstat(join(metaDir, name))).size; // the sidecar file
       } catch (err) {
         _absent(err); // the sidecar vanished mid-scan -> not a live entry; skip it
-        continue;     // whole, the same tolerance list() holds -- never count it
+        continue; // whole, the same tolerance list() holds -- never count it
       }
       entries += 1;
       bytes += sidecarSize;
@@ -726,11 +772,11 @@ export class DiskBackend {
     // but the aggregate stays loud on a foreign name here as in every layout dir.
     for (const name of await readdir(await this.#containedDir("tombstones"))) {
       if (name.endsWith(".tmp")) continue;
-      const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
-      if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
-      // a grave (<id>.json) is tiny and not part of the footprint count (SPEC.md 4
-      // fixes Stats at { entries, bytes, claimed }). This walk stays loud on a
-      // FOREIGN name here, like every layout dir.
+      // Called for its THROW, not its value: a grave (<id>.json) is tiny and not part
+      // of the footprint count (SPEC.md 4 fixes Stats at { entries, bytes, claimed }),
+      // so nothing here needs the id -- but the walk still refuses a FOREIGN name,
+      // like every layout dir.
+      _requireSidecarId(name);
     }
     return { entries, bytes, claimed };
   }
@@ -742,7 +788,11 @@ export class DiskBackend {
   // #openStored (O_NOFOLLOW / fstat guard), so verify follows nothing (CWE-59). Reads
   // in bounded chunks off the descriptor.
   async #hashBlob(path, algo) {
-    const fh = await this.#openStored(path, () => new RefNotFound(), "blob storage shape is damaged");
+    const fh = await this.#openStored(
+      path,
+      () => new RefNotFound(),
+      "blob storage shape is damaged",
+    );
     try {
       const hash = digestHash(algo);
       let size = 0;
@@ -865,8 +915,9 @@ export class DiskBackend {
 
     // meta/: each sidecar is an entry -- validate it, then check its blob.
     for (const name of await readdir(metaDir)) {
-      if (await this.#auditOrphanTmp("meta", metaDir, name, now, opts, findings, repaired)) continue; // an in-flight or orphaned sidecar write
-      const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
+      if (await this.#auditOrphanTmp("meta", metaDir, name, now, opts, findings, repaired))
+        continue; // an in-flight or orphaned sidecar write
+      const id = _sidecarId(name);
       if (id === null || !isValid(id)) {
         findings.push({ kind: "foreign-file", id: null });
         if (opts.repair) await this.#discard("meta", name, "foreign-file", repaired);
@@ -930,7 +981,8 @@ export class DiskBackend {
         got = await this.#hashBlob(blobPath, algoOf(entry.digest));
       } catch (err) {
         if (err instanceof RefNotFound) continue; // vanished mid-walk (a claim committed / a drop)
-        if (err instanceof IntegrityError) { // a symlink / non-regular blob, refused
+        if (err instanceof IntegrityError) {
+          // a symlink / non-regular blob, refused
           findings.push({ kind: "digest-mismatch", id });
           if (opts.repair) await this.#condemnIfUnclaimed(id, "digest-mismatch", repaired);
           continue;
@@ -946,7 +998,8 @@ export class DiskBackend {
     // blobs/: orphan blobs (no sidecar), stale .tmp orphans, foreign files.
     const blobScan = await this.#containedDir("blobs");
     for (const name of await readdir(blobScan)) {
-      if (await this.#auditOrphanTmp("blobs", blobScan, name, now, opts, findings, repaired)) continue; // an in-flight push or orphaned .tmp
+      if (await this.#auditOrphanTmp("blobs", blobScan, name, now, opts, findings, repaired))
+        continue; // an in-flight push or orphaned .tmp
       if (!isValid(name)) {
         findings.push({ kind: "foreign-file", id: null });
         if (opts.repair) await this.#discard("blobs", name, "foreign-file", repaired);
@@ -961,9 +1014,15 @@ export class DiskBackend {
       // window of a live push), and a live sidecar/claim is a healthy entry the
       // snapshot missed -- never delete a just-written blob (CWE-367).
       let orphanStat;
-      try { orphanStat = await lstat(join(blobScan, name)); } catch (err) { _absent(err); continue; }
+      try {
+        orphanStat = await lstat(join(blobScan, name));
+      } catch (err) {
+        _absent(err);
+        continue;
+      }
       if (now - orphanStat.mtimeMs < C.AUDIT.TMP_GRACE_MS) continue; // fresh -- a possibly-in-flight push
-      if (await this.#isPresent(join(await this.#containedDir("meta"), name + ".json"))) continue; // sidecar landed after the snapshot
+      if (await this.#isPresent(join(await this.#containedDir("meta"), _sidecarName(name))))
+        continue; // sidecar landed after the snapshot
       if (await this.#isPresent(join(await this.#containedDir("claims"), name))) continue; // claimed after the snapshot
       findings.push({ kind: "orphan-blob", id: name });
       if (opts.repair) await this.#condemn(name, "orphan-blob", repaired);
@@ -973,15 +1032,22 @@ export class DiskBackend {
     // claim would be data loss; SPEC.md 6 recovery owns resolution).
     const claimsDir = await this.#containedDir("claims");
     for (const name of await readdir(claimsDir)) {
-      if (await this.#auditOrphanTmp("claims", claimsDir, name, now, opts, findings, repaired)) continue; // an orphaned .tmp (claims/ writes none in normal flow)
+      if (await this.#auditOrphanTmp("claims", claimsDir, name, now, opts, findings, repaired))
+        continue; // an orphaned .tmp (claims/ writes none in normal flow)
       if (!isValid(name)) {
         findings.push({ kind: "foreign-file", id: null });
         if (opts.repair) await this.#discard("claims", name, "foreign-file", repaired);
         continue;
       }
       let claimStat;
-      try { claimStat = await lstat(join(claimsDir, name)); } catch (err) { _absent(err); continue; }
-      if (now - claimStat.mtimeMs >= opts.claimTimeoutMs) findings.push({ kind: "stale-claim", id: name });
+      try {
+        claimStat = await lstat(join(claimsDir, name));
+      } catch (err) {
+        _absent(err);
+        continue;
+      }
+      if (now - claimStat.mtimeMs >= opts.claimTimeoutMs)
+        findings.push({ kind: "stale-claim", id: name });
     }
 
     // tombstones/: replication's graves. verify audits the dir for layout damage --
@@ -989,8 +1055,11 @@ export class DiskBackend {
     // CONTENTS through the same parser tombstones()/prune() use.
     const tombstonesDir = await this.#containedDir("tombstones");
     for (const name of await readdir(tombstonesDir)) {
-      if (await this.#auditOrphanTmp("tombstones", tombstonesDir, name, now, opts, findings, repaired)) continue;
-      const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
+      if (
+        await this.#auditOrphanTmp("tombstones", tombstonesDir, name, now, opts, findings, repaired)
+      )
+        continue;
+      const id = _sidecarId(name);
       if (id === null || !isValid(id)) {
         findings.push({ kind: "foreign-file", id: null });
         if (opts.repair) await this.#discard("tombstones", name, "foreign-file", repaired);
@@ -1033,12 +1102,12 @@ export class DiskBackend {
   async writeTombstone(id, tombstone) {
     assertValid(id);
     const dir = await this.#containedDir("tombstones");
-    const finalPath = join(dir, id + ".json");
+    const finalPath = join(dir, _sidecarName(id));
     if (await this.#isPresent(finalPath)) return; // a grave already stands -- first-write-wins
     // The policy layer hands a makeTombstone() object -- exactly { id, destroyedAt,
     // cause } -- so serialize it whole; a malformed shape would be caught on read.
     const bytes = Buffer.from(JSON.stringify(tombstone), "utf8");
-    const tmpPath = join(dir, id + ".json." + randomBytes(8).toString("hex") + ".tmp");
+    const tmpPath = join(dir, _sidecarName(id) + "." + randomBytes(8).toString("hex") + ".tmp");
     const fh = await open(tmpPath, "wx", FILE_MODE);
     try {
       try {
@@ -1062,7 +1131,7 @@ export class DiskBackend {
   // not parse it (fail-closed in the safe direction; a corrupt grave still blocks).
   async hasTombstone(id) {
     assertValid(id);
-    return this.#isPresent(join(await this.#containedDir("tombstones"), id + ".json"));
+    return this.#isPresent(join(await this.#containedDir("tombstones"), _sidecarName(id)));
   }
 
   // listTombstones() -> Tombstone[]. Loud, not lossy (the list() discipline): a
@@ -1075,8 +1144,7 @@ export class DiskBackend {
     const out = [];
     for (const name of await readdir(dir)) {
       if (name.endsWith(".tmp")) continue; // an in-flight grave write
-      const id = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
-      if (id === null || !isValid(id)) throw new IntegrityError("store layout is damaged");
+      const id = _requireSidecarId(name);
       try {
         out.push(await this.#readTombstone(join(dir, name), id));
       } catch (err) {
@@ -1093,7 +1161,7 @@ export class DiskBackend {
   // read BEFORE the removal for the boolean (rm's force would swallow the ENOENT).
   async removeTombstone(id) {
     assertValid(id);
-    const path = join(await this.#containedDir("tombstones"), id + ".json");
+    const path = join(await this.#containedDir("tombstones"), _sidecarName(id));
     const had = await this.#isPresent(path);
     await _retryTransient(() => rm(path, { force: true, recursive: true }));
     return had;
@@ -1105,9 +1173,14 @@ export class DiskBackend {
   // hostile-sidecar discipline, retargeted to the smaller grave. onAbsent is
   // RefNotFound so listTombstones can tolerate a grave pruned mid-scan.
   async #readTombstone(path, id) {
-    const fh = await this.#openStored(path, () => new RefNotFound(), "tombstone storage shape is damaged");
+    const fh = await this.#openStored(
+      path,
+      () => new RefNotFound(),
+      "tombstone storage shape is damaged",
+    );
     try {
-      if ((await fh.stat()).size > MAX_TOMBSTONE_BYTES) throw new IntegrityError("tombstone exceeds its size bound");
+      if ((await fh.stat()).size > MAX_TOMBSTONE_BYTES)
+        throw new IntegrityError("tombstone exceeds its size bound");
       let parsed;
       try {
         parsed = JSON.parse(await fh.readFile("utf8"));
@@ -1115,7 +1188,8 @@ export class DiskBackend {
         throw new IntegrityError("tombstone is not valid JSON");
       }
       assertTombstoneShape(parsed, IntegrityError);
-      if (!constantTimeEqual(parsed.id, id)) throw new IntegrityError("tombstone identity mismatch");
+      if (!constantTimeEqual(parsed.id, id))
+        throw new IntegrityError("tombstone identity mismatch");
       return parsed;
     } finally {
       await fh.close();
@@ -1214,7 +1288,7 @@ export class DiskBackend {
     // blob is closed here and removing it races nothing.
     const metaDir = await this.#containedDir("meta");
     try {
-      await lstat(join(metaDir, id + ".json"));
+      await lstat(join(metaDir, _sidecarName(id)));
     } catch (err) {
       _absent(err);
       await rm(join(claimsDir, id), { force: true });
@@ -1263,7 +1337,7 @@ export class DiskBackend {
     // a claim), a permanent leak under repeated races. If the entry vanished,
     // finish the destruction the drop began by removing the blob we just moved.
     try {
-      await lstat(join(metaDir, id + ".json"));
+      await lstat(join(metaDir, _sidecarName(id)));
     } catch (err) {
       _absent(err);
       await rm(blobPath, { force: true });
@@ -1285,7 +1359,7 @@ export class DiskBackend {
     // throws EISDIR, the claim stands, and every later verb re-runs recovery and re-fails.
     // `rm` removes a final-component symlink ITSELF, never following it (CWE-59/367);
     // recursive is inert on a regular file.
-    await rm(join(metaDir, id + ".json"), { force: true, recursive: true });
+    await rm(join(metaDir, _sidecarName(id)), { force: true, recursive: true });
     const claimsDir = await this.#containedDir("claims");
     // The claimed blob's read stream may have only just closed; on Windows its
     // handle can linger, so absorb the transient EPERM rather than fail the
@@ -1329,27 +1403,19 @@ export class DiskBackend {
   // claims before the probe runs, so a present claim is a live one.
   async isClaimed(id) {
     assertValid(id);
-    const claimsDir = await this.#containedDir("claims");
-    try {
-      await lstat(join(claimsDir, id));
-      return true;
-    } catch (err) {
-      _absent(err);
-      return false;
-    }
+    return this.#isPresent(join(await this.#containedDir("claims"), id));
   }
 
   // consumeRead(id) -> remaining. Debit one read credit and return what is left.
   // Only ever called while holding the claim -- the claim is the cross-process
-  // mutex, so no two readers race the decrement. spend() owns the arithmetic (no
-  // readsLeft literal here -- the guard-shape tripwire). The sidecar is rewritten
-  // atomically over the old one; persisting BEFORE the caller restores the blob
-  // means a crash after this leaves a correctly-decremented entry, so a completed
-  // drain is always paid for.
+  // mutex, so no two readers race the decrement. The sidecar is rewritten IN
+  // PLACE through a single descriptor, deliberately not tmp+rename: the rewrite
+  // is not crash-atomic, and the body documents why that trade is the right one
+  // (a rename would recreate a name a concurrent drop had just removed).
   async consumeRead(id) {
     assertValid(id);
     const metaDir = await this.#containedDir("meta");
-    const sidecarPath = join(metaDir, id + ".json");
+    const sidecarPath = join(metaDir, _sidecarName(id));
     const damaged = "sidecar storage shape is damaged";
     // ONE descriptor for the read AND the rewrite: the open is the atomicity
     // anchor. A concurrent drop that removes the sidecar BEFORE this open ENOENTs

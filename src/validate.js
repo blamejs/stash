@@ -34,7 +34,7 @@ export function options(opts, label, spec) {
   for (const key of spec.unimplemented || []) {
     if (key in opts) {
       throw new TypeError(
-        label + ": option '" + key + "' is not implemented yet (SPEC.md 12 is the delivery plan)"
+        label + ": option '" + key + "' is not implemented yet (SPEC.md 12 is the delivery plan)",
       );
     }
   }
@@ -56,7 +56,9 @@ export function options(opts, label, spec) {
 // @validator-shape expected one of
 export function oneOf(value, label, allowed) {
   if (!allowed.includes(value)) {
-    throw new TypeError(label + ": expected one of " + allowed.map((a) => "'" + a + "'").join(", "));
+    throw new TypeError(
+      label + ": expected one of " + allowed.map((a) => "'" + a + "'").join(", "),
+    );
   }
   return value;
 }

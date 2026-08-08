@@ -21,7 +21,7 @@
 
 import path from "node:path";
 
-var ROOT    = path.resolve(import.meta.dirname, "..");
+var ROOT = path.resolve(import.meta.dirname, "..");
 var LIB_DIR = path.join(ROOT, "src");
 
 var engine = await import("../examples/wiki/lib/source-comment-block-validator.js");
@@ -34,7 +34,9 @@ function _report(findings) {
   }
   console.log("[validate-source-comment-blocks] " + findings.length + " finding(s):");
   findings.forEach(function (f, i) {
-    console.log("  " + (i + 1) + ". [" + f.kind + "] " + f.file + (f.primitive ? " :: " + f.primitive : ""));
+    console.log(
+      "  " + (i + 1) + ". [" + f.kind + "] " + f.file + (f.primitive ? " :: " + f.primitive : ""),
+    );
     console.log("     " + f.msg);
   });
   return 1;

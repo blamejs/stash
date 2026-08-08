@@ -37,7 +37,7 @@ const result = spawnSync(
     "--test-isolation=none",
     "test/*.test.js",
   ],
-  { cwd: ROOT, stdio: "inherit" }
+  { cwd: ROOT, stdio: "inherit" },
 );
 
 process.exit(result.status === null ? 2 : result.status);

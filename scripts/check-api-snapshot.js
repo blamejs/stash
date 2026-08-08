@@ -41,7 +41,9 @@ function compare(baseline, current, path, breaking, stale) {
   } else if ("length" in baseline && current.length > baseline.length) {
     // Growth is not breaking, but the added members are not in the snapshot
     // -- a refresh would rewrite it, so the check must not pass silently.
-    stale.push(path + ": array grew " + baseline.length + " -> " + current.length + " but not snapshotted");
+    stale.push(
+      path + ": array grew " + baseline.length + " -> " + current.length + " but not snapshotted",
+    );
   }
   for (const nested of ["members", "methods"]) {
     if (!(nested in baseline) && !(nested in current)) continue;
@@ -52,7 +54,8 @@ function compare(baseline, current, path, breaking, stale) {
       else compare(base[key], curr[key], path + "." + key, breaking, stale);
     }
     for (const key of Object.keys(curr)) {
-      if (!(key in base)) stale.push(path + "." + key + ": added (" + curr[key].kind + ") but not snapshotted");
+      if (!(key in base))
+        stale.push(path + "." + key + ": added (" + curr[key].kind + ") but not snapshotted");
     }
   }
 }
@@ -79,7 +82,10 @@ export function diffSnapshot(baseline, current, packageVersion) {
   const currSince = current.sinceByPrimitive || {};
   for (const token of Object.keys(baseSince)) {
     if (!(token in currSince)) {
-      stale.push(token + ": @primitive block no longer found in src/ (removed or untagged) -- the snapshot still carries it");
+      stale.push(
+        token +
+          ": @primitive block no longer found in src/ (removed or untagged) -- the snapshot still carries it",
+      );
     }
   }
   for (const token of Object.keys(currSince)) {
@@ -93,8 +99,12 @@ export function diffSnapshot(baseline, current, packageVersion) {
   }
 
   if (packageVersion !== undefined && baseline.packageVersion !== packageVersion) {
-    stale.push("snapshot was generated at package version " + baseline.packageVersion +
-      " but package.json is " + packageVersion);
+    stale.push(
+      "snapshot was generated at package version " +
+        baseline.packageVersion +
+        " but package.json is " +
+        packageVersion,
+    );
   }
 
   return { breaking, stale };
@@ -118,15 +128,25 @@ async function main() {
   for (const line of diff.breaking) console.error("BREAKING: " + line);
   for (const line of diff.stale) console.error("STALE: " + line);
   if (!isClean(diff)) {
-    console.error("api surface diverges from api-snapshot.json (" +
-      diff.breaking.length + " breaking, " + diff.stale.length + " stale)");
+    console.error(
+      "api surface diverges from api-snapshot.json (" +
+        diff.breaking.length +
+        " breaking, " +
+        diff.stale.length +
+        " stale)",
+    );
     if (diff.stale.length > 0) {
-      console.error("stale entries: run `node scripts/refresh-api-snapshot.js` and commit the refreshed snapshot");
+      console.error(
+        "stale entries: run `node scripts/refresh-api-snapshot.js` and commit the refreshed snapshot",
+      );
     }
     process.exit(1);
   }
-  console.log("api snapshot: surface matches (" +
-    Object.keys(baseline.sinceByPrimitive).length + " primitives)");
+  console.log(
+    "api snapshot: surface matches (" +
+      Object.keys(baseline.sinceByPrimitive).length +
+      " primitives)",
+  );
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

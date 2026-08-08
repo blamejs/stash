@@ -87,14 +87,18 @@ function checkDocLinks(packedSet, violations) {
     while ((m = LINK.exec(text)) !== null) {
       let target = m[1];
       if (/^[a-z][a-z0-9+.-]*:/i.test(target)) continue; // absolute URL (has a scheme)
-      if (target.startsWith("#")) continue;              // pure in-page anchor
+      if (target.startsWith("#")) continue; // pure in-page anchor
       const hash = target.indexOf("#");
       if (hash !== -1) target = target.slice(0, hash);
-      if (!target.endsWith(".md")) continue;             // scope: doc cross-references
+      if (!target.endsWith(".md")) continue; // scope: doc cross-references
       const resolved = join(dirname(doc), target).replace(/\\/g, "/").replace(/^\.\//, "");
       if (!packedSet.has(resolved)) {
-        violations.push(doc + " links to " + JSON.stringify(target) +
-          " which the tarball omits -- a broken local link for package consumers");
+        violations.push(
+          doc +
+            " links to " +
+            JSON.stringify(target) +
+            " which the tarball omits -- a broken local link for package consumers",
+        );
       }
     }
   }
@@ -149,12 +153,16 @@ function main() {
     fail("cannot read package.json: " + (e && e.message ? e.message : e));
   }
   if (allowlist.length === 0) {
-    violations.push("package.json has no `files` allowlist -- the tarball would pack the whole tree");
+    violations.push(
+      "package.json has no `files` allowlist -- the tarball would pack the whole tree",
+    );
   }
   for (const item of allowlist) {
     const rel = item.replace(/\/+$/, "");
     if (!existsSync(join(ROOT, rel))) {
-      violations.push("package.json files entry " + JSON.stringify(item) + " does not exist on disk");
+      violations.push(
+        "package.json files entry " + JSON.stringify(item) + " does not exist on disk",
+      );
     }
   }
 
@@ -165,8 +173,11 @@ function main() {
     for (const v of violations) process.stderr.write("  " + v + "\n");
     process.exit(1);
   }
-  process.stdout.write("[pack-gate] ok -- " + packed.length +
-    " packed files, all tracked, none internal-only, files allowlist present\n");
+  process.stdout.write(
+    "[pack-gate] ok -- " +
+      packed.length +
+      " packed files, all tracked, none internal-only, files allowlist present\n",
+  );
 }
 
 main();

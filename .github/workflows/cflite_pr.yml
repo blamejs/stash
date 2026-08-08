@@ -1,3 +1,18 @@
+# DORMANT -- manual dispatch only. ClusterFuzzLite cannot build a JavaScript
+# project at any sanitizer value: its action validates the `sanitizer` input
+# against [address, memory, undefined, coverage] and rejects `none`, while the
+# oss-fuzz JavaScript build refuses every one of those with "JavaScript projects
+# cannot be fuzzed with sanitizers". `none` is the value an oss-fuzz
+# project.yaml uses for JavaScript, so the two halves disagree and no setting
+# satisfies both. The action input defaults to `address` on upstream main, so
+# neither omitting it nor bumping the pin helps.
+#
+# The triggers are removed rather than left failing: a gate that cannot pass is
+# noise that trains everyone to ignore a red check. Continuous fuzzing runs
+# through .github/workflows/fuzz.yml, which drives the SAME targets under
+# jazzer.js directly. These files stay so the corpus-persisting, long-run setup
+# can be restored the day upstream accepts a JavaScript build.
+#
 # ClusterFuzzLite PR fuzzing: build the jazzer.js targets under
 # .clusterfuzzlite/ and fuzz the code a pull request changes for a short
 # burst. The targets hold the store's fail-closed contract on its
@@ -12,11 +27,7 @@
 name: ClusterFuzzLite PR fuzzing
 
 on:
-  pull_request:
-    paths:
-      - "src/**"
-      - ".clusterfuzzlite/**"
-      - ".github/workflows/cflite_pr.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -36,9 +47,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # jazzer.js targets carry no native code; "none" is the oss-fuzz
-        # sanitizer for javascript projects.
-        sanitizer: [none]
+        # jazzer.js targets carry no native code, so the sanitizer is inert here --
+        # but ClusterFuzzLite validates this input against a fixed list
+        # (address / memory / undefined / coverage) and rejects "none", which is
+        # the value oss-fuzz project.yaml uses. Pick the list default.
+        sanitizer: [address]
     steps:
       - name: Build fuzzers (${{ matrix.sanitizer }})
         id: build

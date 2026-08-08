@@ -54,13 +54,19 @@ function _walk(dir, files, opts) {
   files = files || [];
   const base = path.basename(dir);
   if (base === "node_modules" || base === ".git") return files;
-  if (opts && opts.skipAssetDirs &&
-      (base === "public" || base === "vendor" || base.startsWith("."))) {
+  if (
+    opts &&
+    opts.skipAssetDirs &&
+    (base === "public" || base === "vendor" || base.startsWith("."))
+  ) {
     return files;
   }
   let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
-  catch { return files; }
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return files;
+  }
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) _walk(full, files, opts);
@@ -73,10 +79,18 @@ function _relPath(absPath) {
   return path.relative(REPO_ROOT, absPath).replace(/\\/g, "/");
 }
 
-function _srcFiles() { return _walk(path.join(REPO_ROOT, "src")); }
-function _testFiles() { return _walk(path.join(REPO_ROOT, "test")); }
-function _scriptFiles() { return _walk(path.join(REPO_ROOT, "scripts")); }
-function _wikiFiles() { return _walk(path.join(REPO_ROOT, "examples", "wiki"), [], { skipAssetDirs: true }); }
+function _srcFiles() {
+  return _walk(path.join(REPO_ROOT, "src"));
+}
+function _testFiles() {
+  return _walk(path.join(REPO_ROOT, "test"));
+}
+function _scriptFiles() {
+  return _walk(path.join(REPO_ROOT, "scripts"));
+}
+function _wikiFiles() {
+  return _walk(path.join(REPO_ROOT, "examples", "wiki"), [], { skipAssetDirs: true });
+}
 function _allJsFiles() {
   const seen = new Set();
   const out = [];
@@ -90,8 +104,11 @@ function _allJsFiles() {
 }
 
 function _read(absPath) {
-  try { return fs.readFileSync(absPath, "utf8"); }
-  catch { return ""; }
+  try {
+    return fs.readFileSync(absPath, "utf8");
+  } catch {
+    return "";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -117,12 +134,12 @@ test("file-walk contract -- a product walk descends into every subdirectory", (t
   assert.deepEqual(
     names(_walk(root)),
     [".hidden/probe.js", "public/probe.js", "sub/probe.js", "vendor/probe.js"],
-    "product walk must scan every subdirectory except node_modules/.git"
+    "product walk must scan every subdirectory except node_modules/.git",
   );
   assert.deepEqual(
     names(_walk(root, [], { skipAssetDirs: true })),
     ["sub/probe.js"],
-    "asset-mode walk (example app) skips public/, vendor/, and dot-directories"
+    "asset-mode walk (example app) skips public/, vendor/, and dot-directories",
   );
 });
 
@@ -137,7 +154,9 @@ test("file-walk floor -- every scanned family finds source files", () => {
 });
 
 // Split content into lines, tolerant of CRLF vs LF.
-function _lines(content) { return content.split(/\r?\n/); }
+function _lines(content) {
+  return content.split(/\r?\n/);
+}
 
 function _lineOfIndex(content, index) {
   return content.slice(0, index).split(/\r?\n/).length;
@@ -149,7 +168,9 @@ function _lineOfIndex(content, index) {
 
 // Blank a matched region, preserving its newlines so line numbers computed
 // on the stripped subject agree with the raw file.
-function _blank(match) { return match.replace(/[^\n]/g, " "); }
+function _blank(match) {
+  return match.replace(/[^\n]/g, " ");
+}
 
 // Strip `//` line comments and `/* */` block comments, keeping string
 // literals (an import specifier is a string literal, and the sandbox scan
@@ -157,7 +178,9 @@ function _blank(match) { return match.replace(/[^\n]/g, " "); }
 function _stripComments(content) {
   return content
     .replace(/\/\*[\s\S]*?\*\//g, _blank)
-    .replace(/(^|[^:])\/\/[^\n]*/g, function (m, pre) { return pre + _blank(m.slice(pre.length)); });
+    .replace(/(^|[^:])\/\/[^\n]*/g, function (m, pre) {
+      return pre + _blank(m.slice(pre.length));
+    });
 }
 
 // Strip comments AND string literals so a structural scan does not fire on
@@ -234,9 +257,11 @@ function _filterMarkers(matches, allowClass) {
     const lines = _readContext(file);
     if (!lines.length) return false;
     const re = new RegExp("allow:" + allowClass + "\\b");
-    return re.test(lines[lineNum - 1] || "") ||
-           re.test(lines[lineNum - 2] || "") ||
-           re.test(lines[lineNum - 3] || "");
+    return (
+      re.test(lines[lineNum - 1] || "") ||
+      re.test(lines[lineNum - 2] || "") ||
+      re.test(lines[lineNum - 3] || "")
+    );
   }
   return matches.filter((m) => !_hasFileAllow(m.file) && !_hasLineAllow(m.file, m.line));
 }
@@ -252,10 +277,7 @@ function _report(label, matches) {
   const detail = matches
     .map((m) => "  " + m.file + ":" + m.line + ": " + String(m.content).slice(0, 160))
     .join("\n");
-  assert.equal(
-    matches.length, 0,
-    label + " -- " + matches.length + " violation(s):\n" + detail
-  );
+  assert.equal(matches.length, 0, label + " -- " + matches.length + " violation(s):\n" + detail);
 }
 
 // Scan a file set line by line against a regex. `prepare` (optional) maps
@@ -304,7 +326,10 @@ test("forbidden-crypto-token -- no cipher machinery, sqlite, or password surface
   const re = new RegExp(tokens.join("|"), "i");
   let bad = _scanLines(_srcFiles(), re);
   bad = _filterMarkers(bad, "forbidden-crypto-token");
-  _report("SPEC.md 13.1: zero hits for cipher / sqlite / password tokens in src/ (raw, comments included)", bad);
+  _report(
+    "SPEC.md 13.1: zero hits for cipher / sqlite / password tokens in src/ (raw, comments included)",
+    bad,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -327,13 +352,14 @@ test("digest-algo-hardcode -- no algorithm literal outside the digest registry",
   const algos = Object.keys(DIGESTS)
     .map((a) => a.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&"))
     .join("|");
-  const re = new RegExp(
-    "createHash\\s*\\(\\s*[\"'](?:" + algos + ")[\"']|[\"'](?:" + algos + "):"
-  );
+  const re = new RegExp("createHash\\s*\\(\\s*[\"'](?:" + algos + ")[\"']|[\"'](?:" + algos + "):");
   const files = _srcFiles().filter((f) => _relPath(f) !== "src/digest.js");
   let bad = _scanLines(files, re, { prepare: _stripComments });
   bad = _filterMarkers(bad, "digest-algo-hardcode");
-  _report("SPEC.md 5: no createHash(\"<algo>\") or \"<algo>:\" literal outside src/digest.js (the registry owns the algorithm set)", bad);
+  _report(
+    'SPEC.md 5: no createHash("<algo>") or "<algo>:" literal outside src/digest.js (the registry owns the algorithm set)',
+    bad,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -370,7 +396,8 @@ test("prototype-key-confusion -- no computed-member membership test that reads t
   // cannot use Object.hasOwn carries an `allow:prototype-key-confusion` marker; none
   // exist today, so the tree is silent.
   const INLINE = /[A-Za-z_$][\w$]*\[[A-Za-z_$][\w$]*\]\s*(?:===|!==)\s*undefined/;
-  const ASSIGN = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\[[A-Za-z_$][\w$]*\]\s*;[\s\S]{0,160}?\b\1\s*(?:===|!==)\s*undefined/g;
+  const ASSIGN =
+    /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\[[A-Za-z_$][\w$]*\]\s*;[\s\S]{0,160}?\b\1\s*(?:===|!==)\s*undefined/g;
   const bad = [];
   for (const file of _srcFiles()) {
     const rel = _relPath(file);
@@ -392,7 +419,10 @@ test("prototype-key-confusion -- no computed-member membership test that reads t
     }
   }
   const filtered = _filterMarkers(bad, "prototype-key-confusion");
-  _report("CWE-1321: no prototype-consulting membership over a computed key in src/ -- use Object.hasOwn (the prototype chain is not a registry row)", filtered);
+  _report(
+    "CWE-1321: no prototype-consulting membership over a computed key in src/ -- use Object.hasOwn (the prototype chain is not a registry row)",
+    filtered,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -405,10 +435,14 @@ test("sandbox-widening-import -- src/ never widens the permission-model sandbox"
   // and process.dlopen each need their own --allow-* grant and each widens
   // the sandbox; the store needs none of them. Comments are stripped;
   // string literals are kept because an import specifier IS a string.
-  const re = /\b(?:node:)?child_process\b|\b(?:node:)?worker_threads\b|\bnode:cluster\b|\bnode:wasi\b|\bprocess\.binding\b|\bprocess\.dlopen\b/;
+  const re =
+    /\b(?:node:)?child_process\b|\b(?:node:)?worker_threads\b|\bnode:cluster\b|\bnode:wasi\b|\bprocess\.binding\b|\bprocess\.dlopen\b/;
   let bad = _scanLines(_srcFiles(), re, { prepare: _stripComments });
   bad = _filterMarkers(bad, "sandbox-widening-import");
-  _report("SPEC.md 2.1: no child_process / worker_threads / cluster / wasi / process.binding / process.dlopen in src/", bad);
+  _report(
+    "SPEC.md 2.1: no child_process / worker_threads / cluster / wasi / process.binding / process.dlopen in src/",
+    bad,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -438,7 +472,10 @@ test("error-event-emit -- background failures never emit 'error'", () => {
   const re = /\bemit\s*\(\s*["'`]error["'`]/;
   let bad = _scanLines(_srcFiles(), re, { prepare: _stripComments });
   bad = _filterMarkers(bad, "error-event-emit");
-  _report("SPEC.md 4.3: no emit('error') in src/ -- the background failure channel is 'sweepError'", bad);
+  _report(
+    "SPEC.md 4.3: no emit('error') in src/ -- the background failure channel is 'sweepError'",
+    bad,
+  );
 });
 
 // (4a) emit-outside-policy -- SPEC.md 4.3, 4.4
@@ -454,7 +491,10 @@ test("emit-outside-policy -- only the policy layer emits lifecycle events", () =
   const files = _srcFiles().filter((f) => !/[\\/]stash\.js$/.test(f));
   let bad = _scanLines(files, re, { prepare: _stripComments });
   bad = _filterMarkers(bad, "emit-outside-policy");
-  _report("SPEC.md 4.3: events are policy -- only src/stash.js emits (a backend emit is a second surface)", bad);
+  _report(
+    "SPEC.md 4.3: events are policy -- only src/stash.js emits (a backend emit is a second surface)",
+    bad,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -470,7 +510,8 @@ test("capability-in-error-message -- typed stash errors carry static messages", 
   // so the messages are static by construction. The class-name list is the
   // frozen public error contract -- a stable anchor, not a renameable
   // symbol.
-  const classAlt = "(?:StashError|RefNotFound|RefClaimed|IntegrityError|SizeExceeded|StashFull|InvalidRef)";
+  const classAlt =
+    "(?:StashError|RefNotFound|RefClaimed|IntegrityError|SizeExceeded|StashFull|InvalidRef)";
   const callRe = new RegExp("new\\s+" + classAlt + "\\s*\\(([^)]{0,400})", "g");
   const files = _srcFiles();
   let bad = [];
@@ -484,13 +525,18 @@ test("capability-in-error-message -- typed stash errors carry static messages", 
         bad.push({
           file: rel,
           line: _lineOfIndex(subject, m.index),
-          content: "typed stash error constructed with a dynamic message: " + m[0].replace(/\s+/g, " ").slice(0, 120),
+          content:
+            "typed stash error constructed with a dynamic message: " +
+            m[0].replace(/\s+/g, " ").slice(0, 120),
         });
       }
     }
   }
   bad = _filterMarkers(bad, "capability-in-error-message");
-  _report("SPEC.md 10: typed stash errors are constructed with static messages (no ${...}, no concatenation)", bad);
+  _report(
+    "SPEC.md 10: typed stash errors are constructed with static messages (no ${...}, no concatenation)",
+    bad,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -521,12 +567,17 @@ test("catch-return-swallow -- no catch absorbs an error into a return", () => {
       bad.push({
         file: rel,
         line: _lineOfIndex(subject, m.index),
-        content: "catch block returns / is empty instead of (re)throwing: " + m[0].replace(/\s+/g, " ").slice(0, 120),
+        content:
+          "catch block returns / is empty instead of (re)throwing: " +
+          m[0].replace(/\s+/g, " ").slice(0, 120),
       });
     }
   }
   bad = _filterMarkers(bad, "catch-return-swallow");
-  _report("no catch-return / empty-catch swallow in src/ (a catch re-throws or propagates, never absorbs)", bad);
+  _report(
+    "no catch-return / empty-catch swallow in src/ (a catch re-throws or propagates, never absorbs)",
+    bad,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -543,13 +594,16 @@ test("fail-open-verify -- no catch returns a positive verdict", () => {
   // the catch block -- a later, unrelated `return true` in a sibling
   // function is never attributed to the catch. Comments and literals are
   // stripped first.
-  const VERDICT = "(?:true|1|valid|verified|isValid|ok)\\b" +
-                  "|\\{[^}]*\\b(?:valid|verified|ok|allowed|trusted)\\s*:\\s*true";
+  const VERDICT =
+    "(?:true|1|valid|verified|isValid|ok)\\b" +
+    "|\\{[^}]*\\b(?:valid|verified|ok|allowed|trusted)\\s*:\\s*true";
   const failOpenRe = new RegExp(
     "catch\\s*(?:\\([^)]*\\)\\s*)?\\{" +
-    "(?:(?!\\n {0,4}\\})[\\s\\S]){0,600}?" +
-    "(?:\\breturn\\s+(?:" + VERDICT + ")|\\b(?:callback|cb|done)\\s*\\(\\s*\\))",
-    "m"
+      "(?:(?!\\n {0,4}\\})[\\s\\S]){0,600}?" +
+      "(?:\\breturn\\s+(?:" +
+      VERDICT +
+      ")|\\b(?:callback|cb|done)\\s*\\(\\s*\\))",
+    "m",
   );
   const files = _srcFiles();
   let bad = [];
@@ -596,15 +650,18 @@ test("constant-time-compare-short-circuited -- no CT compare is short-circuited 
     if (!/\btimingSafeEqual\b/.test(stripped) && !/\bconstantTimeEqual\b/.test(stripped)) continue;
 
     const toks = { timingSafeEqual: true, constantTimeEqual: true };
-    const wrapRe = /(?:function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)|(?:var|const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\s*)?\([^)]*\)\s*=>?)\s*\{[^{}]*(?:timingSafeEqual|constantTimeEqual)/g;
+    const wrapRe =
+      /(?:function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)|(?:var|const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\s*)?\([^)]*\)\s*=>?)\s*\{[^{}]*(?:timingSafeEqual|constantTimeEqual)/g;
     let wm;
-    while ((wm = wrapRe.exec(stripped))) { toks[wm[1] || wm[2]] = true; }
+    while ((wm = wrapRe.exec(stripped))) {
+      toks[wm[1] || wm[2]] = true;
+    }
     const alt = Object.keys(toks)
       .sort((a, b) => b.length - a.length)
       .map((t) => t.replace(/[$]/g, "\\$&"))
       .join("|");
     const pairRe = new RegExp(
-      "\\b(?:" + alt + ")\\s*\\([^;{}]*?\\)\\s*(?:&&|\\|\\|)\\s*[^;{}]*?\\b(?:" + alt + ")\\s*\\("
+      "\\b(?:" + alt + ")\\s*\\([^;{}]*?\\)\\s*(?:&&|\\|\\|)\\s*[^;{}]*?\\b(?:" + alt + ")\\s*\\(",
     );
 
     const lines = _lines(stripped);
@@ -613,7 +670,9 @@ test("constant-time-compare-short-circuited -- no CT compare is short-circuited 
         bad.push({
           file: rel,
           line: i + 1,
-          content: "two constant-time compares joined by &&/|| short-circuit the second (timing side-channel) -- evaluate each into a var, then combine: " + lines[i].trim().slice(0, 80),
+          content:
+            "two constant-time compares joined by &&/|| short-circuit the second (timing side-channel) -- evaluate each into a var, then combine: " +
+            lines[i].trim().slice(0, 80),
         });
       }
     }
@@ -644,7 +703,11 @@ test("non-ascii-source -- src/, test/, scripts/ are pure ASCII", () => {
           bad.push({
             file: rel,
             line: ln + 1,
-            content: "non-ASCII code point U+" + cp.toString(16).toUpperCase() + ": " + lines[ln].trim().slice(0, 80),
+            content:
+              "non-ASCII code point U+" +
+              cp.toString(16).toUpperCase() +
+              ": " +
+              lines[ln].trim().slice(0, 80),
           });
           break; // one report per line
         }
@@ -677,11 +740,15 @@ test("spdx-header -- every source file opens with the SPDX pair", () => {
     // shebang only shifts where it begins, it never waives it, so a shebang'd file
     // with no SPDX still fails.
     const offset = (lines[0] || "").startsWith("#!") ? 1 : 0;
-    if ((lines[offset] || "").trim() !== SPDX_LINE_1 || (lines[offset + 1] || "").trim() !== SPDX_LINE_2) {
+    if (
+      (lines[offset] || "").trim() !== SPDX_LINE_1 ||
+      (lines[offset + 1] || "").trim() !== SPDX_LINE_2
+    ) {
       bad.push({
         file: rel,
         line: 1,
-        content: "missing/incorrect SPDX + copyright preamble (the first two lines, after an optional #! shebang)",
+        content:
+          "missing/incorrect SPDX + copyright preamble (the first two lines, after an optional #! shebang)",
       });
     }
   }
@@ -799,7 +866,10 @@ test("dead-underscore-function -- every _helper is referenced", () => {
         bad.push({
           file: rel,
           line: _lineOfIndex(src, m.index + m[0].indexOf(name)),
-          content: "unused `_`-prefixed declaration " + name + " -- dead code linters exempt; call it or remove it",
+          content:
+            "unused `_`-prefixed declaration " +
+            name +
+            " -- dead code linters exempt; call it or remove it",
         });
       }
     }
@@ -827,7 +897,11 @@ function _importBindings(subject, each) {
     if (m[3]) names.push(m[3]);
     if (m[2]) {
       for (const part of m[2].split(",")) {
-        const name = part.trim().split(/\s+as\s+/).pop().trim();
+        const name = part
+          .trim()
+          .split(/\s+as\s+/)
+          .pop()
+          .trim();
         if (name) names.push(name);
       }
     }
@@ -878,7 +952,8 @@ test("unimported-builtin-call -- no bare call to an unbound node builtin export"
         if (/^[\w$]+$/.test(name)) bound.add(name);
       }
     }
-    const paramRe = /\bfunction\s*[\w$]*\s*\(([^()]*)\)|(?<![\w$])\(([^()]*)\)\s*=>|(?<![\w$.])([\w$]+)\s*=>/g;
+    const paramRe =
+      /\bfunction\s*[\w$]*\s*\(([^()]*)\)|(?<![\w$])\(([^()]*)\)\s*=>|(?<![\w$.])([\w$]+)\s*=>/g;
     while ((m = paramRe.exec(subject)) !== null) {
       for (const tok of (m[1] || m[2] || m[3] || "").split(",")) {
         const name = tok.trim().replace(/=.*$/, "").trim();
@@ -901,7 +976,8 @@ test("unimported-builtin-call -- no bare call to an unbound node builtin export"
         bad.push({
           file: rel,
           line: i + 1,
-          content: "bare call to unbound builtin export '" + name + "': " + (rawLines[i] || "").trim(),
+          content:
+            "bare call to unbound builtin export '" + name + "': " + (rawLines[i] || "").trim(),
         });
       }
     }
@@ -930,7 +1006,10 @@ test("path-reresolved-read -- no path-based blob/sidecar read in src/", () => {
   const re = /(?<![.\w])(?:createReadStream|readFileSync|readFile)\s*\(/;
   let bad = _scanLines(_srcFiles(), re, { prepare: _stripCommentsAndLiterals });
   bad = _filterMarkers(bad, "path-reresolved-read");
-  _report("no path-based createReadStream/readFile in src/ (open an fd and read the handle -- CWE-367)", bad);
+  _report(
+    "no path-based createReadStream/readFile in src/ (open an fd and read the handle -- CWE-367)",
+    bad,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -961,7 +1040,10 @@ test("npm-shim-bare-spawn -- npm/npx runs through a shell, never a bare spawn", 
     skipSelf: true,
   });
   bad = _filterMarkers(bad, "npm-shim-bare-spawn");
-  _report("no bare npm/npx spawn (use the shell command-string form -- npm is npm.cmd on Windows)", bad);
+  _report(
+    "no bare npm/npx spawn (use the shell command-string form -- npm is npm.cmd on Windows)",
+    bad,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -993,7 +1075,7 @@ test("unretried-fs-mutation -- every disk-backend rename/link routes through the
   // file would green this gate vacuously.
   assert.ok(
     stripped.some((l) => callRe.test(l)),
-    "no rename/link/unlink calls found in src/backends/disk.js -- detector vacuous (file moved?)"
+    "no rename/link/unlink calls found in src/backends/disk.js -- detector vacuous (file moved?)",
   );
   let bad = [];
   for (let i = 0; i < stripped.length; i++) {
@@ -1001,12 +1083,17 @@ test("unretried-fs-mutation -- every disk-backend rename/link routes through the
       bad.push({
         file: _relPath(diskPath),
         line: i + 1,
-        content: "bare fs rename/link/unlink -- route through _retryTransient (absorbs a transient Windows EPERM/EACCES/EBUSY): " + stripped[i].trim().slice(0, 100),
+        content:
+          "bare fs rename/link/unlink -- route through _retryTransient (absorbs a transient Windows EPERM/EACCES/EBUSY): " +
+          stripped[i].trim().slice(0, 100),
       });
     }
   }
   bad = _filterMarkers(bad, "unretried-fs-mutation");
-  _report("every disk-backend rename/link routes through _retryTransient (transient-fault retry)", bad);
+  _report(
+    "every disk-backend rename/link routes through _retryTransient (transient-fault retry)",
+    bad,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1111,15 +1198,36 @@ test("guard/validator enforcement -- every tagged choke point declares its detec
   const bad = [];
   for (const g of _collectTaggedExports()) {
     if (g.shapes.length > 0 && g.enforcedBy === null) {
-      bad.push({ file: g.file, line: g.line, content: g.name + " has @guard-shape but no @enforced-by" });
+      bad.push({
+        file: g.file,
+        line: g.line,
+        content: g.name + " has @guard-shape but no @enforced-by",
+      });
     } else if (g.enforcedBy === "behavioral") {
       if (!g.behavioralReason) {
-        bad.push({ file: g.file, line: g.line, content: g.name + " declares behavioral enforcement without a `-- <reason>`" });
+        bad.push({
+          file: g.file,
+          line: g.line,
+          content: g.name + " declares behavioral enforcement without a `-- <reason>`",
+        });
       }
     } else if (g.enforcedBy !== null && !VALID_ALLOW_CLASSES[g.enforcedBy]) {
-      bad.push({ file: g.file, line: g.line, content: g.name + " names unregistered detector class '" + g.enforcedBy + "'" });
-    } else if (g.enforcedBy !== null && g.enforcedBy !== "behavioral" && /shape-reinlined$/.test(g.enforcedBy) && g.shapes.length === 0) {
-      bad.push({ file: g.file, line: g.line, content: g.name + " claims shape enforcement but declares no shape" });
+      bad.push({
+        file: g.file,
+        line: g.line,
+        content: g.name + " names unregistered detector class '" + g.enforcedBy + "'",
+      });
+    } else if (
+      g.enforcedBy !== null &&
+      g.enforcedBy !== "behavioral" &&
+      /shape-reinlined$/.test(g.enforcedBy) &&
+      g.shapes.length === 0
+    ) {
+      bad.push({
+        file: g.file,
+        line: g.line,
+        content: g.name + " claims shape enforcement but declares no shape",
+      });
     }
   }
   _report("every @guard-shape / @validator-shape export declares a registered @enforced-by", bad);
@@ -1150,7 +1258,12 @@ test("guard/validator shape reinlined -- no module re-implements a tagged choke 
           bad.push({
             file: rel,
             line: i + 1,
-            content: "re-inlines the " + g.name + " shape owned by " + g.file + " -- route through the guard",
+            content:
+              "re-inlines the " +
+              g.name +
+              " shape owned by " +
+              g.file +
+              " -- route through the guard",
           });
         }
       }
@@ -1176,29 +1289,50 @@ test("wiki port agrees across the Dockerfile, composes, Caddyfile, and release-c
   // assert every port token in the sibling artifacts matches it.
   const bad = [];
   let dockerfile;
-  try { dockerfile = _read(path.join(REPO_ROOT, "examples", "wiki", "Dockerfile")); }
-  catch (_e) { return; }
+  try {
+    dockerfile = _read(path.join(REPO_ROOT, "examples", "wiki", "Dockerfile"));
+  } catch (_e) {
+    return;
+  }
   const dfMatch = /WIKI_PORT\s*=\s*(\d+)/.exec(dockerfile);
   if (!dfMatch) return;
   const wikiPort = dfMatch[1];
 
   const workflowRel = ".github/workflows/release-container.yml";
   let workflow = null;
-  try { workflow = _read(path.join(REPO_ROOT, workflowRel)); } catch (_e) { /* optional artifact */ }
+  try {
+    workflow = _read(path.join(REPO_ROOT, workflowRel));
+  } catch (_e) {
+    /* optional artifact */
+  }
   if (workflow !== null) {
     const lines = _lines(workflow);
     for (let i = 0; i < lines.length; i++) {
       const portMap = /-p\s+(\d+):(\d+)/.exec(lines[i]);
       if (portMap && (portMap[1] !== wikiPort || portMap[2] !== wikiPort)) {
-        bad.push({ file: workflowRel, line: i + 1,
-          content: "smoke `-p " + portMap[1] + ":" + portMap[2] +
-                   "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+        bad.push({
+          file: workflowRel,
+          line: i + 1,
+          content:
+            "smoke `-p " +
+            portMap[1] +
+            ":" +
+            portMap[2] +
+            "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" +
+            wikiPort,
+        });
       }
       const curlMatch = /localhost:(\d+)\/healthz/.exec(lines[i]);
       if (curlMatch && curlMatch[1] !== wikiPort) {
-        bad.push({ file: workflowRel, line: i + 1,
-          content: "smoke curls localhost:" + curlMatch[1] +
-                   " but examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+        bad.push({
+          file: workflowRel,
+          line: i + 1,
+          content:
+            "smoke curls localhost:" +
+            curlMatch[1] +
+            " but examples/wiki/Dockerfile WIKI_PORT=" +
+            wikiPort,
+        });
       }
     }
   }
@@ -1211,8 +1345,8 @@ test("wiki port agrees across the Dockerfile, composes, Caddyfile, and release-c
   // regex that only matched a bare literal would go green on the
   // interpolated form and stop gating those artifacts entirely.
   const PORT_TOKEN = "(?:\\$\\{WIKI_PORT:-\\d+\\}|\\d+)";
-  const mapRe    = new RegExp('-\\s+"(' + PORT_TOKEN + '):(' + PORT_TOKEN + ')"');
-  const envRe    = new RegExp('WIKI_PORT:\\s*"(' + PORT_TOKEN + ')"');
+  const mapRe = new RegExp('-\\s+"(' + PORT_TOKEN + "):(" + PORT_TOKEN + ')"');
+  const envRe = new RegExp('WIKI_PORT:\\s*"(' + PORT_TOKEN + ')"');
   const exposeRe = new RegExp('-\\s+"(' + PORT_TOKEN + ')"\\s*$');
   // token -> effective port default: the number inside ${WIKI_PORT:-NNNN},
   // or the bare literal itself.
@@ -1226,48 +1360,92 @@ test("wiki port agrees across the Dockerfile, composes, Caddyfile, and release-c
   for (const composeName of ["docker-compose.yml", "docker-compose.prod.yml"]) {
     const rel = "examples/wiki/" + composeName;
     let compose = null;
-    try { compose = _read(path.join(REPO_ROOT, "examples", "wiki", composeName)); } catch (_e) { continue; }
+    try {
+      compose = _read(path.join(REPO_ROOT, "examples", "wiki", composeName));
+    } catch (_e) {
+      continue;
+    }
     const lines = _lines(compose);
     for (let i = 0; i < lines.length; i++) {
       const mapMatch = mapRe.exec(lines[i]);
-      if (mapMatch && composeName === "docker-compose.yml" &&
-          (_portDefault(mapMatch[1]) !== wikiPort || _portDefault(mapMatch[2]) !== wikiPort)) {
-        bad.push({ file: rel, line: i + 1,
-          content: "port mapping `" + mapMatch[1] + ":" + mapMatch[2] +
-                   "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+      if (
+        mapMatch &&
+        composeName === "docker-compose.yml" &&
+        (_portDefault(mapMatch[1]) !== wikiPort || _portDefault(mapMatch[2]) !== wikiPort)
+      ) {
+        bad.push({
+          file: rel,
+          line: i + 1,
+          content:
+            "port mapping `" +
+            mapMatch[1] +
+            ":" +
+            mapMatch[2] +
+            "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" +
+            wikiPort,
+        });
       }
       const envMatch = envRe.exec(lines[i]);
       if (envMatch && _portDefault(envMatch[1]) !== wikiPort) {
-        bad.push({ file: rel, line: i + 1,
-          content: "WIKI_PORT `" + envMatch[1] +
-                   "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+        bad.push({
+          file: rel,
+          line: i + 1,
+          content:
+            "WIKI_PORT `" +
+            envMatch[1] +
+            "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" +
+            wikiPort,
+        });
       }
       const exposeMatch = exposeRe.exec(lines[i]);
-      if (exposeMatch && composeName === "docker-compose.prod.yml" && _portDefault(exposeMatch[1]) !== wikiPort) {
-        bad.push({ file: rel, line: i + 1,
-          content: "expose `" + exposeMatch[1] +
-                   "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+      if (
+        exposeMatch &&
+        composeName === "docker-compose.prod.yml" &&
+        _portDefault(exposeMatch[1]) !== wikiPort
+      ) {
+        bad.push({
+          file: rel,
+          line: i + 1,
+          content:
+            "expose `" +
+            exposeMatch[1] +
+            "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" +
+            wikiPort,
+        });
       }
     }
   }
 
   let caddy = null;
   const caddyRel = "examples/wiki/Caddyfile";
-  try { caddy = _read(path.join(REPO_ROOT, "examples", "wiki", "Caddyfile")); } catch (_e) { /* optional artifact */ }
+  try {
+    caddy = _read(path.join(REPO_ROOT, "examples", "wiki", "Caddyfile"));
+  } catch (_e) {
+    /* optional artifact */
+  }
   if (caddy !== null) {
     const lines = _lines(caddy);
     for (let i = 0; i < lines.length; i++) {
       const fbMatch = /\{\$WIKI_PORT:(\d+)\}/.exec(lines[i]);
       if (fbMatch && fbMatch[1] !== wikiPort) {
-        bad.push({ file: caddyRel, line: i + 1,
-          content: "Caddy fallback `{$WIKI_PORT:" + fbMatch[1] +
-                   "}` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+        bad.push({
+          file: caddyRel,
+          line: i + 1,
+          content:
+            "Caddy fallback `{$WIKI_PORT:" +
+            fbMatch[1] +
+            "}` doesn't match examples/wiki/Dockerfile WIKI_PORT=" +
+            wikiPort,
+        });
       }
     }
   }
 
   const filtered = _filterMarkers(bad, "wiki-port-cross-artifact-drift");
-  _report("wiki port agrees across examples/wiki/Dockerfile + composes + Caddyfile + release-container.yml", filtered);
+  _report(
+    "wiki port agrees across examples/wiki/Dockerfile + composes + Caddyfile + release-container.yml",
+    filtered,
+  );
 });
 
 test("every workflow action is github-owned or in the allow-list mirror (else the workflow silently startup_fails)", () => {
@@ -1282,10 +1460,19 @@ test("every workflow action is github-owned or in the allow-list mirror (else th
   // always permitted; every OTHER `uses:` must match a pattern here AND the repo
   // setting -- keep the two in sync. Adding an action to a workflow means adding it
   // here and to the repo Actions allow-list, or CI silently stops running it.
+  // Each entry names ONE action, matching the repo setting entry for entry. A
+  // prefix pattern (`docker/`, `google/clusterfuzzlite/actions/`) would admit a
+  // sibling action the repo setting does not list -- the gate would pass and the
+  // workflow would still startup_fail, which is the failure this check exists to
+  // prevent. Breadth here is fail-open; keep every entry exact.
   const ALLOW = [
     /^ossf\/scorecard-action(\/|@)/,
-    /^google\/clusterfuzzlite\/actions\//,
-    /^docker\//,
+    /^google\/clusterfuzzlite\/actions\/build_fuzzers(\/|@)/,
+    /^google\/clusterfuzzlite\/actions\/run_fuzzers(\/|@)/,
+    /^docker\/setup-buildx-action(\/|@)/,
+    /^docker\/setup-qemu-action(\/|@)/,
+    /^docker\/build-push-action(\/|@)/,
+    /^docker\/login-action(\/|@)/,
     /^aquasecurity\/trivy-action(\/|@)/,
     /^sigstore\/cosign-installer(\/|@)/,
     /^hadolint\/hadolint-action(\/|@)/,
@@ -1293,8 +1480,11 @@ test("every workflow action is github-owned or in the allow-list mirror (else th
   ];
   const dir = path.join(REPO_ROOT, ".github", "workflows");
   let files;
-  try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml")); }
-  catch (_e) { return; } // no workflows dir: nothing to check
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"));
+  } catch (_e) {
+    return;
+  } // no workflows dir: nothing to check
   const bad = [];
   for (const f of files) {
     const lines = _lines(_read(path.join(dir, f)));
@@ -1312,11 +1502,16 @@ test("every workflow action is github-owned or in the allow-list mirror (else th
       bad.push({
         file: ".github/workflows/" + f,
         line: i + 1,
-        content: "action not in the allow-list mirror (would startup_fail under the repo Actions policy): " + ref,
+        content:
+          "action not in the allow-list mirror (would startup_fail under the repo Actions policy): " +
+          ref,
       });
     }
   }
-  _report("every workflow action is github-owned or allow-listed (mirror the repo Actions allow-list setting)", bad);
+  _report(
+    "every workflow action is github-owned or allow-listed (mirror the repo Actions allow-list setting)",
+    bad,
+  );
 });
 
 test("every repo-root file the wiki reads at runtime is COPYed by the wiki Dockerfile", () => {
@@ -1363,14 +1558,16 @@ test("every repo-root file the wiki reads at runtime is COPYed by the wiki Docke
   // e2e under test/ never runs in the container, so its reads are out of
   // scope; public/ and vendor/ are already skipped by the asset-mode walk.
   const runtimeFiles = _wikiFiles().filter((f) =>
-    /^examples\/wiki\/(?:[^/]+|lib\/[^/]+)\.js$/.test(_relPath(f)));
+    /^examples\/wiki\/(?:[^/]+|lib\/[^/]+)\.js$/.test(_relPath(f)),
+  );
   assert.ok(runtimeFiles.length > 0, "no wiki runtime files scanned -- detector would be vacuous");
 
   // Two escape shapes, both resolving ABOVE examples/wiki to the repo root:
   //   A) path.resolve(libDir|LIB_DIR, "..", "FILE") -- libDir/LIB_DIR is the
   //      library's src/ (repo-root/src), so one ".." lands at the repo root.
   //   B) a literal "../../FILE" -- a hardcoded climb out of examples/wiki/lib.
-  const escapeA = /path\.resolve\(\s*(?:libDir|LIB_DIR)\s*,\s*["']\.\.["']\s*,\s*["']([^"']+)["']\s*\)/g;
+  const escapeA =
+    /path\.resolve\(\s*(?:libDir|LIB_DIR)\s*,\s*["']\.\.["']\s*,\s*["']([^"']+)["']\s*\)/g;
   const escapeB = /["']\.\.\/\.\.\/([^"'/]+)["']/g;
   const bad = [];
   for (const file of runtimeFiles) {
@@ -1384,13 +1581,19 @@ test("every repo-root file the wiki reads at runtime is COPYed by the wiki Docke
         bad.push({
           file: rel,
           line: _lineOfIndex(subject, m.index),
-          content: "reads repo-root '" + m[1] + "' at runtime but examples/wiki/Dockerfile never COPYs it -- the container renders a blank/absent page",
+          content:
+            "reads repo-root '" +
+            m[1] +
+            "' at runtime but examples/wiki/Dockerfile never COPYs it -- the container renders a blank/absent page",
         });
       }
     }
   }
   const filtered = _filterMarkers(bad, "wiki-runtime-file-uncopied");
-  _report("every repo-root file the wiki reads at runtime is COPYed by examples/wiki/Dockerfile", filtered);
+  _report(
+    "every repo-root file the wiki reads at runtime is COPYed by examples/wiki/Dockerfile",
+    filtered,
+  );
 });
 
 test("wiki docs-site image tag agrees with package.json across the composes (pinned per release)", () => {
@@ -1408,8 +1611,11 @@ test("wiki docs-site image tag agrees with package.json across the composes (pin
   // drifts. Anchor on package.json version (the one authoritative source) and
   // assert every pinned wiki-image tag matches it.
   let version;
-  try { version = JSON.parse(_read(path.join(REPO_ROOT, "package.json"))).version; }
-  catch (_e) { return; }
+  try {
+    version = JSON.parse(_read(path.join(REPO_ROOT, "package.json"))).version;
+  } catch (_e) {
+    return;
+  }
   if (!/^\d+\.\d+\.\d+$/.test(String(version))) return;
 
   // Matches the wiki image reference in either form -- a bare
@@ -1424,17 +1630,28 @@ test("wiki docs-site image tag agrees with package.json across the composes (pin
   for (const composeName of ["docker-compose.yml", "docker-compose.prod.yml"]) {
     const rel = "examples/wiki/" + composeName;
     let compose = null;
-    try { compose = _read(path.join(REPO_ROOT, "examples", "wiki", composeName)); filesRead += 1; }
-    catch (_e) { continue; }
+    try {
+      compose = _read(path.join(REPO_ROOT, "examples", "wiki", composeName));
+      filesRead += 1;
+    } catch (_e) {
+      continue;
+    }
     const lines = _lines(compose);
     for (let i = 0; i < lines.length; i++) {
       const m = IMAGE_TAG_RE.exec(lines[i]);
       if (!m) continue;
       pinsSeen += 1;
       if (m[1] !== version) {
-        bad.push({ file: rel, line: i + 1,
-          content: "wiki image tag `" + m[1] + "` doesn't match package.json version " + version +
-                   " -- the docs-site image is pinned per release; release.js prepare bumps it in lockstep" });
+        bad.push({
+          file: rel,
+          line: i + 1,
+          content:
+            "wiki image tag `" +
+            m[1] +
+            "` doesn't match package.json version " +
+            version +
+            " -- the docs-site image is pinned per release; release.js prepare bumps it in lockstep",
+        });
       }
     }
   }
@@ -1442,9 +1659,16 @@ test("wiki docs-site image tag agrees with package.json across the composes (pin
   // `stash-wiki:<version>` pin was found, the reference was renamed or the pin
   // dropped, and the gate would silently green on a surface it no longer sees.
   if (filesRead > 0 && pinsSeen === 0) {
-    bad.push({ file: "examples/wiki/docker-compose.prod.yml", line: 1,
-      content: "no `stash-wiki:<version>` image pin found in either compose -- the wiki-image-tag-drift gate matched nothing to check" });
+    bad.push({
+      file: "examples/wiki/docker-compose.prod.yml",
+      line: 1,
+      content:
+        "no `stash-wiki:<version>` image pin found in either compose -- the wiki-image-tag-drift gate matched nothing to check",
+    });
   }
   const filtered = _filterMarkers(bad, "wiki-image-tag-drift");
-  _report("wiki docs-site image tag agrees with package.json across examples/wiki composes", filtered);
+  _report(
+    "wiki docs-site image tag agrees with package.json across examples/wiki composes",
+    filtered,
+  );
 });

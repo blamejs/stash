@@ -5,7 +5,7 @@
 // package authors in ESM ("type": "module"), but no source file uses
 // top-level await and the only non-JS import is a synchronous JSON module,
 // so the whole graph loads under Node's require(esm) (unflagged on the
-// 24.18.0 floor). This fixture is the executable proof: it require()s the
+// 24.19.0 floor). This fixture is the executable proof: it require()s the
 // package main and both backend subpaths through the package's own exports
 // map (self-reference, since the file sits inside the package), checks the
 // surface is intact, and round-trips bytes through the memory backend.

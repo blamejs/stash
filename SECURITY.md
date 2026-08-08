@@ -43,21 +43,54 @@ are especially valuable.
 
 ## Supported versions
 
-Pre-1.0, only the latest published `0.x.y` receives fixes. See
-`LTS-CALENDAR.md` for the support policy that applies from 1.0.
+Only the current major, `v2.x`, receives fixes. `v1.x` and `v0.x` are
+superseded and not serviced -- see [LTS-CALENDAR.md](LTS-CALENDAR.md), which
+records that the `v1.x` window `v1.0` announced is not being honored and why.
+Upgrading from `v1.x` is two edits with no on-disk format change
+([MIGRATING.md](MIGRATING.md#upgrading-to-20)).
+
+## Known issues in unserviced lines
+
+Fixed in `v2.0.0`, present in every `v1.x` and `v0.1.x` release, and not
+backported:
+
+- **A push or store source that misreports its own length made the store record
+  bytes the caller never supplied.** `length` on a typed array is an ordinary
+  property, so a `Uint8Array` subclass holding two bytes but reporting 512
+  caused the copy to allocate 512 bytes from Node's shared buffer pool and
+  write only the two real ones. The remainder was whatever that pool last held,
+  and the entry's `size` and digest were computed over it -- so the store
+  certified content it was never given, and charged `maxSize` / `maxTotal` for
+  it. In a process handling more than one tenant's bytes, the padding could
+  carry another entry's plaintext.
+
+  Reaching it requires the embedding application to pass an object it does not
+  control as a push or store source; an application passing its own `Buffer`,
+  string, `Readable`, or ordinary `Uint8Array` was never affected. `v2.0.0`
+  copies by the view's real byte length, which no property can forge.
+
+  If you are on `v1.x` and cannot upgrade, report it through the process above
+  and a backport will be reconsidered.
 
 ## Continuous fuzzing
 
 The store's untrusted-input surfaces -- hostile ref strings, the disk
 backend's entry-sidecar bytes, its tombstone-grave bytes, and the
 self-describing digest parser (`"<algo>:<hex>"`) -- are fuzzed
-continuously with ClusterFuzzLite (jazzer.js): pull requests that touch
-`src/` get a short fuzzing burst against the changed code, and a scheduled
-batch run fuzzes the grown corpus daily. The targets treat a typed `StashError` as the correct fail-closed
+continuously with jazzer.js: pull requests that touch `src/` get a short
+burst against every target, and a scheduled run each night fuzzes for
+longer. The targets treat a typed `StashError` as the correct fail-closed
 verdict on hostile input; anything else that escapes -- an untyped
-exception, a hang -- is reported as a crash. The harness lives in
-`.clusterfuzzlite/` (with a plain-node seed-corpus check at
-`node .clusterfuzzlite/local-smoke.js`) and never ships in the npm tarball.
+exception, a hang -- is reported as a crash, and its reproducer is kept as
+a run artifact. The harness lives in `.clusterfuzzlite/` (with a plain-node
+seed-corpus check at `node .clusterfuzzlite/local-smoke.js`, which runs in
+the smoke pipeline and needs no engine) and never ships in the npm tarball.
+
+The engine is installed only inside the fuzzing job, outside the checkout,
+so the library keeps zero dependencies including dev. ClusterFuzzLite drove
+these same targets previously and its workflows remain in the tree on manual
+dispatch; it cannot currently build a JavaScript project, which the note at
+the top of `.github/workflows/cflite_pr.yml` records in full.
 
 ## Hardening a deployment
 

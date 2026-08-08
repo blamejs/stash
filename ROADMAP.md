@@ -206,6 +206,22 @@ is the final `v0.1.x` store unchanged -- no API, behavior, or format change --
 with that commitment attached, so consumers upgrade with `npm install
 @blamejs/stash@1` and no code changes.
 
+## v2.0 -- SHIPPED (2.0.0)
+
+Two error verdicts change class so a caller can branch on them, and nothing else
+does. An oversized `meta` is rejected as `IntegrityError` (`EINTEGRITY`) rather
+than a bare `TypeError`, matching the read side of the same bound; the shared
+source check no longer names a verb it cannot know; and
+`runBackendConformance` enforces the `name` its `{ name, create() }` contract
+always specified, labelling every case with it. A `Uint8Array` from another
+realm is accepted as a source, and a source that misreports its own length is
+copied by its real byte length rather than its claimed one.
+
+There is no on-disk format change, so a `v1.x` store opens under `v2.0`
+unmodified. This major shipped without a preceding deprecation minor -- an
+exception to the commitment above, recorded in
+[MIGRATING.md](MIGRATING.md#policy) alongside the reason.
+
 ## Standing constraints
 
 Every milestone honors the one rule (no decrypt capability), zero

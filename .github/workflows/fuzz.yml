@@ -1,0 +1,125 @@
+# Continuous fuzzing, driving the .clusterfuzzlite/ targets under jazzer.js
+# directly rather than through ClusterFuzzLite.
+#
+# The targets hold the store's fail-closed contract on its untrusted-input
+# surfaces -- hostile ref strings, hostile entry-sidecar bytes, hostile
+# tombstone-grave bytes, and hostile self-describing digests -- so a crash here
+# is a typed-verdict escape, never test noise.
+#
+# ClusterFuzzLite cannot build a JavaScript project (see the note at the top of
+# cflite_pr.yml), so its workflows are dormant and this one carries the gate.
+# What is lost against the ClusterFuzzLite setup is corpus persistence between
+# runs and the crash-triage/reporting pipeline -- not the targets, the seeds, or
+# the properties they assert. The committed seed corpora are the starting corpus
+# on every run.
+#
+# The engine is installed only inside this job. The library keeps zero
+# dependencies, dev included, and nothing under .clusterfuzzlite/ ships in the
+# npm tarball.
+
+name: Fuzzing
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - ".clusterfuzzlite/**"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    - cron: "43 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_ref, fuzz_digest, fuzz_sidecar, fuzz_tombstone]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.19.0"
+
+      # A PR run fuzzes briefly to catch an obvious regression; the nightly run
+      # is the one that actually explores. Neither writes to the repo.
+      - name: Pick a duration for this trigger
+        id: budget
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "seconds=600" >> "$GITHUB_OUTPUT"
+          else
+            echo "seconds=90" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Installed into a scratch directory OUTSIDE the repo, with --no-save and
+      # --no-package-lock, so the checkout's manifest and lockfile are untouched
+      # and the zero-dependency gate still passes on the tree under test.
+      - name: Install the fuzzing engine (outside the repo)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/engine"
+          cd "$RUNNER_TEMP/engine"
+          npm init -y >/dev/null
+          npm install --no-save --no-package-lock --no-audit --no-fund @jazzer.js/core@2.1.0
+          echo "JAZZER=$RUNNER_TEMP/engine/node_modules/.bin/jazzer" >> "$GITHUB_ENV"
+
+      - name: Fuzz ${{ matrix.target }} for ${{ steps.budget.outputs.seconds }}s
+        run: |
+          set -euo pipefail
+          corpus=".clusterfuzzlite/seeds/${{ matrix.target }}"
+          [ -d "$corpus" ] || corpus=""
+          "$JAZZER" ".clusterfuzzlite/${{ matrix.target }}.js" \
+            --sync=false \
+            $corpus \
+            -- -max_total_time=${{ steps.budget.outputs.seconds }} -print_final_stats=1
+
+      # A crash writes its reproducer to the working directory; keep it so the
+      # input can be replayed locally against the same target.
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: crash-${{ matrix.target }}
+          path: |
+            crash-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The zero-dependency, zero-install proof that every committed seed still
+  # produces its expected verdict. It runs in the smoke pipeline too; having it
+  # here means a seed or target change is checked even when the engine install
+  # is the thing that broke.
+  seed-verdicts:
+    name: seed verdicts (no engine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.19.0"
+      - name: Every seed produces its expected verdict
+        run: node .clusterfuzzlite/local-smoke.js

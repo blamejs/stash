@@ -114,7 +114,10 @@ async function applyOp(stash, oracle, step) {
       const ref = pickFrom(graves, step.pick);
       if (ref === null) break;
       const bytes = payload(999);
-      const landed = await stash.store(makeStoredEntry(ref, bytes, { digest: digestOf(bytes) }), bytes);
+      const landed = await stash.store(
+        makeStoredEntry(ref, bytes, { digest: digestOf(bytes) }),
+        bytes,
+      );
       assert.equal(landed, false, "store onto a tombstoned id is refused -- no resurrection");
       break;
     }
@@ -137,10 +140,18 @@ async function checkInvariants(stash, oracle) {
   assert.equal(stats.entries, live.size, "stats.entries matches the oracle live count");
 
   const listed = new Set((await stash.list()).map((e) => e.id));
-  assert.deepEqual([...listed].sort(), [...live.keys()].sort(), "list ids match the oracle live set");
+  assert.deepEqual(
+    [...listed].sort(),
+    [...live.keys()].sort(),
+    "list ids match the oracle live set",
+  );
 
   const gravedIds = new Set((await stash.tombstones()).map((g) => g.id));
-  assert.deepEqual([...gravedIds].sort(), [...graves.keys()].sort(), "tombstone ids match the oracle graves");
+  assert.deepEqual(
+    [...gravedIds].sort(),
+    [...graves.keys()].sort(),
+    "tombstone ids match the oracle graves",
+  );
 
   for (const [ref, cause] of graves) {
     assert.ok(CAUSES.includes(cause), "the predicted cause is a real CAUSES member");
@@ -152,7 +163,11 @@ async function checkInvariants(stash, oracle) {
     const entry = live.get(ref);
     // The store's readsLeft matches the oracle's monotonically-decremented value:
     // the oracle only ever decrements it, so any increase in the store would diverge.
-    assert.equal((await stash.show(ref)).readsLeft, entry.readsLeft, "readsLeft matches the oracle (monotone)");
+    assert.equal(
+      (await stash.show(ref)).readsLeft,
+      entry.readsLeft,
+      "readsLeft matches the oracle (monotone)",
+    );
   }
   // A grave's real cause matches the oracle's prediction.
   for (const g of await stash.tombstones()) {
@@ -202,8 +217,14 @@ for (const { name, create } of BACKENDS) {
       if (result !== null) {
         const minimal = await shrink(create, seq);
         assert.fail(
-          "model divergence (seed " + SEED + ", minimal failing length " + minimal.length + "): " +
-          (result.error && result.error.message) + "\n" + JSON.stringify(minimal),
+          "model divergence (seed " +
+            SEED +
+            ", minimal failing length " +
+            minimal.length +
+            "): " +
+            (result.error && result.error.message) +
+            "\n" +
+            JSON.stringify(minimal),
         );
       }
     });
@@ -218,7 +239,15 @@ for (const { name, create } of BACKENDS) {
         assert.equal(await stash.has(a), false);
         assert.ok((await stash.tombstones()).some((g) => g.id === a && g.cause === "spent"));
         const bytes = Buffer.from("resurrect?");
-        assert.equal(await stash.store(makeStoredEntry(a, bytes, { digest: "sha256:" + createHash("sha256").update(bytes).digest("hex") }), bytes), false);
+        assert.equal(
+          await stash.store(
+            makeStoredEntry(a, bytes, {
+              digest: "sha256:" + createHash("sha256").update(bytes).digest("hex"),
+            }),
+            bytes,
+          ),
+          false,
+        );
       } finally {
         await stash.close();
       }

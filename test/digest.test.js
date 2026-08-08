@@ -48,8 +48,16 @@ test("algoOf returns null for a non-registry prefix -- including inherited Objec
   // exists nowhere in the registry.
   assert.equal(algoOf("md5:" + "0".repeat(32)), null, "an unknown-but-plain prefix is a miss");
   for (const key of PROTO_KEYS) {
-    assert.equal(algoOf(key + ":" + "0".repeat(64)), null, `prefix '${key}' is not a registry algorithm`);
-    assert.equal(algoOf(key + ":"), null, `marker-shaped '${key}:' is not a registry algorithm either`);
+    assert.equal(
+      algoOf(key + ":" + "0".repeat(64)),
+      null,
+      `prefix '${key}' is not a registry algorithm`,
+    );
+    assert.equal(
+      algoOf(key + ":"),
+      null,
+      `marker-shaped '${key}:' is not a registry algorithm either`,
+    );
   }
   assert.equal(algoOf("no-colon"), null);
   assert.equal(algoOf(42), null);
@@ -75,11 +83,21 @@ test("isValidDigest accepts a well-formed <algo>:<hex> and fails closed on every
     const stored = finalize(digestHash(algo).update(Buffer.from("payload")), algo);
     assert.equal(isValidDigest(stored), true, `${algo} full digest is valid`);
     // wrong hex length for the algorithm
-    assert.equal(isValidDigest(algo + ":" + "0".repeat(2)), false, `${algo} with short hex is rejected`);
+    assert.equal(
+      isValidDigest(algo + ":" + "0".repeat(2)),
+      false,
+      `${algo} with short hex is rejected`,
+    );
     // a hex-less marker is not a stored digest
-    assert.equal(isValidDigest(digestMarker(algo)), false, `${algo} marker (hex-less) is not a stored digest`);
+    assert.equal(
+      isValidDigest(digestMarker(algo)),
+      false,
+      `${algo} marker (hex-less) is not a stored digest`,
+    );
     // uppercase hex is not the lowercase form finalize emits
-    const upper = stored.slice(0, stored.indexOf(":") + 1) + stored.slice(stored.indexOf(":") + 1).toUpperCase();
+    const upper =
+      stored.slice(0, stored.indexOf(":") + 1) +
+      stored.slice(stored.indexOf(":") + 1).toUpperCase();
     assert.equal(isValidDigest(upper), false, `${algo} uppercase hex is rejected`);
   }
   // non-registry and inherited-key prefixes fail closed

@@ -36,23 +36,41 @@ const OUTPUT_DIR = join(ROOT, ".test-output");
 const LOG_PATH = join(OUTPUT_DIR, "smoke.log");
 
 mkdirSync(OUTPUT_DIR, { recursive: true });
-try { unlinkSync(LOG_PATH); } catch { /* fresh start */ }
+try {
+  unlinkSync(LOG_PATH);
+} catch {
+  /* fresh start */
+}
 const logFd = openSync(LOG_PATH, "w");
 
 function logWrite(chunk) {
   try {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
     writeSync(logFd, buf, 0, buf.length, null);
-  } catch { /* best-effort */ }
+  } catch {
+    /* best-effort */
+  }
 }
 
 // Tee the orchestrator's own console lines into the log alongside the
 // children's output, so the log is a complete transcript of the run.
 const origStdoutWrite = process.stdout.write.bind(process.stdout);
 const origStderrWrite = process.stderr.write.bind(process.stderr);
-process.stdout.write = (chunk, encoding, cb) => { logWrite(chunk); return origStdoutWrite(chunk, encoding, cb); };
-process.stderr.write = (chunk, encoding, cb) => { logWrite(chunk); return origStderrWrite(chunk, encoding, cb); };
-process.on("exit", () => { try { closeSync(logFd); } catch { /* best-effort */ } });
+process.stdout.write = (chunk, encoding, cb) => {
+  logWrite(chunk);
+  return origStdoutWrite(chunk, encoding, cb);
+};
+process.stderr.write = (chunk, encoding, cb) => {
+  logWrite(chunk);
+  return origStderrWrite(chunk, encoding, cb);
+};
+process.on("exit", () => {
+  try {
+    closeSync(logFd);
+  } catch {
+    /* best-effort */
+  }
+});
 
 const STATIC_STAGES = [
   { name: "codebase-patterns", args: ["test/codebase-patterns.test.js"] },
@@ -62,6 +80,7 @@ const STATIC_STAGES = [
   { name: "changelog-regen", args: ["scripts/regen-changelog.js", "--check"] },
   { name: "readme-regen", args: ["scripts/regen-readme.js", "--check"] },
   { name: "pack-gate", args: ["scripts/check-pack-against-gitignore.js"] },
+  { name: "lockfile-sync", args: ["scripts/check-lockfile-sync.js"] },
 ];
 
 const RUNTIME_STAGES = [
@@ -81,7 +100,10 @@ function runStage(stage) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let out = "";
-    const sink = (d) => { out += d.toString(); logWrite(d); };
+    const sink = (d) => {
+      out += d.toString();
+      logWrite(d);
+    };
     child.stdout.on("data", sink);
     child.stderr.on("data", sink);
     child.on("close", (code) => {
@@ -98,7 +120,9 @@ function runStage(stage) {
 function reportFailure(result) {
   // The log already holds the stage's full output (streamed above); the
   // console gets the tail so the operator sees the verdict without paging.
-  console.error("\nFAIL  " + result.stage.name + "  (exit " + result.code + ", " + result.ms + "ms)");
+  console.error(
+    "\nFAIL  " + result.stage.name + "  (exit " + result.code + ", " + result.ms + "ms)",
+  );
   console.error("--- last 25 lines (full output: " + LOG_PATH + ") ---");
   console.error(result.out.trim().split("\n").slice(-25).join("\n"));
 }
@@ -138,8 +162,13 @@ async function main() {
     return;
   }
 
-  console.log("OK -- " + (STATIC_STAGES.length + RUNTIME_STAGES.length) +
-    " stages green (" + timings.join(", ") + ")");
+  console.log(
+    "OK -- " +
+      (STATIC_STAGES.length + RUNTIME_STAGES.length) +
+      " stages green (" +
+      timings.join(", ") +
+      ")",
+  );
 }
 
 main();

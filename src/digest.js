@@ -35,7 +35,11 @@ export const DIGESTS = Object.freeze({
   sha512: Object.freeze({ hash: "sha512", bytes: 64 }),
   "sha3-256": Object.freeze({ hash: "sha3-256", bytes: 32 }),
   "sha3-512": Object.freeze({ hash: "sha3-512", bytes: 64 }),
-  shake256: Object.freeze({ hash: "shake256", bytes: 64, opts: Object.freeze({ outputLength: 64 }) }),
+  shake256: Object.freeze({
+    hash: "shake256",
+    bytes: 64,
+    opts: Object.freeze({ outputLength: 64 }),
+  }),
 });
 
 // The default keeps every existing store byte-identical: sha256, so an omitted

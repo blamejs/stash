@@ -120,15 +120,24 @@ test("api-snapshot: a package version bump without a refresh fails the gate as s
 test("api-snapshot: removed member, kind change, arity change, and @since rewrite are breaking", () => {
   const removed = snapshotFixture();
   delete removed.surface.index.members.version;
-  assert.match(diffSnapshot(snapshotFixture(), removed, "1.0.0").breaking[0], /index\.version: removed/);
+  assert.match(
+    diffSnapshot(snapshotFixture(), removed, "1.0.0").breaking[0],
+    /index\.version: removed/,
+  );
 
   const rekinded = snapshotFixture();
   rekinded.surface.index.members.version = { kind: "number" };
-  assert.match(diffSnapshot(snapshotFixture(), rekinded, "1.0.0").breaking[0], /kind changed string -> number/);
+  assert.match(
+    diffSnapshot(snapshotFixture(), rekinded, "1.0.0").breaking[0],
+    /kind changed string -> number/,
+  );
 
   const rearitied = snapshotFixture();
   rearitied.surface.index.members.Stash.methods.push.arity = 3;
-  assert.match(diffSnapshot(snapshotFixture(), rearitied, "1.0.0").breaking[0], /arity changed 2 -> 3/);
+  assert.match(
+    diffSnapshot(snapshotFixture(), rearitied, "1.0.0").breaking[0],
+    /arity changed 2 -> 3/,
+  );
 
   const redated = snapshotFixture();
   redated.sinceByPrimitive["stash.push"] = "1.0.9";
@@ -191,7 +200,10 @@ test("changelog: notes sort newest first", (t) => {
     sections: { Fixed: ["A bug."] },
   });
   const notes = loadNotes(notesFixture(t, { "v0.1.1.json": second }));
-  assert.deepEqual(notes.map((n) => n.version), ["0.1.1", "0.1.0"]);
+  assert.deepEqual(
+    notes.map((n) => n.version),
+    ["0.1.1", "0.1.0"],
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -203,6 +215,9 @@ test("comment-blocks: an empty parse is a finding, not a pass", (t) => {
   mkdirSync(dir, { recursive: true });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const findings = engine.validate({ libDir: dir, parser, requireSpec: true });
-  assert.ok(findings.length >= 1, "zero findings on a tree with zero documented files is fail-open");
+  assert.ok(
+    findings.length >= 1,
+    "zero findings on a tree with zero documented files is fail-open",
+  );
   assert.match(findings[0].msg, /no documented source files/);
 });
