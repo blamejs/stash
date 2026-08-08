@@ -1485,6 +1485,59 @@ for (const { name, create } of BACKENDS) {
       assert.deepEqual(await drain(await stash.apply(id)), bytes);
     });
 
+    test("the shared source check names no verb -- store() is not told it called push", async () => {
+      // _toChunkSource is reached from BOTH push() and store(), so it cannot know
+      // which verb the caller invoked and must not claim to. The same rule the
+      // sidecar-size bound follows.
+      const stash = new Stash({ backend: create() });
+      const bytes = Buffer.from("x");
+      await assert.rejects(stash.store(makeStoredEntry(generate(), bytes), 42), (err) => {
+        assert.ok(err instanceof TypeError);
+        assert.ok(!/push/.test(err.message), "message must not name push: " + err.message);
+        return true;
+      });
+      await assert.rejects(stash.push(42), (err) => {
+        assert.ok(err instanceof TypeError);
+        assert.ok(!/push/.test(err.message), "message must not name push: " + err.message);
+        return true;
+      });
+    });
+
+    test("a source that lies about its length stores only the bytes it actually holds", async () => {
+      // `.length` on a typed array is an ordinary property and a subclass may override
+      // it. Copying with Buffer.from() reads that PROPERTY: a view holding 2 bytes but
+      // reporting 512 makes Buffer.from allocate 512 bytes out of Node's shared pool
+      // and write only the real 2, so the entry is padded with whatever the pool last
+      // held -- other entries' plaintext in a multi-tenant embedding. The store would
+      // then certify a size and a digest over bytes the caller never supplied, and
+      // charge maxSize/maxTotal for them. copyBytesFrom reads the view's internal
+      // byteLength slot instead, which no property can forge.
+      class Liar extends Uint8Array {
+        get length() {
+          return 512;
+        }
+      }
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push(new Liar([0xaa, 0xbb]));
+      assert.equal((await stash.show(ref)).size, 2);
+      assert.deepEqual(await drain(await stash.apply(ref)), Buffer.from([0xaa, 0xbb]));
+
+      // Same lie through store(), which shares _toChunkSource.
+      const id = generate();
+      const bytes = Buffer.from([0xaa, 0xbb]);
+      assert.equal(await stash.store(makeStoredEntry(id, bytes), new Liar([0xaa, 0xbb])), true);
+      assert.deepEqual(await drain(await stash.apply(id)), bytes);
+    });
+
+    test("a byteOffset view is copied from its own window, not the whole backing buffer", async () => {
+      // copyBytesFrom must honour byteOffset/byteLength, not copy the parent buffer.
+      const backing = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);
+      const window = new Uint8Array(backing.buffer, backing.byteOffset + 2, 3);
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push(window);
+      assert.deepEqual(await drain(await stash.apply(ref)), Buffer.from([3, 4, 5]));
+    });
+
     test("a foreign typed array that is NOT a Uint8Array is still refused (element-width confusion stays closed)", async () => {
       // The realm-proof predicate must be isUint8Array, never ArrayBuffer.isView: the
       // latter admits a Uint16Array, and Buffer.from(uint16array) copies each ELEMENT

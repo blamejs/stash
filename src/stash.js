@@ -116,15 +116,24 @@ const DEFAULT_CLAIM_TIMEOUT = "10m";
 // NOT ArrayBuffer.isView here: that also admits a Uint16Array, and
 // Buffer.from(uint16array) copies each ELEMENT mod 256 -- storing bytes the
 // caller never handed over. Only an 8-bit unsigned view may pass.
+//
+// copyBytesFrom, not Buffer.from: `.length` on a typed array is an ordinary
+// property, and a subclass may override it. Buffer.from reads that PROPERTY, so a
+// view holding 2 bytes but reporting 512 allocates 512 out of the shared pool and
+// writes only the real 2 -- padding the entry with whatever the pool last held,
+// which in a multi-tenant embedding is another entry's plaintext. The store would
+// then certify a size and a digest over bytes the caller never supplied.
+// copyBytesFrom reads the view's internal byteLength slot, which no property can
+// forge, and honours byteOffset so a window is copied from its own range.
 function _toChunkSource(source) {
   if (typeof source === "string") return [Buffer.from(source, "utf8")];
-  if (isUint8Array(source)) return [Buffer.from(source)];
+  if (isUint8Array(source)) return [Buffer.copyBytesFrom(source)];
   if (source !== null && typeof source === "object" && Symbol.asyncIterator in source) {
     return source;
   }
-  throw new TypeError(
-    "push: source must be a Buffer, Uint8Array, string, Readable, or AsyncIterable",
-  );
+  // No verb in the message: push() and store() both reach this line, so it cannot
+  // know which one the caller invoked.
+  throw new TypeError("source must be a Buffer, Uint8Array, string, Readable, or AsyncIterable");
 }
 
 // Wrap a backend read stream in a digest-verifying passthrough. The hash is

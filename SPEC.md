@@ -577,7 +577,10 @@ is stable *within a version line* and versioned with the package.
 The contract is executable. `@blamejs/stash/conformance` exports
 `runBackendConformance(factory, { test, assert? })`, which registers the behavioral suite the
 in-tree backends pass against any backend factory, driving the shipped `Stash` consumer path and
-asserting the frozen verdicts (`ENOREF`, `ECLAIMED`, `E2BIG`, `EFULL`). It imports no test
+asserting the frozen verdicts (`ENOREF`, `ECLAIMED`, `E2BIG`, `EFULL`). The factory is
+`{ name, create() }`: `create()` returns a fresh backend per case, and `name` is a required
+non-empty string that labels every registered case (`"<name>: <case>"`), so certifying two
+backends in one run yields two distinguishable suites rather than two identical ones. It imports no test
 runner — the caller wires their own (`node:test` or otherwise) — so a third-party backend proves
 interchangeability by running the identical cases, not by reading prose. The bundled conformance core
 covers round-trip fidelity across every source type, identity, expiry, limits, claim atomicity,
@@ -622,7 +625,7 @@ Typed, with stable `.code`. Consumers must never string-match a message.
 |---|---|---|
 | `RefNotFound` | `ENOREF` | Unknown or expired ref |
 | `RefClaimed` | `ECLAIMED` | Concurrent `pop` lost the race |
-| `IntegrityError` | `EINTEGRITY` | Digest mismatch on read |
+| `IntegrityError` | `EINTEGRITY` | Stored content is not what was recorded, or cannot be stored as recorded: a digest mismatch on read, a damaged store layout, a sidecar past its size bound in either direction |
 | `SizeExceeded` | `E2BIG` | `maxSize` crossed mid-stream |
 | `StashFull` | `EFULL` | `maxEntries` / `maxTotal` reached |
 | `InvalidRef` | `EBADREF` | Malformed ref string |

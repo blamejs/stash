@@ -77,7 +77,10 @@ async function retryOnClaimed(fn) {
  *
  * Register the SPEC.md 9 backend conformance suite against a backend
  * `factory` -- `{ name, create() }`, where `create()` returns a fresh
- * backend per case. `options.test` is your runner's test function
+ * backend per case and `name` is a required non-empty string that labels
+ * every case this registers (`"<name>: <case>"`), so two backends certified
+ * in one run produce two distinguishable suites. A factory missing either
+ * member is a `TypeError`. `options.test` is your runner's test function
  * (`(title, fn) => void`); `options.assert` is a `node:assert/strict`-shaped
  * assertion object, defaulting to the built-in when omitted. Every case
  * drives the shipped `Stash` consumer path against a `Stash` wrapping the

@@ -152,3 +152,43 @@ test("runBackendConformance rejects a missing test runner and a malformed factor
   assert.throws(() => runBackendConformance({ name: "x" }, { test: () => {} }), TypeError);
   assert.throws(() => runBackendConformance(null, { test: () => {} }), TypeError);
 });
+
+// `name` is half the documented `{ name, create() }` contract, and the harness
+// labels every case with it. A factory that omits it, or supplies something that
+// cannot be a label, is refused at the entry point rather than registering a suite
+// whose cases are indistinguishable from another backend's.
+test("runBackendConformance rejects a factory whose name is missing, empty, or not a string", () => {
+  const create = BACKENDS.find((b) => b.name === "memory").create;
+  for (const factory of [
+    { create },
+    { name: "", create },
+    { name: 42, create },
+    { name: null, create },
+    { name: {}, create },
+  ]) {
+    assert.throws(() => runBackendConformance(factory, { test: () => {} }), TypeError);
+  }
+});
+
+test("every registered case is labelled with the factory name", async () => {
+  // MIGRATING promises operators the literal shape `<name>: <case>`; pin it, so
+  // certifying two backends in one run can never produce two identical title sets.
+  const memory = BACKENDS.find((b) => b.name === "memory");
+  const results = await runCollecting({ name: "labelled", create: memory.create });
+  assert.ok(results.length > 0, "the harness registered cases");
+  // Assert the cases actually RAN clean as well as being labelled -- a title-only
+  // assertion passes even when every case threw, which would make this hollow.
+  assert.deepEqual(
+    results.filter((r) => !r.ok).map((r) => r.name + ": " + r.err),
+    [],
+  );
+  const unlabelled = results.filter((r) => !r.name.startsWith("labelled: "));
+  assert.deepEqual(
+    unlabelled.map((r) => r.name),
+    [],
+    "every case title must start with the factory name",
+  );
+  // and the label is the factory's, not a constant
+  const other = await runCollecting({ name: "other", create: memory.create });
+  assert.ok(other.every((r) => r.name.startsWith("other: ")));
+});

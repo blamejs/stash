@@ -194,13 +194,17 @@ config-time `TypeError`.
 
 The `SPEC.md` section 12 delivery plan is complete, and the public surface is
 stable: every verb, option, error code, and on-disk format carries a
-semantic-versioning commitment -- a breaking change ships a new major with a
-migration recipe ([MIGRATING.md](MIGRATING.md)), under the support window in
-[LTS-CALENDAR.md](LTS-CALENDAR.md). `SPEC.md` is the contract.
+semantic-versioning commitment -- a breaking change ships a new major, preceded
+by a deprecation warning at least one minor ahead ([MIGRATING.md](MIGRATING.md)),
+under the support window in [LTS-CALENDAR.md](LTS-CALENDAR.md). `SPEC.md` is the
+contract.
 
 The current major is `v2.x`. Upgrading from `v1.x` changes two error verdicts
 and nothing else -- there is no on-disk format change, so a `v1.x` store opens
-under `v2.0` unmodified. See [MIGRATING.md](MIGRATING.md).
+under `v2.0` unmodified. `v2.0` is an exception to the deprecation rule above:
+it shipped without a preceding deprecation minor, so read
+[MIGRATING.md](MIGRATING.md) rather than relying on having been warned at
+runtime.
 
 ## The verbs
 

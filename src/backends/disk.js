@@ -1106,7 +1106,7 @@ export class DiskBackend {
     // The policy layer hands a makeTombstone() object -- exactly { id, destroyedAt,
     // cause } -- so serialize it whole; a malformed shape would be caught on read.
     const bytes = Buffer.from(JSON.stringify(tombstone), "utf8");
-    const tmpPath = join(dir, id + ".json." + randomBytes(8).toString("hex") + ".tmp");
+    const tmpPath = join(dir, _sidecarName(id) + "." + randomBytes(8).toString("hex") + ".tmp");
     const fh = await open(tmpPath, "wx", FILE_MODE);
     try {
       try {

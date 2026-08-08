@@ -4,24 +4,28 @@ All notable changes to `@blamejs/stash` are documented here, newest first.
 
 ## 2.0.0 — 2026-08-07
 
-A small, sharp-edged major. Everything the store does is unchanged: the verb
-set, the on-disk format, the ref format, expiry and read budgets,
-replication, digest agility, and the CLI all behave exactly as they did in
-1.x. What changes is how two failures report themselves. Rejecting an entry
-whose metadata is too large for a sidecar is a judgement about stored
-content, not about a caller's argument -- so it now throws `IntegrityError`
-with code `EINTEGRITY`, the same verdict the read side of that identical
-bound has always used, and the same class every other content rejection uses.
-Previously it threw a bare `TypeError` with no code at all, labelled `push:`
-even when `store()` was the caller, which left a replication path reporting a
-verb the caller never invoked and an error the documented `err.code` contract
-could not describe. Separately, `runBackendConformance` now requires the
-`name` its published `{ name, create() }` contract has always specified and
-labels every registered case with it; certifying two backends in one run
-previously produced two identical sets of test titles with nothing to
-distinguish a failure. Upgrading is two mechanical edits at most, both listed
-in MIGRATING.md, and neither touches stored data: no migration, no re-write,
-no format change. A 1.x store opens under 2.0 unchanged.
+A small, sharp-edged major, and one memory-disclosure fix. This release ships
+WITHOUT a preceding deprecation minor -- an exception to the post-1.0
+commitment, recorded with its reason in MIGRATING.md, so read the recipe
+rather than relying on having been warned at runtime. Everything the store
+does is otherwise unchanged: the verb set, the on-disk format, the ref
+format, expiry and read budgets, replication, digest agility, and the CLI all
+behave exactly as they did in 1.x. What changes is how a few failures report
+themselves. Rejecting an entry whose metadata is too large for a sidecar is a
+judgement about stored content, not about a caller's argument -- so it now
+throws `IntegrityError` with code `EINTEGRITY`, the same verdict the read
+side of that identical bound has always used, and the same class every other
+content rejection uses. Previously it threw a bare `TypeError` with no code
+at all, labelled `push:` even when `store()` was the caller, which left a
+replication path reporting a verb the caller never invoked and an error the
+documented `err.code` contract could not describe. Separately,
+`runBackendConformance` now requires the `name` its published `{ name,
+create() }` contract has always specified and labels every registered case
+with it; certifying two backends in one run previously produced two identical
+sets of test titles with nothing to distinguish a failure. Upgrading is two
+mechanical edits at most, both listed in MIGRATING.md, and neither touches
+stored data: no migration, no re-write, no format change. A 1.x store opens
+under 2.0 unchanged.
 
 ### Changed
 
@@ -51,6 +55,18 @@ no format change. A 1.x store opens under 2.0 unchanged.
 
 ### Fixed
 
+- A source that misreported its own length could make the store record bytes
+  the caller never supplied. `length` on a typed array is an ordinary
+  property, so a `Uint8Array` subclass holding two bytes but reporting 512
+  caused the copy to allocate 512 bytes from Node's shared pool and write
+  only the two real ones -- padding the entry with whatever the pool last
+  held, and certifying a size and digest over content that was never handed
+  over. Sources are now copied by their real byte length, which no property
+  can forge. A store embedded alongside other tenants was the exposure; the
+  affected copy also charged `maxSize` and `maxTotal` for the phantom bytes.
+- The shared source check no longer names a verb. `push()` and `store()` both
+  reach it, so its message said `push:` even when `store()` was the caller --
+  the same defect the sidecar-size verdict fixes, one function above it.
 - The temp-file grace period was documented as making `verify` report an
   in-flight `.tmp` without repairing it. It reports neither, and it does
   discard one aged past the grace under `{ repair: true }`.
