@@ -99,7 +99,9 @@ export function assertSinceImmutable(previous, next) {
   for (const [token, version] of Object.entries(previous.sinceByPrimitive || {})) {
     if (!(token in next.sinceByPrimitive)) continue; // primitive removed: the surface diff owns that verdict
     if (next.sinceByPrimitive[token] !== version) {
-      problems.push(token + ": @since changed from " + version + " to " + next.sinceByPrimitive[token]);
+      problems.push(
+        token + ": @since changed from " + version + " to " + next.sinceByPrimitive[token],
+      );
     }
   }
   for (const [token, version] of Object.entries(next.sinceByPrimitive)) {
@@ -124,8 +126,12 @@ async function main() {
     sinceByPrimitive: next.sinceByPrimitive,
   };
   writeFileSync(SNAPSHOT_PATH, JSON.stringify(snapshot, null, 2) + "\n");
-  console.log("api-snapshot.json refreshed: " +
-    Object.keys(next.sinceByPrimitive).length + " primitives, package " + pkg.version);
+  console.log(
+    "api-snapshot.json refreshed: " +
+      Object.keys(next.sinceByPrimitive).length +
+      " primitives, package " +
+      pkg.version,
+  );
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

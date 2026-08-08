@@ -38,7 +38,15 @@ const PREAMBLE =
 
 // Keep a Changelog's canonical section order; unknown headings sort after,
 // in first-seen order.
-const SECTION_ORDER = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security", "Migration"];
+const SECTION_ORDER = [
+  "Added",
+  "Changed",
+  "Deprecated",
+  "Removed",
+  "Fixed",
+  "Security",
+  "Migration",
+];
 
 // Malformed input throws; the CLI entry point turns the throw into a
 // prefixed stderr line + exit 1, and importing consumers (tests) assert
@@ -59,8 +67,13 @@ function readNote(dir, name) {
   }
   const version = name.replace(/^v/, "").replace(/\.json$/, "");
   if (payload.version !== version) {
-    fail("release-notes/" + name + ": version field " +
-      JSON.stringify(payload.version) + " does not match the filename");
+    fail(
+      "release-notes/" +
+        name +
+        ": version field " +
+        JSON.stringify(payload.version) +
+        " does not match the filename",
+    );
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(payload.date || ""))) {
     fail("release-notes/" + name + ": date must be YYYY-MM-DD");
@@ -74,8 +87,13 @@ function readNote(dir, name) {
   }
   for (const heading of Object.keys(sections)) {
     if (!Array.isArray(sections[heading]) || sections[heading].length === 0) {
-      fail("release-notes/" + name + ": section " + JSON.stringify(heading) +
-        " must be a non-empty array of bullet strings");
+      fail(
+        "release-notes/" +
+          name +
+          ": section " +
+          JSON.stringify(heading) +
+          " must be a non-empty array of bullet strings",
+      );
     }
   }
   return payload;
@@ -103,8 +121,11 @@ export function loadNotes(dir = NOTES_DIR) {
   }
   const strays = entries.filter((name) => !NOTE_NAME_RE.test(name));
   if (strays.length > 0) {
-    fail("release-notes/ contains unrecognized entries (only v<X>.<Y>.<Z>.json " +
-      "release notes may live here): " + strays.join(", "));
+    fail(
+      "release-notes/ contains unrecognized entries (only v<X>.<Y>.<Z>.json " +
+        "release notes may live here): " +
+        strays.join(", "),
+    );
   }
   const notes = entries.map((name) => readNote(dir, name));
   if (notes.length === 0) fail("no release-notes/v<X>.<Y>.<Z>.json files found");
@@ -182,19 +203,37 @@ function main() {
     const max = Math.max(diskLines.length, genLines.length);
     for (let i = 0; i < max; i += 1) {
       if (diskLines[i] !== genLines[i]) {
-        process.stderr.write("[regen-changelog] CHECK FAIL -- CHANGELOG.md drifts from release-notes/ at line " + (i + 1) + ":\n");
-        process.stderr.write("  disk:      " + JSON.stringify(diskLines[i] === undefined ? "(missing)" : diskLines[i]) + "\n");
-        process.stderr.write("  generated: " + JSON.stringify(genLines[i] === undefined ? "(missing)" : genLines[i]) + "\n");
+        process.stderr.write(
+          "[regen-changelog] CHECK FAIL -- CHANGELOG.md drifts from release-notes/ at line " +
+            (i + 1) +
+            ":\n",
+        );
+        process.stderr.write(
+          "  disk:      " +
+            JSON.stringify(diskLines[i] === undefined ? "(missing)" : diskLines[i]) +
+            "\n",
+        );
+        process.stderr.write(
+          "  generated: " +
+            JSON.stringify(genLines[i] === undefined ? "(missing)" : genLines[i]) +
+            "\n",
+        );
         break;
       }
     }
-    process.stderr.write("[regen-changelog] run `node scripts/regen-changelog.js` to rewrite, or fix the release notes\n");
+    process.stderr.write(
+      "[regen-changelog] run `node scripts/regen-changelog.js` to rewrite, or fix the release notes\n",
+    );
     process.exit(1);
   }
 
   writeFileSync(CHANGELOG_PATH, generated);
-  process.stdout.write("[regen-changelog] wrote CHANGELOG.md from " +
-    "release-notes/ (" + generated.length + " bytes)\n");
+  process.stdout.write(
+    "[regen-changelog] wrote CHANGELOG.md from " +
+      "release-notes/ (" +
+      generated.length +
+      " bytes)\n",
+  );
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

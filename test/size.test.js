@@ -19,8 +19,25 @@ test("parses the documented size forms", () => {
 });
 
 test("rejects malformed sizes at config time", () => {
-  const bad = ["mb", "100", "1.5mb", "-1mb", "100 mb", "100kib", "10h", "1tb", "", "100mbb",
-    NaN, Infinity, -1, 1.5, {}, [], true];
+  const bad = [
+    "mb",
+    "100",
+    "1.5mb",
+    "-1mb",
+    "100 mb",
+    "100kib",
+    "10h",
+    "1tb",
+    "",
+    "100mbb",
+    NaN,
+    Infinity,
+    -1,
+    1.5,
+    {},
+    [],
+    true,
+  ];
   for (const value of bad) {
     assert.throws(() => parse(value, "maxSize"), TypeError);
   }

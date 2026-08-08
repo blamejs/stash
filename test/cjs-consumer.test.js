@@ -25,8 +25,12 @@ import { SANDBOXED } from "./_helpers.js";
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "cjs-consumer.cjs");
 
-test("a CommonJS consumer can require() the package and both backend subpaths", { skip: SANDBOXED }, () => {
-  const r = spawnSync(process.execPath, [FIXTURE], { encoding: "utf8", env: { ...process.env } });
-  assert.equal(r.status, 0, "the CJS fixture exits 0 (stderr: " + (r.stderr || "") + ")");
-  assert.match(r.stdout, /CJS-OK/, "the fixture reports its success marker");
-});
+test(
+  "a CommonJS consumer can require() the package and both backend subpaths",
+  { skip: SANDBOXED },
+  () => {
+    const r = spawnSync(process.execPath, [FIXTURE], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(r.status, 0, "the CJS fixture exits 0 (stderr: " + (r.stderr || "") + ")");
+    assert.match(r.stdout, /CJS-OK/, "the fixture reports its success marker");
+  },
+);

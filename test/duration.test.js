@@ -18,7 +18,24 @@ test("parses the documented duration forms", () => {
 });
 
 test("rejects malformed durations at config time", () => {
-  const bad = ["24", "h24", "24H", "1.5h", "-1h", "24 h", "1w", "1y", "", "24hh", NaN, Infinity, -1, {}, [], true];
+  const bad = [
+    "24",
+    "h24",
+    "24H",
+    "1.5h",
+    "-1h",
+    "24 h",
+    "1w",
+    "1y",
+    "",
+    "24hh",
+    NaN,
+    Infinity,
+    -1,
+    {},
+    [],
+    true,
+  ];
   for (const value of bad) {
     assert.throws(() => parse(value, "ttl"), TypeError);
   }

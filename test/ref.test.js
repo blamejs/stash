@@ -44,15 +44,18 @@ test("traversal and malformed refs die at the whitelist", () => {
   ];
   for (const ref of hostile) {
     assert.equal(isValid(ref), false);
-    assert.throws(() => assertValid(ref), (err) => {
-      assert.ok(err instanceof InvalidRef);
-      assert.equal(err.code, "EBADREF");
-      // capability-hygiene: the message never echoes the input
-      if (typeof ref === "string" && ref.length > 0) {
-        assert.equal(err.message.includes(ref), false);
-      }
-      return true;
-    });
+    assert.throws(
+      () => assertValid(ref),
+      (err) => {
+        assert.ok(err instanceof InvalidRef);
+        assert.equal(err.code, "EBADREF");
+        // capability-hygiene: the message never echoes the input
+        if (typeof ref === "string" && ref.length > 0) {
+          assert.equal(err.message.includes(ref), false);
+        }
+        return true;
+      },
+    );
   }
 });
 
@@ -67,10 +70,7 @@ test("the whitelist regex and C.REF agree", () => {
   const ref = generate();
   assert.equal(ref.length, C.REF.PREFIX.length + C.REF.ENCODED_LENGTH);
   assert.ok(ref.startsWith(C.REF.PREFIX));
-  assert.equal(
-    C.REF.ENCODED_LENGTH,
-    Buffer.alloc(C.REF.RANDOM_BYTES).toString("base64url").length
-  );
+  assert.equal(C.REF.ENCODED_LENGTH, Buffer.alloc(C.REF.RANDOM_BYTES).toString("base64url").length);
 });
 
 test("constantTimeEqual compares strings without type coercion", () => {

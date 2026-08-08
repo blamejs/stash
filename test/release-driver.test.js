@@ -13,7 +13,17 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { checksVerdict, collectAllPages, mergeArgs, reviewerSignalsReview, reviewTriggerForHead, syncComposeImageTag, syncLockfileVersion, tagFromState, unresolvedThreads } from "../scripts/release.js";
+import {
+  checksVerdict,
+  collectAllPages,
+  mergeArgs,
+  reviewerSignalsReview,
+  reviewTriggerForHead,
+  syncComposeImageTag,
+  syncLockfileVersion,
+  tagFromState,
+  unresolvedThreads,
+} from "../scripts/release.js";
 
 // ---------------------------------------------------------------------------
 // checksVerdict -- CheckRun entries (status / conclusion)
@@ -35,7 +45,14 @@ test("checksVerdict: SKIPPED and NEUTRAL check runs pass (deliberate no-op verdi
   assert.deepEqual(v.blocking, []);
 });
 
-for (const conclusion of ["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"]) {
+for (const conclusion of [
+  "FAILURE",
+  "CANCELLED",
+  "TIMED_OUT",
+  "ACTION_REQUIRED",
+  "STARTUP_FAILURE",
+  "STALE",
+]) {
   test("checksVerdict: terminal " + conclusion + " check run blocks", () => {
     const v = checksVerdict([{ name: "ci", status: "COMPLETED", conclusion }]);
     assert.equal(v.green, false);
@@ -160,7 +177,10 @@ test("checksVerdict: mixed shapes all green with one pending stays not-green", (
 test("unresolvedThreads: an unresolved thread blocks (non-empty result)", () => {
   const out = unresolvedThreads([
     {
-      id: "PRRT_1", isResolved: false, path: "src/x.js", line: 10,
+      id: "PRRT_1",
+      isResolved: false,
+      path: "src/x.js",
+      line: 10,
       comments: { nodes: [{ author: { login: "reviewer" }, body: "P1: fix this" }] },
     },
   ]);
@@ -173,7 +193,12 @@ test("unresolvedThreads: an unresolved thread blocks (non-empty result)", () => 
 
 test("unresolvedThreads: all-resolved clears (empty result)", () => {
   const out = unresolvedThreads([
-    { id: "PRRT_1", isResolved: true, path: "src/x.js", comments: { nodes: [{ author: { login: "reviewer" }, body: "done" }] } },
+    {
+      id: "PRRT_1",
+      isResolved: true,
+      path: "src/x.js",
+      comments: { nodes: [{ author: { login: "reviewer" }, body: "done" }] },
+    },
     { id: "PRRT_2", isResolved: true, path: "src/y.js", comments: { nodes: [] } },
   ]);
   assert.deepEqual(out, []);
@@ -182,7 +207,11 @@ test("unresolvedThreads: all-resolved clears (empty result)", () => {
 test("unresolvedThreads: mixed -- only the unresolved thread blocks", () => {
   const out = unresolvedThreads([
     { id: "PRRT_1", isResolved: true },
-    { id: "PRRT_2", isResolved: false, comments: { nodes: [{ author: { login: "reviewer" }, body: "still open" }] } },
+    {
+      id: "PRRT_2",
+      isResolved: false,
+      comments: { nodes: [{ author: { login: "reviewer" }, body: "still open" }] },
+    },
   ]);
   assert.equal(out.length, 1);
   assert.equal(out[0].id, "PRRT_2");
@@ -210,9 +239,7 @@ test("unresolvedThreads: a failed/absent query (a non-array) throws -- fail clos
 
 test("cmdWatch is a pure gate: it never merges or syncs (no mergeArgs / checkout main)", () => {
   const raw = readFileSync(new URL("../scripts/release.js", import.meta.url), "utf8");
-  const src = raw
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  const src = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
   const start = src.indexOf("function cmdWatch");
   assert.ok(start !== -1, "cmdWatch must exist");
   const end = src.indexOf("\nfunction ", start + 1);
@@ -221,8 +248,10 @@ test("cmdWatch is a pure gate: it never merges or syncs (no mergeArgs / checkout
   assert.ok(!/"checkout",\s*"main"/.test(body), "cmdWatch must not sync main -- it only gates");
   // It still fails closed on an unresolved thread: it prints them and exits.
   assert.ok(/fetchUnresolvedThreads\s*\(/.test(body), "cmdWatch must read the thread gate");
-  assert.ok(/printUnresolvedThreads\s*\(/.test(body) && /process\.exit\(/.test(body),
-    "an unresolved thread must print + exit non-zero");
+  assert.ok(
+    /printUnresolvedThreads\s*\(/.test(body) && /process\.exit\(/.test(body),
+    "an unresolved thread must print + exit non-zero",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -235,9 +264,7 @@ test("cmdWatch is a pure gate: it never merges or syncs (no mergeArgs / checkout
 
 test("cmdMerge claims merged only from an observed MERGED state, never from the merge call", () => {
   const rawSrc = readFileSync(new URL("../scripts/release.js", import.meta.url), "utf8");
-  const src = rawSrc
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  const src = rawSrc.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
   const start = src.indexOf("function cmdMerge");
   assert.ok(start !== -1, "cmdMerge must exist");
   const end = src.indexOf("\nfunction ", start + 1);
@@ -249,18 +276,24 @@ test("cmdMerge claims merged only from an observed MERGED state, never from the 
   const assignAt = body.indexOf("merged = true");
   const mergedCheckAt = body.lastIndexOf('"MERGED"', assignAt);
   assert.ok(assignAt !== -1 && mergedCheckAt !== -1);
-  assert.ok(assignAt - mergedCheckAt < 80,
-    "merged=true must be set by the observed MERGED state check, not elsewhere");
+  assert.ok(
+    assignAt - mergedCheckAt < 80,
+    "merged=true must be set by the observed MERGED state check, not elsewhere",
+  );
 
   // The merge call must be followed by a poll loop BEFORE any success claim.
   const mergeCall = body.indexOf("mergeArgs(branch");
   assert.ok(mergeCall !== -1, "cmdMerge must call gh with mergeArgs");
   const loopAfterMerge = body.indexOf("for (", mergeCall);
-  assert.ok(loopAfterMerge !== -1 && loopAfterMerge < assignAt,
-    "the merge call must be followed by a poll loop before merged=true -- a queued merge lands asynchronously");
+  assert.ok(
+    loopAfterMerge !== -1 && loopAfterMerge < assignAt,
+    "the merge call must be followed by a poll loop before merged=true -- a queued merge lands asynchronously",
+  );
   const immediate = body.slice(mergeCall, loopAfterMerge);
-  assert.ok(!/merged\s*=\s*true/.test(immediate) && !/\bbreak\b/.test(immediate),
-    "the merge call must not claim success before the poll");
+  assert.ok(
+    !/merged\s*=\s*true/.test(immediate) && !/\bbreak\b/.test(immediate),
+    "the merge call must not claim success before the poll",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -282,8 +315,10 @@ test("cmdPrepare creates the release branch before writing package.json", () => 
   const writeAt = body.indexOf('writeFileSync(join(ROOT, "package.json")');
   assert.ok(branchAt !== -1, "cmdPrepare must create the release branch");
   assert.ok(writeAt !== -1, "cmdPrepare must write the bumped package.json");
-  assert.ok(branchAt < writeAt,
-    "create the release branch BEFORE writing package.json -- a failed checkout must leave main clean");
+  assert.ok(
+    branchAt < writeAt,
+    "create the release branch BEFORE writing package.json -- a failed checkout must leave main clean",
+  );
 });
 
 test("cmdPrepare syncs package-lock.json to the bumped version in the same step", () => {
@@ -291,9 +326,7 @@ test("cmdPrepare syncs package-lock.json to the bumped version in the same step"
   // the previous release; prepare must rewrite the lockfile alongside the
   // package.json bump or every cut is blocked at PR time.
   const raw = readFileSync(new URL("../scripts/release.js", import.meta.url), "utf8");
-  const src = raw
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  const src = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
   const start = src.indexOf("function cmdPrepare");
   const end = src.indexOf("\nfunction ", start + 1);
   const body = src.slice(start, end === -1 ? undefined : end);
@@ -301,8 +334,10 @@ test("cmdPrepare syncs package-lock.json to the bumped version in the same step"
   assert.ok(/package-lock\.json/.test(body), "cmdPrepare must write package-lock.json");
   const pkgWriteAt = body.indexOf('writeFileSync(join(ROOT, "package.json")');
   const lockSyncAt = body.indexOf("syncLockfileVersion");
-  assert.ok(pkgWriteAt !== -1 && lockSyncAt !== -1 && pkgWriteAt < lockSyncAt,
-    "cmdPrepare must bump package.json, then sync the lockfile to the same version");
+  assert.ok(
+    pkgWriteAt !== -1 && lockSyncAt !== -1 && pkgWriteAt < lockSyncAt,
+    "cmdPrepare must bump package.json, then sync the lockfile to the same version",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -311,7 +346,10 @@ test("cmdPrepare syncs package-lock.json to the bumped version in the same step"
 
 test("syncLockfileVersion: both the top-level and root package versions move to the target", () => {
   const lock = {
-    name: "@blamejs/stash", version: "0.1.3", lockfileVersion: 3, requires: true,
+    name: "@blamejs/stash",
+    version: "0.1.3",
+    lockfileVersion: 3,
+    requires: true,
     packages: { "": { name: "@blamejs/stash", version: "0.1.3", license: "Apache-2.0" } },
   };
   const out = syncLockfileVersion(lock, "0.1.4");
@@ -328,7 +366,10 @@ test("syncLockfileVersion: the synced lockfile version equals the bumped package
   // package.json; both must equal the just-bumped version or the cut is
   // blocked (0.1.4 shipped a 0.1.3 lockfile against a 0.1.4 package.json).
   const pkgVersion = "0.2.0";
-  const out = syncLockfileVersion({ version: "0.1.9", packages: { "": { version: "0.1.9" } } }, pkgVersion);
+  const out = syncLockfileVersion(
+    { version: "0.1.9", packages: { "": { version: "0.1.9" } } },
+    pkgVersion,
+  );
   assert.equal(out.version, pkgVersion);
   assert.equal(out.packages[""].version, pkgVersion);
 });
@@ -359,7 +400,10 @@ test("syncComposeImageTag: bumps the local build-label pin", () => {
 });
 
 test("syncComposeImageTag: bumps the prod ${WIKI_IMAGE_TAG:-X.Y.Z} pull default, keeping the interpolation", () => {
-  const out = syncComposeImageTag("    image: ghcr.io/blamejs/stash-wiki:${WIKI_IMAGE_TAG:-0.1.3}\n", "0.1.4");
+  const out = syncComposeImageTag(
+    "    image: ghcr.io/blamejs/stash-wiki:${WIKI_IMAGE_TAG:-0.1.3}\n",
+    "0.1.4",
+  );
   assert.equal(out, "    image: ghcr.io/blamejs/stash-wiki:${WIKI_IMAGE_TAG:-0.1.4}\n");
 });
 
@@ -405,9 +449,7 @@ test("cmdPublish polls the registry after the workflow concludes, not a one-shot
   // workflow-run conclusion; the registry verify must be a bounded poll so
   // propagation lag is not mistaken for a failed publish.
   const raw = readFileSync(new URL("../scripts/release.js", import.meta.url), "utf8");
-  const src = raw
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  const src = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
   const start = src.indexOf("function cmdPublish");
   assert.ok(start !== -1, "cmdPublish must exist");
   const end = src.indexOf("\nfunction ", start + 1);
@@ -427,7 +469,14 @@ const HEAD = "a1b2c3d4e5f60718293645546372819a0bcdef12";
 
 test("mergeArgs: the merge is bound to the reviewed head commit", () => {
   const args = mergeArgs("release-v0.1.4", HEAD);
-  assert.deepEqual(args, ["pr", "merge", "release-v0.1.4", "--squash", "--match-head-commit", HEAD]);
+  assert.deepEqual(args, [
+    "pr",
+    "merge",
+    "release-v0.1.4",
+    "--squash",
+    "--match-head-commit",
+    HEAD,
+  ]);
 });
 
 test("mergeArgs: a missing or truncated head sha throws instead of merging unbound", () => {
@@ -442,7 +491,10 @@ test("mergeArgs: a missing or truncated head sha throws instead of merging unbou
 const SHA = "a1b2c3d4e5f60718293645546372819a0bcdef12";
 
 test("tagFromState: recorded version + merge commit are the tag plan", () => {
-  assert.deepEqual(tagFromState({ version: "0.1.4", mergeSha: SHA }), { version: "0.1.4", target: SHA });
+  assert.deepEqual(tagFromState({ version: "0.1.4", mergeSha: SHA }), {
+    version: "0.1.4",
+    target: SHA,
+  });
 });
 
 test("tagFromState: absent / malformed state falls back to HEAD (null)", () => {
@@ -461,18 +513,23 @@ test("tagFromState: absent / malformed state falls back to HEAD (null)", () => {
 // mis-version nor mis-target the tag. Structural, over comment-stripped source.
 test("cmdTag pins the tag version + commit from the recorded state, not the post-sync tree", () => {
   const raw = readFileSync(new URL("../scripts/release.js", import.meta.url), "utf8");
-  const src = raw
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  const src = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
 
   const tagStart = src.indexOf("function cmdTag");
   const tagEnd = src.indexOf("\nfunction ", tagStart + 1);
   const tagBody = src.slice(tagStart, tagEnd === -1 ? undefined : tagEnd);
-  assert.ok(/tagFromState\s*\(/.test(tagBody), "cmdTag must resolve version + target via tagFromState");
-  assert.ok(/planned\s*\?\s*planned\.version/.test(tagBody),
-    "cmdTag must take the version from the recorded plan when present");
-  assert.ok(/tagArgs\.push\(\s*target\s*\)/.test(tagBody),
-    "cmdTag must append the resolved target to the git tag args");
+  assert.ok(
+    /tagFromState\s*\(/.test(tagBody),
+    "cmdTag must resolve version + target via tagFromState",
+  );
+  assert.ok(
+    /planned\s*\?\s*planned\.version/.test(tagBody),
+    "cmdTag must take the version from the recorded plan when present",
+  );
+  assert.ok(
+    /tagArgs\.push\(\s*target\s*\)/.test(tagBody),
+    "cmdTag must append the resolved target to the git tag args",
+  );
 
   const mergeStart = src.indexOf("function cmdMerge");
   const mergeEnd = src.indexOf("\nfunction ", mergeStart + 1);
@@ -481,10 +538,14 @@ test("cmdTag pins the tag version + commit from the recorded state, not the post
   // The version must be captured before the pull that syncs main.
   const verAt = mergeBody.indexOf("readVersion()");
   const pullAt = mergeBody.indexOf('"pull"');
-  assert.ok(verAt !== -1 && pullAt !== -1 && verAt < pullAt,
-    "cmdMerge must read the release version BEFORE the pull that syncs main");
-  assert.ok(/writeFileSync\(\s*releaseStatePath\(\)[\s\S]*releaseVersion/.test(mergeBody),
-    "cmdMerge must record the pre-sync releaseVersion with the merge commit");
+  assert.ok(
+    verAt !== -1 && pullAt !== -1 && verAt < pullAt,
+    "cmdMerge must read the release version BEFORE the pull that syncs main",
+  );
+  assert.ok(
+    /writeFileSync\(\s*releaseStatePath\(\)[\s\S]*releaseVersion/.test(mergeBody),
+    "cmdMerge must record the pre-sync releaseVersion with the merge commit",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -507,23 +568,38 @@ test("reviewerSignalsReview: a review node on the head counts (findings form)", 
 });
 
 test("reviewerSignalsReview: a clean-verdict comment citing the head counts", () => {
-  assert.equal(reviewerSignalsReview({
-    comments: [{ author: RBOT, body: "Reviewed `" + RHEAD.slice(0, 10) + "` -- no issues." }],
-  }, RHEAD), true);
+  assert.equal(
+    reviewerSignalsReview(
+      {
+        comments: [{ author: RBOT, body: "Reviewed `" + RHEAD.slice(0, 10) + "` -- no issues." }],
+      },
+      RHEAD,
+    ),
+    true,
+  );
 });
 
 test("reviewerSignalsReview: a bot THUMBS_UP on the driver's trigger comment counts", () => {
   // The bot posts NO review node and NO comment -- only a thumbs-up reaction on
   // the trigger the driver created for this head. This is the case that
   // otherwise hangs the wait until it times out.
-  assert.equal(reviewerSignalsReview({
-    comments: [{
-      author: "release-operator",
-      body: "@codex review",
-      databaseId: TRIGGER_ID,
-      reactions: [{ content: "THUMBS_UP", login: RBOT }],
-    }],
-  }, RHEAD, TRIGGER_ID), true);
+  assert.equal(
+    reviewerSignalsReview(
+      {
+        comments: [
+          {
+            author: "release-operator",
+            body: "@codex review",
+            databaseId: TRIGGER_ID,
+            reactions: [{ content: "THUMBS_UP", login: RBOT }],
+          },
+        ],
+      },
+      RHEAD,
+      TRIGGER_ID,
+    ),
+    true,
+  );
 });
 
 test("reviewerSignalsReview: a bot THUMBS_UP on a PRIOR head's trigger does NOT count", () => {
@@ -531,61 +607,130 @@ test("reviewerSignalsReview: a bot THUMBS_UP on a PRIOR head's trigger does NOT 
   // wait after a fix/direct push makes a new head the bot has not reviewed. The
   // driver's trigger for the new head is TRIGGER_ID; a reaction on PRIOR_ID is a
   // different comment id and does not match.
-  assert.equal(reviewerSignalsReview({
-    comments: [{
-      author: "release-operator",
-      body: "@codex review",
-      databaseId: PRIOR_ID,
-      reactions: [{ content: "THUMBS_UP", login: RBOT }],
-    }],
-  }, RHEAD, TRIGGER_ID), false);
+  assert.equal(
+    reviewerSignalsReview(
+      {
+        comments: [
+          {
+            author: "release-operator",
+            body: "@codex review",
+            databaseId: PRIOR_ID,
+            reactions: [{ content: "THUMBS_UP", login: RBOT }],
+          },
+        ],
+      },
+      RHEAD,
+      TRIGGER_ID,
+    ),
+    false,
+  );
 });
 
 test("reviewerSignalsReview: a THUMBS_UP is unbindable (does NOT count) without a trigger id", () => {
   // A reaction carries no sha; absent the driver's trigger id it cannot be
   // bound to the head, so it fails closed rather than clearing on a stale one.
   const surfaces = {
-    comments: [{ author: "op", body: "@codex review", databaseId: TRIGGER_ID, reactions: [{ content: "THUMBS_UP", login: RBOT }] }],
+    comments: [
+      {
+        author: "op",
+        body: "@codex review",
+        databaseId: TRIGGER_ID,
+        reactions: [{ content: "THUMBS_UP", login: RBOT }],
+      },
+    ],
   };
   assert.equal(reviewerSignalsReview(surfaces, RHEAD), false);
   assert.equal(reviewerSignalsReview(surfaces, RHEAD, null), false);
 });
 
 test("reviewerSignalsReview: a THUMBS_UP on a comment with no databaseId does NOT count", () => {
-  assert.equal(reviewerSignalsReview({
-    comments: [{ author: "op", body: "@codex review", reactions: [{ content: "THUMBS_UP", login: RBOT }] }],
-  }, RHEAD, TRIGGER_ID), false);
+  assert.equal(
+    reviewerSignalsReview(
+      {
+        comments: [
+          {
+            author: "op",
+            body: "@codex review",
+            reactions: [{ content: "THUMBS_UP", login: RBOT }],
+          },
+        ],
+      },
+      RHEAD,
+      TRIGGER_ID,
+    ),
+    false,
+  );
 });
 
 test("reviewerSignalsReview: a head-bound review node counts even with no trigger id", () => {
   // Forms (1) and (2) self-bind via the head sha and never need a trigger id.
   assert.equal(reviewerSignalsReview({ reviews: [{ author: RBOT, commit: RHEAD }] }, RHEAD), true);
-  assert.equal(reviewerSignalsReview({
-    comments: [{ author: RBOT, body: "Reviewed `" + RHEAD.slice(0, 10) + "` -- no issues." }],
-  }, RHEAD), true);
+  assert.equal(
+    reviewerSignalsReview(
+      {
+        comments: [{ author: RBOT, body: "Reviewed `" + RHEAD.slice(0, 10) + "` -- no issues." }],
+      },
+      RHEAD,
+    ),
+    true,
+  );
 });
 
 test("reviewerSignalsReview: no signal at all stays false (keep waiting)", () => {
   assert.equal(reviewerSignalsReview({}, RHEAD, TRIGGER_ID), false);
-  assert.equal(reviewerSignalsReview({ comments: [{ author: "someone", body: "hi" }] }, RHEAD, TRIGGER_ID), false);
+  assert.equal(
+    reviewerSignalsReview({ comments: [{ author: "someone", body: "hi" }] }, RHEAD, TRIGGER_ID),
+    false,
+  );
 });
 
 test("reviewerSignalsReview: a THUMBS_UP on the trigger from a non-reviewer does not count", () => {
-  assert.equal(reviewerSignalsReview({
-    comments: [{ author: "op", body: "@codex review", databaseId: TRIGGER_ID, reactions: [{ content: "THUMBS_UP", login: "randomuser" }] }],
-  }, RHEAD, TRIGGER_ID), false);
+  assert.equal(
+    reviewerSignalsReview(
+      {
+        comments: [
+          {
+            author: "op",
+            body: "@codex review",
+            databaseId: TRIGGER_ID,
+            reactions: [{ content: "THUMBS_UP", login: "randomuser" }],
+          },
+        ],
+      },
+      RHEAD,
+      TRIGGER_ID,
+    ),
+    false,
+  );
 });
 
 test("reviewerSignalsReview: a numeric trigger id matches a string databaseId (and vice versa)", () => {
   // gh REST returns the id as a number, GraphQL databaseId as a number, but a
   // string id must not silently miss -- the compare normalizes both.
-  assert.equal(reviewerSignalsReview({
-    comments: [{ author: "op", body: "@codex review", databaseId: String(TRIGGER_ID), reactions: [{ content: "THUMBS_UP", login: RBOT }] }],
-  }, RHEAD, TRIGGER_ID), true);
+  assert.equal(
+    reviewerSignalsReview(
+      {
+        comments: [
+          {
+            author: "op",
+            body: "@codex review",
+            databaseId: String(TRIGGER_ID),
+            reactions: [{ content: "THUMBS_UP", login: RBOT }],
+          },
+        ],
+      },
+      RHEAD,
+      TRIGGER_ID,
+    ),
+    true,
+  );
 });
 
 test("reviewerSignalsReview: a missing head sha throws instead of matching everything", () => {
-  assert.throws(() => reviewerSignalsReview({ reviews: [{ author: RBOT, commit: RHEAD }] }, ""), TypeError);
+  assert.throws(
+    () => reviewerSignalsReview({ reviews: [{ author: RBOT, commit: RHEAD }] }, ""),
+    TypeError,
+  );
   assert.throws(() => reviewerSignalsReview({}, undefined), TypeError);
 });
 
@@ -597,7 +742,10 @@ test("reviewerSignalsReview: a missing head sha throws instead of matching every
 // ---------------------------------------------------------------------------
 
 test("collectAllPages: a single page returns its nodes", () => {
-  assert.deepEqual(collectAllPages(() => ({ nodes: [1, 2, 3], hasNextPage: false })), [1, 2, 3]);
+  assert.deepEqual(
+    collectAllPages(() => ({ nodes: [1, 2, 3], hasNextPage: false })),
+    [1, 2, 3],
+  );
 });
 
 test("collectAllPages: concatenates every page in order and threads the cursor", () => {
@@ -616,12 +764,18 @@ test("collectAllPages: concatenates every page in order and threads the cursor",
 });
 
 test("collectAllPages: an unreadable page fails closed (throws)", () => {
-  assert.throws(() => collectAllPages(() => ({ nodes: null, hasNextPage: false })), /partial result/);
+  assert.throws(
+    () => collectAllPages(() => ({ nodes: null, hasNextPage: false })),
+    /partial result/,
+  );
   assert.throws(() => collectAllPages(() => null), /partial result/);
 });
 
 test("collectAllPages: a next page promised with no cursor fails closed (throws)", () => {
-  assert.throws(() => collectAllPages(() => ({ nodes: [1], hasNextPage: true, endCursor: null })), /no cursor/);
+  assert.throws(
+    () => collectAllPages(() => ({ nodes: [1], hasNextPage: true, endCursor: null })),
+    /no cursor/,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -632,14 +786,20 @@ test("collectAllPages: a next page promised with no cursor fails closed (throws)
 // ---------------------------------------------------------------------------
 
 test("reviewTriggerForHead: recovers the id recorded for the current head", () => {
-  assert.equal(reviewTriggerForHead({ reviewTrigger: { head: RHEAD, id: TRIGGER_ID } }, RHEAD), TRIGGER_ID);
+  assert.equal(
+    reviewTriggerForHead({ reviewTrigger: { head: RHEAD, id: TRIGGER_ID } }, RHEAD),
+    TRIGGER_ID,
+  );
 });
 
 test("reviewTriggerForHead: does NOT recover a trigger recorded for a different head", () => {
   // A direct push moved the head; the recorded (prior-head) trigger must not be
   // reused, so the wait posts a fresh trigger for the new head instead.
   const priorHead = "b2c3d4e5f60718293645546372819a0bcdef1234";
-  assert.equal(reviewTriggerForHead({ reviewTrigger: { head: priorHead, id: TRIGGER_ID } }, RHEAD), null);
+  assert.equal(
+    reviewTriggerForHead({ reviewTrigger: { head: priorHead, id: TRIGGER_ID } }, RHEAD),
+    null,
+  );
 });
 
 test("reviewTriggerForHead: null on absent, malformed, or id-less records", () => {

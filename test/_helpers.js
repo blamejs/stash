@@ -84,9 +84,24 @@ export async function syncOnce(from, to, bytesOf) {
 // listClaims call throws); this array keeps every mock in step with
 // REQUIRED_BACKEND_METHODS as the contract grows across milestones.
 export const BACKEND_METHODS = [
-  "write", "read", "remove", "stat", "list", "listReconcilable", "stats", "verify",
-  "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
-  "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone",
+  "write",
+  "read",
+  "remove",
+  "stat",
+  "list",
+  "listReconcilable",
+  "stats",
+  "verify",
+  "claim",
+  "restore",
+  "commit",
+  "listClaims",
+  "consumeRead",
+  "isClaimed",
+  "writeTombstone",
+  "hasTombstone",
+  "listTombstones",
+  "removeTombstone",
 ];
 
 // wrapBackend(inner, overrides) -- a complete backend delegating every method to

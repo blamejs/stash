@@ -119,7 +119,9 @@ export class MemoryBackend {
   // guard on it (SPEC.md 6) so two Stash over one store never age-reclaim each other's
   // live reads. Per-instance for MemoryBackend (each instance is a separate store).
   #identity = "mem:" + (MEMORY_INSTANCE_SEQ += 1);
-  get identity() { return this.#identity; }
+  get identity() {
+    return this.#identity;
+  }
 
   // write(id, source, entry) -> Entry. Consumes the async-iterable source chunk by
   // chunk, computing size and the digest as bytes pass. The algorithm rides IN the

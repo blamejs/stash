@@ -130,10 +130,18 @@ function assertStashLayout(root) {
 // The per-subcommand flag specs handed to parseArgs (strict: unknown flags fault).
 const COMMON = { root: { type: "string" }, json: { type: "boolean", default: false } };
 const COMMANDS = {
-  verify: { options: { ...COMMON, repair: { type: "boolean", default: false } }, positionals: 0, run: cmdVerify },
+  verify: {
+    options: { ...COMMON, repair: { type: "boolean", default: false } },
+    positionals: 0,
+    run: cmdVerify,
+  },
   stats: { options: { ...COMMON }, positionals: 0, run: cmdStats },
   prune: { options: { ...COMMON }, positionals: 0, run: cmdPrune },
-  list: { options: { ...COMMON, "include-expired": { type: "boolean", default: false } }, positionals: 0, run: cmdList },
+  list: {
+    options: { ...COMMON, "include-expired": { type: "boolean", default: false } },
+    positionals: 0,
+    run: cmdList,
+  },
   tombstones: { options: { ...COMMON }, positionals: 0, run: cmdTombstones },
   has: { options: { ...COMMON }, positionals: 1, refPositional: true, run: cmdHas },
 };
@@ -168,8 +176,11 @@ async function cmdVerify(stash, flags, _pos, io) {
   if (flags.json) {
     io.out.write(JSON.stringify(report) + "\n");
   } else {
-    const lines = [`scanned ${report.scanned}, findings ${report.findings.length}, repaired ${report.repaired.length}`];
-    for (const f of report.findings) lines.push(`  ${pad(f.kind, 18)} ${f.id === null ? "(unnamed)" : f.id}`);
+    const lines = [
+      `scanned ${report.scanned}, findings ${report.findings.length}, repaired ${report.repaired.length}`,
+    ];
+    for (const f of report.findings)
+      lines.push(`  ${pad(f.kind, 18)} ${f.id === null ? "(unnamed)" : f.id}`);
     io.out.write(lines.join("\n") + "\n");
   }
   // DAMAGE only if damage REMAINS: a dry run (repaired empty) leaves every finding
@@ -184,7 +195,12 @@ async function cmdVerify(stash, flags, _pos, io) {
 
 async function cmdStats(stash, flags, _pos, io) {
   const stats = await stash.stats();
-  render(io, flags.json, `entries ${stats.entries}, bytes ${stats.bytes}, claimed ${stats.claimed}`, stats);
+  render(
+    io,
+    flags.json,
+    `entries ${stats.entries}, bytes ${stats.bytes}, claimed ${stats.claimed}`,
+    stats,
+  );
   return EXIT.OK;
 }
 
@@ -201,9 +217,13 @@ async function cmdList(stash, flags, _pos, io) {
   } else {
     // The human view omits `meta` (caller-supplied opaque hints -- a needless
     // disclosure in a casual table); --json carries it for scripting.
-    const lines = [`${pad("ref", 47)} ${pad("size", 10)} ${pad("created", 26)} ${pad("expires", 26)} reads`];
+    const lines = [
+      `${pad("ref", 47)} ${pad("size", 10)} ${pad("created", 26)} ${pad("expires", 26)} reads`,
+    ];
     for (const e of entries) {
-      lines.push(`${pad(e.id, 47)} ${pad(e.size, 10)} ${pad(whenText(e.createdAt), 26)} ${pad(whenText(e.expiresAt), 26)} ${e.readsLeft === null ? "-" : e.readsLeft}`);
+      lines.push(
+        `${pad(e.id, 47)} ${pad(e.size, 10)} ${pad(whenText(e.createdAt), 26)} ${pad(whenText(e.expiresAt), 26)} ${e.readsLeft === null ? "-" : e.readsLeft}`,
+      );
     }
     io.out.write(lines.join("\n") + "\n");
   }
@@ -216,7 +236,8 @@ async function cmdTombstones(stash, flags, _pos, io) {
     io.out.write(JSON.stringify(graves) + "\n");
   } else {
     const lines = [`${pad("ref", 47)} ${pad("destroyed", 26)} cause`];
-    for (const g of graves) lines.push(`${pad(g.id, 47)} ${pad(whenText(g.destroyedAt), 26)} ${g.cause}`);
+    for (const g of graves)
+      lines.push(`${pad(g.id, 47)} ${pad(whenText(g.destroyedAt), 26)} ${g.cause}`);
     io.out.write(lines.join("\n") + "\n");
   }
   return EXIT.OK;
@@ -257,7 +278,12 @@ export async function main(argv, io) {
   }
   let parsed;
   try {
-    parsed = parseArgs({ args: argv.slice(1), options: spec.options, allowPositionals: true, strict: true });
+    parsed = parseArgs({
+      args: argv.slice(1),
+      options: spec.options,
+      allowPositionals: true,
+      strict: true,
+    });
   } catch {
     // parseArgs throws on an unknown/malformed flag; its message can quote operator
     // input, so it is swallowed and a static usage line is printed instead.
@@ -285,7 +311,9 @@ export async function main(argv, io) {
       return EXIT.USAGE;
     }
     // Fail loud, capability-free: the frozen code, never the ref/meta/path.
-    io.err.write("stashjs: " + (err instanceof StashError ? err.code : "a filesystem or access fault") + "\n");
+    io.err.write(
+      "stashjs: " + (err instanceof StashError ? err.code : "a filesystem or access fault") + "\n",
+    );
     return exitForError(err);
   } finally {
     if (stash) await stash.close();

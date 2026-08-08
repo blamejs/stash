@@ -30,8 +30,14 @@ const EXAMPLES_DIR = join(ROOT, "examples");
 // error) is caught as a missing marker, not a false pass.
 const EXAMPLES = [
   { file: "lifecycle.js", marker: "lifecycle: every step asserted" },
-  { file: "cold-standby.js", marker: "cold-standby: replicated (budgets intact), destroyed, converged" },
-  { file: "permission-flags.js", marker: "permission-flags: nothing in the process can touch the filesystem outside its grant" },
+  {
+    file: "cold-standby.js",
+    marker: "cold-standby: replicated (budgets intact), destroyed, converged",
+  },
+  {
+    file: "permission-flags.js",
+    marker: "permission-flags: nothing in the process can touch the filesystem outside its grant",
+  },
 ];
 
 let failures = 0;
@@ -51,8 +57,16 @@ for (const { file, marker } of EXAMPLES) {
     timeout: 60000,
   });
   const output = (result.stdout || "") + (result.stderr || "");
-  check(file + " exits 0", result.status === 0, "exit " + result.status + (result.stderr ? "\n" + result.stderr : ""));
-  check(file + " prints its success marker", output.includes(marker), "marker not found: " + JSON.stringify(marker));
+  check(
+    file + " exits 0",
+    result.status === 0,
+    "exit " + result.status + (result.stderr ? "\n" + result.stderr : ""),
+  );
+  check(
+    file + " prints its success marker",
+    output.includes(marker),
+    "marker not found: " + JSON.stringify(marker),
+  );
 }
 
 if (failures > 0) {

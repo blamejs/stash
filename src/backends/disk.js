@@ -143,7 +143,12 @@ async function _retryTransient(fn) {
 export async function _writeAll(fh, bytes, position) {
   let written = 0;
   while (written < bytes.length) {
-    const { bytesWritten } = await fh.write(bytes, written, bytes.length - written, position + written);
+    const { bytesWritten } = await fh.write(
+      bytes,
+      written,
+      bytes.length - written,
+      position + written,
+    );
     if (bytesWritten === 0) throw new IntegrityError("store write made no progress");
     written += bytesWritten;
   }
@@ -187,8 +192,7 @@ export function descriptorMatchesName(opened, named) {
 // @enforced-by guard-shape-reinlined
 // @guard-shape \.ino\s*===
 export function sameFile(a, b) {
-  return a.dev === b.dev && a.ino === b.ino &&
-    a.size === b.size && a.birthtimeMs === b.birthtimeMs;
+  return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.birthtimeMs === b.birthtimeMs;
 }
 
 // verifyDescriptorAgainstName(openedStat, path, damaged) -> boolean. The fallback
@@ -275,7 +279,9 @@ export class DiskBackend {
   // canonical value. The resolved path is only a placeholder for a read before init (which
   // the lazy binding avoids). This is a coordination KEY only -- never the containment
   // realpath (#containedDir); no operation trusts a path from here.
-  get identity() { return "disk:" + (this.#realRoot ?? this.#root); }
+  get identity() {
+    return "disk:" + (this.#realRoot ?? this.#root);
+  }
 
   // Lazy, memoized layout creation (constructors do no I/O). A failed
   // init clears the memo so the next operation retries instead of
@@ -555,7 +561,8 @@ export class DiskBackend {
         // handle.
         await _retryTransient(() => rm(join(metaDir, _sidecarName(id)), { recursive: true }));
       } catch (err) {
-        if (_absent(err)) had = false; // already gone (an external / cross-process removal) -- not us
+        if (_absent(err))
+          had = false; // already gone (an external / cross-process removal) -- not us
         else throw err;
       }
       const blobDir = await this.#containedDir("blobs");
@@ -581,7 +588,11 @@ export class DiskBackend {
     assertValid(id);
     const metaDir = await this.#containedDir("meta");
     const sidecarPath = join(metaDir, _sidecarName(id));
-    const fh = await this.#openStored(sidecarPath, () => new RefNotFound(), "sidecar storage shape is damaged");
+    const fh = await this.#openStored(
+      sidecarPath,
+      () => new RefNotFound(),
+      "sidecar storage shape is damaged",
+    );
     try {
       return await this.#readSidecar(fh, id);
     } finally {
@@ -708,7 +719,7 @@ export class DiskBackend {
         sidecarSize = (await lstat(join(metaDir, name))).size; // the sidecar file
       } catch (err) {
         _absent(err); // the sidecar vanished mid-scan -> not a live entry; skip it
-        continue;     // whole, the same tolerance list() holds -- never count it
+        continue; // whole, the same tolerance list() holds -- never count it
       }
       entries += 1;
       bytes += sidecarSize;
@@ -776,7 +787,11 @@ export class DiskBackend {
   // #openStored (O_NOFOLLOW / fstat guard), so verify follows nothing (CWE-59). Reads
   // in bounded chunks off the descriptor.
   async #hashBlob(path, algo) {
-    const fh = await this.#openStored(path, () => new RefNotFound(), "blob storage shape is damaged");
+    const fh = await this.#openStored(
+      path,
+      () => new RefNotFound(),
+      "blob storage shape is damaged",
+    );
     try {
       const hash = digestHash(algo);
       let size = 0;
@@ -899,7 +914,8 @@ export class DiskBackend {
 
     // meta/: each sidecar is an entry -- validate it, then check its blob.
     for (const name of await readdir(metaDir)) {
-      if (await this.#auditOrphanTmp("meta", metaDir, name, now, opts, findings, repaired)) continue; // an in-flight or orphaned sidecar write
+      if (await this.#auditOrphanTmp("meta", metaDir, name, now, opts, findings, repaired))
+        continue; // an in-flight or orphaned sidecar write
       const id = _sidecarId(name);
       if (id === null || !isValid(id)) {
         findings.push({ kind: "foreign-file", id: null });
@@ -964,7 +980,8 @@ export class DiskBackend {
         got = await this.#hashBlob(blobPath, algoOf(entry.digest));
       } catch (err) {
         if (err instanceof RefNotFound) continue; // vanished mid-walk (a claim committed / a drop)
-        if (err instanceof IntegrityError) { // a symlink / non-regular blob, refused
+        if (err instanceof IntegrityError) {
+          // a symlink / non-regular blob, refused
           findings.push({ kind: "digest-mismatch", id });
           if (opts.repair) await this.#condemnIfUnclaimed(id, "digest-mismatch", repaired);
           continue;
@@ -980,7 +997,8 @@ export class DiskBackend {
     // blobs/: orphan blobs (no sidecar), stale .tmp orphans, foreign files.
     const blobScan = await this.#containedDir("blobs");
     for (const name of await readdir(blobScan)) {
-      if (await this.#auditOrphanTmp("blobs", blobScan, name, now, opts, findings, repaired)) continue; // an in-flight push or orphaned .tmp
+      if (await this.#auditOrphanTmp("blobs", blobScan, name, now, opts, findings, repaired))
+        continue; // an in-flight push or orphaned .tmp
       if (!isValid(name)) {
         findings.push({ kind: "foreign-file", id: null });
         if (opts.repair) await this.#discard("blobs", name, "foreign-file", repaired);
@@ -995,9 +1013,15 @@ export class DiskBackend {
       // window of a live push), and a live sidecar/claim is a healthy entry the
       // snapshot missed -- never delete a just-written blob (CWE-367).
       let orphanStat;
-      try { orphanStat = await lstat(join(blobScan, name)); } catch (err) { _absent(err); continue; }
+      try {
+        orphanStat = await lstat(join(blobScan, name));
+      } catch (err) {
+        _absent(err);
+        continue;
+      }
       if (now - orphanStat.mtimeMs < C.AUDIT.TMP_GRACE_MS) continue; // fresh -- a possibly-in-flight push
-      if (await this.#isPresent(join(await this.#containedDir("meta"), _sidecarName(name)))) continue; // sidecar landed after the snapshot
+      if (await this.#isPresent(join(await this.#containedDir("meta"), _sidecarName(name))))
+        continue; // sidecar landed after the snapshot
       if (await this.#isPresent(join(await this.#containedDir("claims"), name))) continue; // claimed after the snapshot
       findings.push({ kind: "orphan-blob", id: name });
       if (opts.repair) await this.#condemn(name, "orphan-blob", repaired);
@@ -1007,15 +1031,22 @@ export class DiskBackend {
     // claim would be data loss; SPEC.md 6 recovery owns resolution).
     const claimsDir = await this.#containedDir("claims");
     for (const name of await readdir(claimsDir)) {
-      if (await this.#auditOrphanTmp("claims", claimsDir, name, now, opts, findings, repaired)) continue; // an orphaned .tmp (claims/ writes none in normal flow)
+      if (await this.#auditOrphanTmp("claims", claimsDir, name, now, opts, findings, repaired))
+        continue; // an orphaned .tmp (claims/ writes none in normal flow)
       if (!isValid(name)) {
         findings.push({ kind: "foreign-file", id: null });
         if (opts.repair) await this.#discard("claims", name, "foreign-file", repaired);
         continue;
       }
       let claimStat;
-      try { claimStat = await lstat(join(claimsDir, name)); } catch (err) { _absent(err); continue; }
-      if (now - claimStat.mtimeMs >= opts.claimTimeoutMs) findings.push({ kind: "stale-claim", id: name });
+      try {
+        claimStat = await lstat(join(claimsDir, name));
+      } catch (err) {
+        _absent(err);
+        continue;
+      }
+      if (now - claimStat.mtimeMs >= opts.claimTimeoutMs)
+        findings.push({ kind: "stale-claim", id: name });
     }
 
     // tombstones/: replication's graves. verify audits the dir for layout damage --
@@ -1023,7 +1054,10 @@ export class DiskBackend {
     // CONTENTS through the same parser tombstones()/prune() use.
     const tombstonesDir = await this.#containedDir("tombstones");
     for (const name of await readdir(tombstonesDir)) {
-      if (await this.#auditOrphanTmp("tombstones", tombstonesDir, name, now, opts, findings, repaired)) continue;
+      if (
+        await this.#auditOrphanTmp("tombstones", tombstonesDir, name, now, opts, findings, repaired)
+      )
+        continue;
       const id = _sidecarId(name);
       if (id === null || !isValid(id)) {
         findings.push({ kind: "foreign-file", id: null });
@@ -1138,9 +1172,14 @@ export class DiskBackend {
   // hostile-sidecar discipline, retargeted to the smaller grave. onAbsent is
   // RefNotFound so listTombstones can tolerate a grave pruned mid-scan.
   async #readTombstone(path, id) {
-    const fh = await this.#openStored(path, () => new RefNotFound(), "tombstone storage shape is damaged");
+    const fh = await this.#openStored(
+      path,
+      () => new RefNotFound(),
+      "tombstone storage shape is damaged",
+    );
     try {
-      if ((await fh.stat()).size > MAX_TOMBSTONE_BYTES) throw new IntegrityError("tombstone exceeds its size bound");
+      if ((await fh.stat()).size > MAX_TOMBSTONE_BYTES)
+        throw new IntegrityError("tombstone exceeds its size bound");
       let parsed;
       try {
         parsed = JSON.parse(await fh.readFile("utf8"));
@@ -1148,7 +1187,8 @@ export class DiskBackend {
         throw new IntegrityError("tombstone is not valid JSON");
       }
       assertTombstoneShape(parsed, IntegrityError);
-      if (!constantTimeEqual(parsed.id, id)) throw new IntegrityError("tombstone identity mismatch");
+      if (!constantTimeEqual(parsed.id, id))
+        throw new IntegrityError("tombstone identity mismatch");
       return parsed;
     } finally {
       await fh.close();

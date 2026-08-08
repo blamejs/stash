@@ -167,7 +167,10 @@ suite("cli", { skip: SANDBOXED }, () => {
     const bad = runCli(["has", hostile, "--root", root]);
     assert.equal(bad.status, 3, "a malformed ref exits with the bad-ref code");
     assert.ok(bad.stderr.includes("EBADREF"), "the frozen code is printed");
-    assert.ok(!bad.stderr.includes(hostile), "the hostile ref is NOT echoed (capability-free error)");
+    assert.ok(
+      !bad.stderr.includes(hostile),
+      "the hostile ref is NOT echoed (capability-free error)",
+    );
   });
 
   test("a missing root is refused, not conjured, and no path is echoed", async () => {
@@ -187,14 +190,25 @@ suite("cli", { skip: SANDBOXED }, () => {
     const metaOnly = freshScratchDir("cli-partial-1");
     mkdirSync(join(metaOnly, "meta"), { recursive: true }); // meta/ present, blobs/ absent
     assert.equal(runCli(["stats", "--root", metaOnly]).status, 2, "meta/-only is a usage error");
-    assert.ok(!readdirSync(metaOnly).includes("blobs"), "the CLI did not create the missing blobs/ dir");
+    assert.ok(
+      !readdirSync(metaOnly).includes("blobs"),
+      "the CLI did not create the missing blobs/ dir",
+    );
 
     // A layout missing ONLY tombstones/ (three of four dirs) is still refused -- a
     // subset check that stopped at blobs/+meta/ would wrongly accept this.
     const noTombstones = freshScratchDir("cli-partial-2");
-    for (const d of ["blobs", "meta", "claims"]) mkdirSync(join(noTombstones, d), { recursive: true });
-    assert.equal(runCli(["stats", "--root", noTombstones]).status, 2, "a layout missing tombstones/ is refused");
-    assert.ok(!readdirSync(noTombstones).includes("tombstones"), "the CLI did not create the missing tombstones/ dir");
+    for (const d of ["blobs", "meta", "claims"])
+      mkdirSync(join(noTombstones, d), { recursive: true });
+    assert.equal(
+      runCli(["stats", "--root", noTombstones]).status,
+      2,
+      "a layout missing tombstones/ is refused",
+    );
+    assert.ok(
+      !readdirSync(noTombstones).includes("tombstones"),
+      "the CLI did not create the missing tombstones/ dir",
+    );
   });
 
   test("a malformed ref is refused (EBADREF) BEFORE the root is opened -- even a missing root", () => {
@@ -241,7 +255,9 @@ suite("cli", { skip: SANDBOXED }, () => {
     assert.equal(cmd.status, 2);
     assert.ok(!cmd.stderr.includes("frobnicate"), "the unknown command is not echoed");
 
-    const root = await seed(async (s) => { await s.push("x"); });
+    const root = await seed(async (s) => {
+      await s.push("x");
+    });
     const flag = runCli(["stats", "--root", root, "--nonsense"]);
     assert.equal(flag.status, 2);
     assert.ok(!flag.stderr.includes("nonsense"), "the unknown flag is not echoed");
@@ -256,7 +272,10 @@ suite("cli", { skip: SANDBOXED }, () => {
       assert.equal(cmd.status, 2, name + " exits with a usage error");
       assert.ok(
         cmd.stderr.includes("unknown command"),
-        name + " is reported as an unknown command, not parsed as a known one (got: " + JSON.stringify(cmd.stderr) + ")",
+        name +
+          " is reported as an unknown command, not parsed as a known one (got: " +
+          JSON.stringify(cmd.stderr) +
+          ")",
       );
       assert.ok(!cmd.stderr.includes(name), name + " is not echoed");
     }
@@ -282,19 +301,33 @@ suite("cli", { skip: SANDBOXED }, () => {
   });
 
   test("the CLI holds the permission posture: a granted root inspects, no wider grant needed", async () => {
-    const root = await seed(async (s) => { await s.push("inside the grant"); });
+    const root = await seed(async (s) => {
+      await s.push("inside the grant");
+    });
     // Spawn the CLI itself under --permission, granting read on the install dir (to
     // load the module graph) plus read/write on the stash root -- the same grant the
     // library requires. A stats against the granted root must succeed.
     const appRoot = dirname(dirname(CLI)); // repo root (module graph)
-    const r = spawnSync(process.execPath, [
-      "--permission",
-      "--allow-fs-read=" + appRoot,
-      "--allow-fs-read=" + root,
-      "--allow-fs-write=" + root,
-      CLI, "stats", "--root", root, "--json",
-    ], { encoding: "utf8" });
-    assert.equal(r.status, 0, "stats under --permission on the granted root succeeds: " + (r.stderr || ""));
+    const r = spawnSync(
+      process.execPath,
+      [
+        "--permission",
+        "--allow-fs-read=" + appRoot,
+        "--allow-fs-read=" + root,
+        "--allow-fs-write=" + root,
+        CLI,
+        "stats",
+        "--root",
+        root,
+        "--json",
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(
+      r.status,
+      0,
+      "stats under --permission on the granted root succeeds: " + (r.stderr || ""),
+    );
     assert.equal(JSON.parse(r.stdout).entries, 1);
   });
 });

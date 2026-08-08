@@ -76,5 +76,8 @@ test("an absent unimplemented option does not trip the check", () => {
 test("oneOf accepts a member and refuses a non-member, naming the label", () => {
   assert.equal(oneOf("restore", "new Stash: onPopFailure", ["restore", "burn"]), "restore");
   assert.throws(() => oneOf("nope", "new Stash: onPopFailure", ["restore", "burn"]), TypeError);
-  assert.throws(() => oneOf("nope", "new Stash: onPopFailure", ["restore", "burn"]), /new Stash: onPopFailure/);
+  assert.throws(
+    () => oneOf("nope", "new Stash: onPopFailure", ["restore", "burn"]),
+    /new Stash: onPopFailure/,
+  );
 });

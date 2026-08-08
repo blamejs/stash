@@ -97,8 +97,12 @@ function readVersion() {
 function gitClean() {
   const rv = capture("git", ["status", "--porcelain"]);
   if (rv.status !== 0) {
-    throw new Error("git status --porcelain failed (status " + rv.status + ")" +
-      (rv.stderr ? ": " + rv.stderr : ""));
+    throw new Error(
+      "git status --porcelain failed (status " +
+        rv.status +
+        ")" +
+        (rv.stderr ? ": " + rv.stderr : ""),
+    );
   }
   return rv.stdout === "";
 }
@@ -108,8 +112,12 @@ function gitClean() {
 function currentBranch() {
   const rv = capture("git", ["branch", "--show-current"]);
   if (rv.status !== 0) {
-    throw new Error("git branch --show-current failed (status " + rv.status + ")" +
-      (rv.stderr ? ": " + rv.stderr : ""));
+    throw new Error(
+      "git branch --show-current failed (status " +
+        rv.status +
+        ")" +
+        (rv.stderr ? ": " + rv.stderr : ""),
+    );
   }
   return rv.stdout;
 }
@@ -155,9 +163,11 @@ function ok(msg) {
 function verifyCommitSignature() {
   const rv = capture("git", ["verify-commit", "HEAD"]);
   if (rv.status !== 0) {
-    throw new Error("HEAD commit signature is not Good -- check SSH signing setup " +
-      "(commit.gpgsign=true + gpg.format=ssh + allowed_signers populated)." +
-      (rv.stderr ? "\n" + rv.stderr : ""));
+    throw new Error(
+      "HEAD commit signature is not Good -- check SSH signing setup " +
+        "(commit.gpgsign=true + gpg.format=ssh + allowed_signers populated)." +
+        (rv.stderr ? "\n" + rv.stderr : ""),
+    );
   }
   const sig = capture("git", ["log", "-1", "--pretty=%h %G? %GS"]);
   console.log("signature: " + sig.stdout);
@@ -171,16 +181,24 @@ function cmdStatus() {
   console.log("package version:  " + readVersion());
   console.log("branch:           " + (currentBranch() || "(detached HEAD)"));
   console.log("clean:            " + gitClean());
-  console.log("release-notes:    " +
-    (readNotesPresent(readVersion()) ? "present" : "missing (release-notes/v" + readVersion() + ".json)"));
+  console.log(
+    "release-notes:    " +
+      (readNotesPresent(readVersion())
+        ? "present"
+        : "missing (release-notes/v" + readVersion() + ".json)"),
+  );
   let smokeLine = "(no run recorded -- npm run smoke)";
   try {
     const st = statSync(join(ROOT, ".test-output", "smoke.log"));
     smokeLine = st.mtime.toISOString() + " (.test-output/smoke.log)";
-  } catch { /* never run */ }
+  } catch {
+    /* never run */
+  }
   console.log("last smoke:       " + smokeLine);
   const remote = capture("git", ["remote"]).stdout;
-  console.log("remote:           " + (remote || "(none -- " + REMOTE_ONLY.join("/") + " inactive)"));
+  console.log(
+    "remote:           " + (remote || "(none -- " + REMOTE_ONLY.join("/") + " inactive)"),
+  );
   const tag = capture("git", ["tag", "-l", "v" + readVersion()]).stdout;
   console.log("tag v" + readVersion() + ":       " + (tag ? "exists" : "(not yet tagged)"));
 }
@@ -293,9 +311,14 @@ function recoverReviewTrigger(headSha) {
 // it (the commit is the reviewed PR's merge). null when no valid record exists
 // -- a standalone `tag` run then reads the working-tree version and tags HEAD.
 export function tagFromState(state) {
-  if (state && typeof state === "object" &&
-      typeof state.version === "string" && /^\d+\.\d+\.\d+$/.test(state.version) &&
-      typeof state.mergeSha === "string" && /^[0-9a-f]{7,40}$/.test(state.mergeSha)) {
+  if (
+    state &&
+    typeof state === "object" &&
+    typeof state.version === "string" &&
+    /^\d+\.\d+\.\d+$/.test(state.version) &&
+    typeof state.mergeSha === "string" &&
+    /^[0-9a-f]{7,40}$/.test(state.mergeSha)
+  ) {
     return { version: state.version, target: state.mergeSha };
   }
   return null;
@@ -319,7 +342,13 @@ function cmdTag() {
   const tagArgs = ["tag", "-s", tag, "-m", tag];
   if (target) {
     tagArgs.push(target);
-    console.log("tagging " + tag + " on the recorded merge commit " + target.slice(0, 12) + " (version + commit pinned from the release PR)");
+    console.log(
+      "tagging " +
+        tag +
+        " on the recorded merge commit " +
+        target.slice(0, 12) +
+        " (version + commit pinned from the release PR)",
+    );
   }
   run("git", tagArgs);
 
@@ -328,19 +357,31 @@ function cmdTag() {
   const verify = capture("git", ["tag", "-v", tag]);
   if (verify.stderr.indexOf("Good") === -1 && verify.stdout.indexOf("Good") === -1) {
     run("git", ["tag", "-d", tag], { allowFail: true });
-    throw new Error("`git tag -v " + tag + "` did not report a Good signature -- " +
-      "check SSH signing setup (tag.gpgsign=true + gpg.format=ssh + " +
-      "allowed_signers populated). The local tag was removed.\n" +
-      (verify.stderr || verify.stdout));
+    throw new Error(
+      "`git tag -v " +
+        tag +
+        "` did not report a Good signature -- " +
+        "check SSH signing setup (tag.gpgsign=true + gpg.format=ssh + " +
+        "allowed_signers populated). The local tag was removed.\n" +
+        (verify.stderr || verify.stdout),
+    );
   }
   // The tag is signed and verified; the recorded merge commit has served its
   // purpose, so retire the state file (a stale one must never mis-pin the next
   // release's tag).
   if (target) {
-    try { unlinkSync(releaseStatePath()); } catch { /* already gone */ }
+    try {
+      unlinkSync(releaseStatePath());
+    } catch {
+      /* already gone */
+    }
   }
-  ok("annotated signed tag " + tag + " created (signature: Good)" +
-    (target ? " on merge commit " + target.slice(0, 12) : ""));
+  ok(
+    "annotated signed tag " +
+      tag +
+      " created (signature: Good)" +
+      (target ? " on merge commit " + target.slice(0, 12) : ""),
+  );
 }
 
 function requireRemote() {
@@ -364,8 +405,15 @@ function sleep(ms) {
 function ghJson(args) {
   const rv = capture("gh", args);
   if (rv.status !== 0) {
-    throw new Error("gh " + args.join(" ") + " failed (exit " + rv.status + ")" +
-      (rv.stderr ? ": " + rv.stderr : "") + " -- an unreadable result is not an empty one");
+    throw new Error(
+      "gh " +
+        args.join(" ") +
+        " failed (exit " +
+        rv.status +
+        ")" +
+        (rv.stderr ? ": " + rv.stderr : "") +
+        " -- an unreadable result is not an empty one",
+    );
   }
   if (!rv.stdout) throw new Error("gh " + args.join(" ") + " returned nothing");
   return JSON.parse(rv.stdout);
@@ -419,8 +467,13 @@ function repoSlug() {
     const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
     const url = (pkg.repository && pkg.repository.url) || "";
     const m = url.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
-    if (m) { owner = m[1]; name = m[2]; }
-  } catch { /* fall back to defaults */ }
+    if (m) {
+      owner = m[1];
+      name = m[2];
+    }
+  } catch {
+    /* fall back to defaults */
+  }
   return { owner, name };
 }
 
@@ -449,8 +502,10 @@ export function mergeArgs(branch, headSha) {
 // query is the non-array that throws.
 export function unresolvedThreads(nodes) {
   if (!Array.isArray(nodes)) {
-    throw new TypeError("unresolvedThreads requires the reviewThreads node array -- " +
-      "an unreadable result is not an empty one");
+    throw new TypeError(
+      "unresolvedThreads requires the reviewThreads node array -- " +
+        "an unreadable result is not an empty one",
+    );
   }
   return nodes
     .filter((t) => t && t.isResolved === false)
@@ -480,14 +535,18 @@ export function collectAllPages(fetchPage) {
   for (let guard = 0; guard < 10000; guard++) {
     const page = fetchPage(cursor);
     if (!page || !Array.isArray(page.nodes)) {
-      throw new Error("a paginated page returned no readable nodes -- refusing to " +
-        "treat a partial result as the complete set");
+      throw new Error(
+        "a paginated page returned no readable nodes -- refusing to " +
+          "treat a partial result as the complete set",
+      );
     }
     for (const n of page.nodes) all.push(n);
     if (!page.hasNextPage) return all;
     if (!page.endCursor) {
-      throw new Error("a paginated page reported a next page with no cursor -- " +
-        "cannot continue safely, so refusing to clear on a partial set");
+      throw new Error(
+        "a paginated page reported a next page with no cursor -- " +
+          "cannot continue safely, so refusing to clear on a partial set",
+      );
     }
     cursor = page.endCursor;
   }
@@ -504,13 +563,25 @@ export function collectAllPages(fetchPage) {
 function fetchUnresolvedThreads(prNum) {
   const slug = repoSlug();
   const nodes = collectAllPages((cursor) => {
-    const after = cursor ? ", after:\"" + cursor + "\"" : "";
-    const conn = ghJson(["api", "graphql", "-f",
-      "query=query { repository(owner:\"" + slug.owner + "\",name:\"" + slug.name +
-      "\") { pullRequest(number:" + prNum + ") { reviewThreads(first:100" + after + ") { " +
-      "pageInfo { hasNextPage endCursor } nodes { " +
-      "id isResolved path line comments(first:1) { nodes { author{login} body } } } } } } }",
-      "--jq", ".data.repository.pullRequest.reviewThreads"]);
+    const after = cursor ? ', after:"' + cursor + '"' : "";
+    const conn = ghJson([
+      "api",
+      "graphql",
+      "-f",
+      'query=query { repository(owner:"' +
+        slug.owner +
+        '",name:"' +
+        slug.name +
+        '") { pullRequest(number:' +
+        prNum +
+        ") { reviewThreads(first:100" +
+        after +
+        ") { " +
+        "pageInfo { hasNextPage endCursor } nodes { " +
+        "id isResolved path line comments(first:1) { nodes { author{login} body } } } } } } }",
+      "--jq",
+      ".data.repository.pullRequest.reviewThreads",
+    ]);
     return {
       nodes: conn && conn.nodes,
       hasNextPage: !!(conn && conn.pageInfo && conn.pageInfo.hasNextPage),
@@ -551,14 +622,25 @@ export function reviewerSignalsReview(surfaces, headSha, triggerId) {
   const comments = s.comments || [];
   const headPrefix = headSha.slice(0, 10);
   if (reviews.some((r) => r && isReviewBot(r.author) && r.commit === headSha)) return true;
-  if (comments.some((c) => isReviewBot(c && c.author) &&
-    typeof (c && c.body) === "string" && c.body.indexOf(headPrefix) !== -1)) return true;
+  if (
+    comments.some(
+      (c) =>
+        isReviewBot(c && c.author) &&
+        typeof (c && c.body) === "string" &&
+        c.body.indexOf(headPrefix) !== -1,
+    )
+  )
+    return true;
   // (3) A bot thumbs-up on THE trigger comment the driver created for this head.
   if (triggerId == null) return false;
-  return comments.some((c) =>
-    c && c.databaseId != null && String(c.databaseId) === String(triggerId) &&
-    Array.isArray(c.reactions) && c.reactions.some((rx) =>
-      rx && rx.content === "THUMBS_UP" && isReviewBot(rx.login)));
+  return comments.some(
+    (c) =>
+      c &&
+      c.databaseId != null &&
+      String(c.databaseId) === String(triggerId) &&
+      Array.isArray(c.reactions) &&
+      c.reactions.some((rx) => rx && rx.content === "THUMBS_UP" && isReviewBot(rx.login)),
+  );
 }
 
 // reviewerReviewedHead(prNum, headSha, triggerId) -- gather the review surfaces
@@ -571,24 +653,51 @@ export function reviewerSignalsReview(surfaces, headSha, triggerId) {
 // (fetchUnresolvedThreads). ghJson fails closed to null on a gh error.
 function reviewerReviewedHead(prNum, headSha, triggerId) {
   const slug = repoSlug();
-  const reviews = (ghJson(["api", "graphql", "-f",
-    "query=query { repository(owner:\"" + slug.owner + "\",name:\"" + slug.name +
-    "\") { pullRequest(number:" + prNum + ") { reviews(last:100) { nodes { " +
-    "author{login} commit{oid} } } } } }",
-    "--jq", ".data.repository.pullRequest.reviews.nodes"]) || [])
-    .map((r) => ({ author: r && r.author && r.author.login, commit: r && r.commit && r.commit.oid }));
-  const comments = (ghJson(["api", "graphql", "-f",
-    "query=query { repository(owner:\"" + slug.owner + "\",name:\"" + slug.name +
-    "\") { pullRequest(number:" + prNum + ") { comments(last:60) { nodes { " +
-    "databaseId body author{login} reactions(first:30){ nodes { content user{login} } } } } } } }",
-    "--jq", ".data.repository.pullRequest.comments.nodes"]) || [])
-    .map((c) => ({
-      databaseId: c && c.databaseId,
-      author: c && c.author && c.author.login,
-      body: c && c.body,
-      reactions: ((c && c.reactions && c.reactions.nodes) || [])
-        .map((rx) => ({ content: rx && rx.content, login: rx && rx.user && rx.user.login })),
-    }));
+  const reviews = (
+    ghJson([
+      "api",
+      "graphql",
+      "-f",
+      'query=query { repository(owner:"' +
+        slug.owner +
+        '",name:"' +
+        slug.name +
+        '") { pullRequest(number:' +
+        prNum +
+        ") { reviews(last:100) { nodes { " +
+        "author{login} commit{oid} } } } } }",
+      "--jq",
+      ".data.repository.pullRequest.reviews.nodes",
+    ]) || []
+  ).map((r) => ({
+    author: r && r.author && r.author.login,
+    commit: r && r.commit && r.commit.oid,
+  }));
+  const comments = (
+    ghJson([
+      "api",
+      "graphql",
+      "-f",
+      'query=query { repository(owner:"' +
+        slug.owner +
+        '",name:"' +
+        slug.name +
+        '") { pullRequest(number:' +
+        prNum +
+        ") { comments(last:60) { nodes { " +
+        "databaseId body author{login} reactions(first:30){ nodes { content user{login} } } } } } } }",
+      "--jq",
+      ".data.repository.pullRequest.comments.nodes",
+    ]) || []
+  ).map((c) => ({
+    databaseId: c && c.databaseId,
+    author: c && c.author && c.author.login,
+    body: c && c.body,
+    reactions: ((c && c.reactions && c.reactions.nodes) || []).map((rx) => ({
+      content: rx && rx.content,
+      login: rx && rx.user && rx.user.login,
+    })),
+  }));
   return reviewerSignalsReview({ reviews, comments }, headSha, triggerId);
 }
 
@@ -609,8 +718,13 @@ function waitForReviewOnHead(branch, prNum, headSha) {
   // stalling for a duplicate nudge. Head-matched, so a prior head's trigger is
   // never revived (reviewTriggerForHead).
   let triggerId = recoverReviewTrigger(headSha);
-  console.log("waiting for the reviewer to review PR #" + prNum + " head " +
-    headSha.slice(0, 12) + " before the thread gate (up to 10m; it reviews a bit after CI)...");
+  console.log(
+    "waiting for the reviewer to review PR #" +
+      prNum +
+      " head " +
+      headSha.slice(0, 12) +
+      " before the thread gate (up to 10m; it reviews a bit after CI)...",
+  );
   while (waited <= budgetMs) {
     if (reviewerReviewedHead(prNum, headSha, triggerId)) {
       ok("reviewer has reviewed the current head -- the thread gate now sees its findings");
@@ -627,29 +741,52 @@ function waitForReviewOnHead(branch, prNum, headSha) {
     sleep(stepMs);
     waited += stepMs;
   }
-  throw new Error("the reviewer has not reviewed PR #" + prNum + " head after 10m -- it reviews " +
-    "asynchronously; a late finding must not be outrun by the merge. Re-run release.js watch once " +
-    "it posts, or rerun with --no-review ONLY if the reviewer is confirmed disabled.");
+  throw new Error(
+    "the reviewer has not reviewed PR #" +
+      prNum +
+      " head after 10m -- it reviews " +
+      "asynchronously; a late finding must not be outrun by the merge. Re-run release.js watch once " +
+      "it posts, or rerun with --no-review ONLY if the reviewer is confirmed disabled.",
+  );
 }
 
 // printUnresolvedThreads(unresolved) -- surface each blocking thread with the
 // file:line, reviewer, first finding line, and the exact resolve mutation, so
 // a blocked merge names its cause instead of an opaque state.
 function printUnresolvedThreads(unresolved) {
-  console.log("\n" + unresolved.length + " unresolved review thread(s) block the merge " +
-    "(main-protection requires every thread resolved):\n");
+  console.log(
+    "\n" +
+      unresolved.length +
+      " unresolved review thread(s) block the merge " +
+      "(main-protection requires every thread resolved):\n",
+  );
   unresolved.forEach((t, i) => {
     const lines = (t.body || "").split("\n");
     let firstLine = "(no text)";
-    for (const l of lines) { if (l.trim().length > 0) { firstLine = l; break; } }
-    firstLine = firstLine.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/[*_`#>]/g, "").trim();
-    console.log("  " + (i + 1) + ". [" + t.author + "] " + t.path +
-      (t.line != null ? ":" + t.line : ""));
+    for (const l of lines) {
+      if (l.trim().length > 0) {
+        firstLine = l;
+        break;
+      }
+    }
+    firstLine = firstLine
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+      .replace(/[*_`#>]/g, "")
+      .trim();
+    console.log(
+      "  " + (i + 1) + ". [" + t.author + "] " + t.path + (t.line != null ? ":" + t.line : ""),
+    );
     console.log("     " + firstLine.slice(0, 160));
-    console.log("     resolve: gh api graphql -f query='mutation { resolveReviewThread(" +
-      "input:{threadId:\"" + t.id + "\"}){ thread { isResolved } } }'");
+    console.log(
+      "     resolve: gh api graphql -f query='mutation { resolveReviewThread(" +
+        'input:{threadId:"' +
+        t.id +
+        "\"}){ thread { isResolved } } }'",
+    );
   });
-  console.log("\nFix each finding at the root in a NEW commit via release.js push-fix (never dismiss),");
+  console.log(
+    "\nFix each finding at the root in a NEW commit via release.js push-fix (never dismiss),",
+  );
   console.log("then run the resolve command above for its thread. Re-run: release.js watch");
 }
 
@@ -722,10 +859,7 @@ export function syncComposeImageTag(compose, version) {
   if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) {
     throw new TypeError("syncComposeImageTag requires an x.y.z version, got '" + version + "'");
   }
-  return compose.replace(
-    /(stash-wiki:(?:\$\{WIKI_IMAGE_TAG:-)?)\d+\.\d+\.\d+/g,
-    "$1" + version,
-  );
+  return compose.replace(/(stash-wiki:(?:\$\{WIKI_IMAGE_TAG:-)?)\d+\.\d+\.\d+/g, "$1" + version);
 }
 
 // prepare [version] -- start a bump-only cut on a clean, synced main:
@@ -767,10 +901,21 @@ function cmdPrepare() {
     const composePath = join(ROOT, "examples", "wiki", composeName);
     writeFileSync(composePath, syncComposeImageTag(readFileSync(composePath, "utf8"), next));
   }
-  ok("version " + current + " -> " + next + " on branch release-v" + next +
-    " (package.json + package-lock.json + docs-site composes)");
+  ok(
+    "version " +
+      current +
+      " -> " +
+      next +
+      " on branch release-v" +
+      next +
+      " (package.json + package-lock.json + docs-site composes)",
+  );
   if (!readNotesPresent(next)) {
-    console.log("next: write " + releaseNotesPath(next) + ", then regen -> commit -> push -> watch -> merge -> tag -> publish");
+    console.log(
+      "next: write " +
+        releaseNotesPath(next) +
+        ", then regen -> commit -> push -> watch -> merge -> tag -> publish",
+    );
   }
 }
 
@@ -781,16 +926,27 @@ function cmdPush() {
   section("push");
   requireRemote();
   const branch = currentBranch();
-  if (!branch || branch === "main") throw new Error("push runs from a release/fix branch, not main");
+  if (!branch || branch === "main")
+    throw new Error("push runs from a release/fix branch, not main");
   if (!gitClean()) throw new Error("push requires a committed tree (run: release.js commit)");
   const version = readVersion();
   run("git", ["push", "-u", "origin", branch]);
-  const existing = capture("gh", ["pr", "view", branch, "--json", "state", "--jq", ".state"]).stdout;
+  const existing = capture("gh", [
+    "pr",
+    "view",
+    branch,
+    "--json",
+    "state",
+    "--jq",
+    ".state",
+  ]).stdout;
   if (existing !== "OPEN") {
     // The notes title a RELEASE branch; any other branch titles from its commit.
     const isReleaseBranch = branch === "release-v" + version;
     const notes = isReleaseBranch && readNotesPresent(version) ? readReleaseNotes(version) : null;
-    const title = notes ? version + " \u2014 " + notes.headline : capture("git", ["log", "-1", "--format=%s"]).stdout;
+    const title = notes
+      ? version + " \u2014 " + notes.headline
+      : capture("git", ["log", "-1", "--format=%s"]).stdout;
     const body = notes ? notes.summary : "See the commit message.";
     run("gh", ["pr", "create", "--title", title, "--body", body]);
   }
@@ -810,7 +966,8 @@ function cmdPushFix() {
   const mFlag = process.argv.indexOf("-m");
   const message = mFlag !== -1 ? process.argv[mFlag + 1] : null;
   if (!message) throw new Error('push-fix requires -m "<root-cause fix message>"');
-  if (gitClean()) throw new Error("nothing to commit -- push-fix expects the fix in the working tree");
+  if (gitClean())
+    throw new Error("nothing to commit -- push-fix expects the fix in the working tree");
   run("node", ["scripts/smoke.js"]);
   run("git", ["add", "-A"]);
   run("git", ["commit", "-m", message]);
@@ -850,12 +1007,19 @@ export function checksVerdict(rollup) {
     if (c && c.state != null) {
       const state = String(c.state).toUpperCase();
       if (state === "SUCCESS") continue;
-      if (state === "PENDING" || state === "EXPECTED") { pending += 1; continue; }
+      if (state === "PENDING" || state === "EXPECTED") {
+        pending += 1;
+        continue;
+      }
       blocking.push(name + " (" + state + ")");
     } else if (c && (c.status != null || c.conclusion != null)) {
-      if (String(c.status || "").toUpperCase() !== "COMPLETED") { pending += 1; continue; }
+      if (String(c.status || "").toUpperCase() !== "COMPLETED") {
+        pending += 1;
+        continue;
+      }
       const conclusion = String(c.conclusion || "").toUpperCase();
-      if (conclusion === "SUCCESS" || conclusion === "SKIPPED" || conclusion === "NEUTRAL") continue;
+      if (conclusion === "SUCCESS" || conclusion === "SKIPPED" || conclusion === "NEUTRAL")
+        continue;
       blocking.push(name + " (" + (conclusion || "completed without a conclusion") + ")");
     } else {
       blocking.push(name + " (unreadable rollup entry)");
@@ -875,7 +1039,8 @@ function cmdWatch() {
   section("watch");
   requireRemote();
   const branch = currentBranch();
-  if (!branch || branch === "main") throw new Error("watch runs from the branch whose PR is in flight");
+  if (!branch || branch === "main")
+    throw new Error("watch runs from the branch whose PR is in flight");
   const skipReview = process.argv.indexOf("--no-review") !== -1;
   if (skipReview) console.log("!! review gate SKIPPED by explicit --no-review");
   // Poll the required checks until every one passes the whitelist. Fail
@@ -885,7 +1050,13 @@ function cmdWatch() {
   let headSha = "";
   let checksGreen = false;
   for (let i = 0; i < 90; i++) {
-    const pr = ghJson(["pr", "view", branch, "--json", "number,state,headRefOid,statusCheckRollup"]);
+    const pr = ghJson([
+      "pr",
+      "view",
+      branch,
+      "--json",
+      "number,state,headRefOid,statusCheckRollup",
+    ]);
     prNum = pr.number;
     if (pr.state === "MERGED") {
       ok("PR already merged -- next: release.js merge (records the tag target)");
@@ -895,10 +1066,16 @@ function cmdWatch() {
     headSha = pr.headRefOid;
     const checks = checksVerdict(pr.statusCheckRollup);
     if (checks.blocking.length > 0) {
-      throw new Error("checks failed: " + checks.blocking.join(", ") +
-        " -- fix at the root, then release.js push-fix");
+      throw new Error(
+        "checks failed: " +
+          checks.blocking.join(", ") +
+          " -- fix at the root, then release.js push-fix",
+      );
     }
-    if (checks.green) { checksGreen = true; break; }
+    if (checks.green) {
+      checksGreen = true;
+      break;
+    }
     console.log("  checks running (" + (i + 1) + ")...");
     sleep(20000);
   }
@@ -919,7 +1096,9 @@ function cmdWatch() {
     printUnresolvedThreads(unresolved);
     process.exit(3);
   }
-  ok("reviewer has reviewed the head and zero unresolved threads remain -- next: release.js merge (re-checks)");
+  ok(
+    "reviewer has reviewed the head and zero unresolved threads remain -- next: release.js merge (re-checks)",
+  );
 }
 
 // merge -- the mutating half of the gated flow watch does not touch: re-check
@@ -932,18 +1111,24 @@ function cmdMerge() {
   section("merge");
   requireRemote();
   const branch = currentBranch();
-  if (!branch || branch === "main") throw new Error("merge runs from the branch whose PR is in flight");
+  if (!branch || branch === "main")
+    throw new Error("merge runs from the branch whose PR is in flight");
   const skipReview = process.argv.indexOf("--no-review") !== -1;
   if (skipReview) console.log("!! review gate SKIPPED by explicit --no-review");
   // The version this release branch carries, read BEFORE any sync of main: a
   // concurrent PR that bumps package.json on main after our merge must not
   // change the version this PR's tag records.
   const releaseVersion = readVersion();
-  const pr = ghJson(["pr", "view", branch,
-    "--json", "number,state,headRefOid,mergeStateStatus,mergeable,mergeCommit"]);
+  const pr = ghJson([
+    "pr",
+    "view",
+    branch,
+    "--json",
+    "number,state,headRefOid,mergeStateStatus,mergeable,mergeCommit",
+  ]);
   const prNum = pr.number;
   let merged = pr.state === "MERGED";
-  let mergeSha = merged ? ((pr.mergeCommit && pr.mergeCommit.oid) || "") : "";
+  let mergeSha = merged ? (pr.mergeCommit && pr.mergeCommit.oid) || "" : "";
   if (!merged) {
     if (pr.state !== "OPEN") throw new Error("PR is " + pr.state);
     const headSha = pr.headRefOid;
@@ -954,8 +1139,13 @@ function cmdMerge() {
       const unresolved = fetchUnresolvedThreads(prNum);
       if (unresolved.length > 0) {
         printUnresolvedThreads(unresolved);
-        throw new Error("refusing to merge PR #" + prNum + " -- " +
-          unresolved.length + " unresolved review thread(s)");
+        throw new Error(
+          "refusing to merge PR #" +
+            prNum +
+            " -- " +
+            unresolved.length +
+            " unresolved review thread(s)",
+        );
       }
     }
     // Re-read the merge state; CLEAN + MERGEABLE is the whitelist. A thread
@@ -964,8 +1154,15 @@ function cmdMerge() {
     // itself requires required_review_thread_resolution satisfied).
     const state = ghJson(["pr", "view", branch, "--json", "mergeStateStatus,mergeable"]);
     if (state.mergeStateStatus !== "CLEAN" || state.mergeable !== "MERGEABLE") {
-      throw new Error("PR #" + prNum + " not mergeable (state=" + state.mergeStateStatus +
-        " mergeable=" + state.mergeable + ") -- resolve the blocker, then re-run release.js merge");
+      throw new Error(
+        "PR #" +
+          prNum +
+          " not mergeable (state=" +
+          state.mergeStateStatus +
+          " mergeable=" +
+          state.mergeable +
+          ") -- resolve the blocker, then re-run release.js merge",
+      );
     }
     // `gh pr merge` does NOT guarantee an immediate merge: on a base branch
     // with a merge queue it ADDS the PR to the queue and returns success,
@@ -974,7 +1171,9 @@ function cmdMerge() {
     // to the reviewed head, then poll -- only an observed state === "MERGED"
     // sets merged=true and reads the merge commit.
     run("gh", mergeArgs(branch, headSha));
-    console.log("  merge requested; waiting for state MERGED (a queued merge lands asynchronously)...");
+    console.log(
+      "  merge requested; waiting for state MERGED (a queued merge lands asynchronously)...",
+    );
     for (let i = 0; i < 90; i++) {
       const p = ghJson(["pr", "view", branch, "--json", "state,mergeCommit"]);
       if (p.state === "MERGED") {
@@ -994,9 +1193,17 @@ function cmdMerge() {
   // THIS commit even if a concurrent PR has since advanced main past it.
   if (mergeSha) {
     writeFileSync(releaseStatePath(), JSON.stringify({ version: releaseVersion, mergeSha }) + "\n");
-    console.log("recorded merge commit " + mergeSha.slice(0, 12) + " and version " + releaseVersion + " for tag");
+    console.log(
+      "recorded merge commit " +
+        mergeSha.slice(0, 12) +
+        " and version " +
+        releaseVersion +
+        " for tag",
+    );
   } else {
-    console.log("!! could not read the PR merge commit -- tag will fall back to HEAD; verify it before publish");
+    console.log(
+      "!! could not read the PR merge commit -- tag will fall back to HEAD; verify it before publish",
+    );
   }
   ok("merged; main synced; branch " + branch + " removed -- next: release.js tag");
 }
@@ -1022,22 +1229,44 @@ function cmdPublish() {
   let concluded = false;
   for (let i = 0; i < 60; i++) {
     if (runId === null) {
-      const runs = ghJson(["run", "list", "--workflow", "npm-publish.yml", "--limit", "5",
-        "--json", "databaseId,headSha,status,conclusion,event"]);
-      const match = runs.find(function (r) { return r.headSha === tagSha && r.event === "push"; });
+      const runs = ghJson([
+        "run",
+        "list",
+        "--workflow",
+        "npm-publish.yml",
+        "--limit",
+        "5",
+        "--json",
+        "databaseId,headSha,status,conclusion,event",
+      ]);
+      const match = runs.find(function (r) {
+        return r.headSha === tagSha && r.event === "push";
+      });
       if (match) runId = match.databaseId;
     }
     if (runId !== null) {
       const st = ghJson(["run", "view", String(runId), "--json", "status,conclusion"]);
       if (st.status === "completed") {
         if (st.conclusion !== "success") {
-          throw new Error("publish run " + runId + " concluded " + st.conclusion + " -- read its log, fix at the root, cut the next patch");
+          throw new Error(
+            "publish run " +
+              runId +
+              " concluded " +
+              st.conclusion +
+              " -- read its log, fix at the root, cut the next patch",
+          );
         }
         concluded = true;
         break;
       }
     }
-    console.log("  publish run " + (runId === null ? "not visible yet" : runId + " in progress") + " (" + (i + 1) + ")...");
+    console.log(
+      "  publish run " +
+        (runId === null ? "not visible yet" : runId + " in progress") +
+        " (" +
+        (i + 1) +
+        ")...",
+    );
     sleep(20000);
   }
   if (!concluded) throw new Error("publish watch timed out");
@@ -1053,35 +1282,63 @@ function cmdPublish() {
   for (let i = 0; i < 30; i++) {
     served = captureNpm("npm view @blamejs/stash@" + version + " version").stdout;
     if (served === version) break;
-    console.log("  registry not yet serving " + version + " (got " +
-      (served || "no answer") + "); re-checking (" + (i + 1) + ")...");
+    console.log(
+      "  registry not yet serving " +
+        version +
+        " (got " +
+        (served || "no answer") +
+        "); re-checking (" +
+        (i + 1) +
+        ")...",
+    );
     sleep(10000);
   }
   if (served !== version) {
-    throw new Error("npm-publish run " + runId + " concluded success but the registry has not " +
-      "served " + version + " after the propagation window (last answer: " + (served || "none") +
-      ") -- re-run release.js publish to re-verify once propagation settles");
+    throw new Error(
+      "npm-publish run " +
+        runId +
+        " concluded success but the registry has not " +
+        "served " +
+        version +
+        " after the propagation window (last answer: " +
+        (served || "none") +
+        ") -- re-run release.js publish to re-verify once propagation settles",
+    );
   }
   ok("published: @blamejs/stash@" + version + " live on the registry, GitHub release created");
 }
 
 function cmdHelp() {
-  console.log("release.js -- orchestrated release flow (no confirmation prompts; the gates are the confirmation)");
+  console.log(
+    "release.js -- orchestrated release flow (no confirmation prompts; the gates are the confirmation)",
+  );
   console.log("");
   console.log("Usage:");
   console.log("  node scripts/release.js status    # version, branch, cleanliness, gate freshness");
   console.log("  node scripts/release.js regen     # regen CHANGELOG.md + api-snapshot.json");
   console.log("  node scripts/release.js smoke     # full smoke pipeline (scripts/smoke.js)");
-  console.log("  node scripts/release.js commit    # gates -> git add -A -> signed commit from release-notes JSON");
-  console.log("  node scripts/release.js tag       # annotated signed tag v<version> (clean tree, untagged version)");
+  console.log(
+    "  node scripts/release.js commit    # gates -> git add -A -> signed commit from release-notes JSON",
+  );
+  console.log(
+    "  node scripts/release.js tag       # annotated signed tag v<version> (clean tree, untagged version)",
+  );
   console.log("  node scripts/release.js help      # this banner");
   console.log("");
   console.log("  prepare [ver]  # clean main -> bump package.json + lockfile -> release branch");
   console.log("  push           # push branch, open PR from the notes, request review");
-  console.log("  push-fix -m .. # root fix for review findings: new signed commit, push, re-request");
-  console.log("  watch          # gate on checks AND the reviewer's review threads for the head (no merge)");
-  console.log("  merge          # re-check mergeable + zero unresolved threads, then squash-merge + sync");
-  console.log("  publish        # push the signed tag, follow the publish run, verify the registry");
+  console.log(
+    "  push-fix -m .. # root fix for review findings: new signed commit, push, re-request",
+  );
+  console.log(
+    "  watch          # gate on checks AND the reviewer's review threads for the head (no merge)",
+  );
+  console.log(
+    "  merge          # re-check mergeable + zero unresolved threads, then squash-merge + sync",
+  );
+  console.log(
+    "  publish        # push the signed tag, follow the publish run, verify the registry",
+  );
   console.log("");
   console.log("`commit` requires release-notes/v<version>.json (headline + summary +");
   console.log("sections); it prints a stub template and refuses when the file is missing.");
@@ -1093,20 +1350,44 @@ function main() {
   const sub = process.argv[2] || "help";
   try {
     switch (sub) {
-      case "prepare": cmdPrepare(); break;
-      case "push": cmdPush(); break;
-      case "push-fix": cmdPushFix(); break;
-      case "watch": cmdWatch(); break;
-      case "merge": cmdMerge(); break;
-      case "publish": cmdPublish(); break;
-      case "status": cmdStatus(); break;
-      case "regen": cmdRegen(); break;
-      case "smoke": cmdSmoke(); break;
-      case "commit": cmdCommit(); break;
-      case "tag": cmdTag(); break;
+      case "prepare":
+        cmdPrepare();
+        break;
+      case "push":
+        cmdPush();
+        break;
+      case "push-fix":
+        cmdPushFix();
+        break;
+      case "watch":
+        cmdWatch();
+        break;
+      case "merge":
+        cmdMerge();
+        break;
+      case "publish":
+        cmdPublish();
+        break;
+      case "status":
+        cmdStatus();
+        break;
+      case "regen":
+        cmdRegen();
+        break;
+      case "smoke":
+        cmdSmoke();
+        break;
+      case "commit":
+        cmdCommit();
+        break;
+      case "tag":
+        cmdTag();
+        break;
       case "help":
       case "--help":
-      case "-h": cmdHelp(); break;
+      case "-h":
+        cmdHelp();
+        break;
       default:
         console.error("release: unknown subcommand '" + sub + "'");
         cmdHelp();

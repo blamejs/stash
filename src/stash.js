@@ -43,7 +43,14 @@ import { Transform, pipeline } from "node:stream";
 import { isUint8Array } from "node:util/types";
 
 import { C } from "./constants.js";
-import { DEFAULT_DIGEST, algoOf, assertDigestAlgo, digestHash, digestMarker, finalize } from "./digest.js";
+import {
+  DEFAULT_DIGEST,
+  algoOf,
+  assertDigestAlgo,
+  digestHash,
+  digestMarker,
+  finalize,
+} from "./digest.js";
 import { parse } from "./duration.js";
 import { assertShape, isExpired, make, makeTombstone } from "./entry.js";
 import { IntegrityError, RefClaimed, RefNotFound, SizeExceeded, StashFull } from "./errors.js";
@@ -65,9 +72,24 @@ const DEFAULT_TOMBSTONE_TTL = "30d";
 // The backend surface Stash drives today. Validated at construction so a
 // misassembled backend fails at boot, not at first push.
 const REQUIRED_BACKEND_METHODS = [
-  "write", "read", "remove", "stat", "list", "listReconcilable", "stats", "verify",
-  "claim", "restore", "commit", "listClaims", "consumeRead", "isClaimed",
-  "writeTombstone", "hasTombstone", "listTombstones", "removeTombstone",
+  "write",
+  "read",
+  "remove",
+  "stat",
+  "list",
+  "listReconcilable",
+  "stats",
+  "verify",
+  "claim",
+  "restore",
+  "commit",
+  "listClaims",
+  "consumeRead",
+  "isClaimed",
+  "writeTombstone",
+  "hasTombstone",
+  "listTombstones",
+  "removeTombstone",
 ];
 
 // onPopFailure resolves a pop (or a budgeted read) that fails to fully drain
@@ -100,7 +122,9 @@ function _toChunkSource(source) {
   if (source !== null && typeof source === "object" && Symbol.asyncIterator in source) {
     return source;
   }
-  throw new TypeError("push: source must be a Buffer, Uint8Array, string, Readable, or AsyncIterable");
+  throw new TypeError(
+    "push: source must be a Buffer, Uint8Array, string, Readable, or AsyncIterable",
+  );
 }
 
 // Wrap a backend read stream in a digest-verifying passthrough. The hash is
@@ -147,7 +171,12 @@ function _verifiedStream(entry, source, verdict) {
         // fail-open) and hand it straight to the single flush callback: a commit
         // fault surfaces on the stream, and recovery resolves the still-standing
         // claim later.
-        callback(await verdict.onCommit().then(() => null, (err) => err));
+        callback(
+          await verdict.onCommit().then(
+            () => null,
+            (err) => err,
+          ),
+        );
         return;
       }
       callback();
@@ -273,7 +302,8 @@ async function* _boundedSource(source, maxSize, residual) {
     // backing buffer so its real bytes are stored, not its element values
     // reinterpreted (Buffer.from(uint16array) would copy each element mod 256).
     if (typeof chunk === "string") yield Buffer.from(chunk, "utf8");
-    else if (ArrayBuffer.isView(chunk)) yield Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    else if (ArrayBuffer.isView(chunk))
+      yield Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
     else yield Buffer.from(chunk);
   }
 }
@@ -461,7 +491,9 @@ export class Stash extends EventEmitter {
     // this instance to find the registry entry it must release.
     GUARD_REAP.register(this, key);
   }
-  #guardClaim(ref) { this.#liveClaims.set(ref, (this.#liveClaims.get(ref) ?? 0) + 1); }
+  #guardClaim(ref) {
+    this.#liveClaims.set(ref, (this.#liveClaims.get(ref) ?? 0) + 1);
+  }
   #unguardClaim(ref) {
     const n = (this.#liveClaims.get(ref) ?? 0) - 1;
     if (n > 0) this.#liveClaims.set(ref, n);
@@ -474,12 +506,26 @@ export class Stash extends EventEmitter {
   // concurrent claim never scheduled one at all. Without this, such an orphan is
   // stranded ECLAIMED until restart. A due deadline is harmless when nothing orphaned
   // (the next scan finds no stale claim and reschedules).
-  #scheduleRecover() { this.#nextRecoverAt = 0; this.#recoverGen++; }
+  #scheduleRecover() {
+    this.#nextRecoverAt = 0;
+    this.#recoverGen++;
+  }
 
   constructor(opts) {
     super();
     options(opts, "new Stash", {
-      allowed: ["backend", "ttl", "sweepInterval", "maxSize", "maxEntries", "maxTotal", "onPopFailure", "claimTimeout", "tombstoneTtl", "digest"],
+      allowed: [
+        "backend",
+        "ttl",
+        "sweepInterval",
+        "maxSize",
+        "maxEntries",
+        "maxTotal",
+        "onPopFailure",
+        "claimTimeout",
+        "tombstoneTtl",
+        "digest",
+      ],
     });
     const backend = opts.backend;
     if (backend === null || typeof backend !== "object") {
@@ -513,15 +559,19 @@ export class Stash extends EventEmitter {
     // configuration. Refuse it at boot rather than accept a check that never
     // fires (SPEC.md 8.2).
     if (this.#maxSize !== null && this.#maxTotal !== null && this.#maxSize > this.#maxTotal) {
-      throw new TypeError("new Stash: maxSize must not exceed maxTotal -- a per-entry cap above the whole-store cap can never bind");
+      throw new TypeError(
+        "new Stash: maxSize must not exceed maxTotal -- a per-entry cap above the whole-store cap can never bind",
+      );
     }
     // Pop lifecycle: onPopFailure is a closed enum (restore | burn), claimTimeout
     // the crash-recovery staleness threshold. Both validated at config time -- an
     // unrecognized policy or a NaN threshold is a silently-disabled recovery scan.
-    this.#onPopFailure = opts.onPopFailure === undefined
-      ? "restore"
-      : oneOf(opts.onPopFailure, "new Stash: onPopFailure", ON_POP_FAILURE);
-    const claimTimeout = opts.claimTimeout === undefined ? DEFAULT_CLAIM_TIMEOUT : opts.claimTimeout;
+    this.#onPopFailure =
+      opts.onPopFailure === undefined
+        ? "restore"
+        : oneOf(opts.onPopFailure, "new Stash: onPopFailure", ON_POP_FAILURE);
+    const claimTimeout =
+      opts.claimTimeout === undefined ? DEFAULT_CLAIM_TIMEOUT : opts.claimTimeout;
     this.#claimTimeoutMs = parse(claimTimeout, "new Stash: claimTimeout");
     // Strictly POSITIVE: with a zero (or negative) lease staleAt == claimedAt, so
     // recovery would treat EVERY orphan as abandoned the instant it appears --
@@ -536,19 +586,28 @@ export class Stash extends EventEmitter {
     // Tombstone lifetime: a grave is pruned once older than this (SPEC.md 4.4),
     // riding the same prune()/sweeper as expiry -- no second timer. An explicit
     // null never prunes (graves live forever); an absent option inherits '30d'.
-    const tombstoneTtl = opts.tombstoneTtl === undefined ? DEFAULT_TOMBSTONE_TTL : opts.tombstoneTtl;
+    const tombstoneTtl =
+      opts.tombstoneTtl === undefined ? DEFAULT_TOMBSTONE_TTL : opts.tombstoneTtl;
     this.#tombstoneTtlMs = parse(tombstoneTtl, "new Stash: tombstoneTtl");
     // The integrity hash for new writes: a registry algorithm (default sha256).
-    this.#digestAlgo = assertDigestAlgo(opts.digest === undefined ? DEFAULT_DIGEST : opts.digest, "new Stash: digest");
+    this.#digestAlgo = assertDigestAlgo(
+      opts.digest === undefined ? DEFAULT_DIGEST : opts.digest,
+      "new Stash: digest",
+    );
     const sweepMs = parse(opts.sweepInterval, "new Stash: sweepInterval");
     if (sweepMs !== null) {
       if (sweepMs <= 0 || sweepMs > C.TIME.MAX_TIMER_MS) {
-        throw new TypeError("new Stash: sweepInterval must be a positive duration no larger than " +
-          C.TIME.MAX_TIMER_MS + "ms (Node's timer ceiling); for anything rarer, call prune() on your own schedule");
+        throw new TypeError(
+          "new Stash: sweepInterval must be a positive duration no larger than " +
+            C.TIME.MAX_TIMER_MS +
+            "ms (Node's timer ceiling); for anything rarer, call prune() on your own schedule",
+        );
       }
       // Arming a timer is not I/O -- the constructor-does-no-I/O rule holds; the
       // I/O is in the sweep callback. unref() so this never pins the event loop.
-      this.#sweepTimer = setInterval(() => { void this.#sweep(); }, sweepMs);
+      this.#sweepTimer = setInterval(() => {
+        void this.#sweep();
+      }, sweepMs);
       this.#sweepTimer.unref();
     }
   }
@@ -567,7 +626,10 @@ export class Stash extends EventEmitter {
   async #sweep() {
     if (this.#sweepInFlight !== null) return;
     const work = this.prune();
-    this.#sweepInFlight = work.then(() => {}, () => {});
+    this.#sweepInFlight = work.then(
+      () => {},
+      () => {},
+    );
     // A rejected background sweep must never become an unhandledRejection (fatal
     // on Node -- the exact outcome SPEC.md 4.3 exists to prevent): surface it as
     // 'sweepError' (NEVER 'error' -- an unhandled 'error' crashes the process; a
@@ -593,7 +655,9 @@ export class Stash extends EventEmitter {
   // when there are no listeners.
   #emitSweepError(err) {
     for (const listener of this.rawListeners("sweepError")) {
-      Promise.resolve().then(() => listener.call(this, err)).catch(() => {});
+      Promise.resolve()
+        .then(() => listener.call(this, err))
+        .catch(() => {});
     }
   }
 
@@ -687,7 +751,8 @@ export class Stash extends EventEmitter {
           nextAt = Math.min(nextAt, staleAt > now ? staleAt : now + this.#claimTimeoutMs);
           continue;
         }
-        if (now < staleAt) { // still within the lease -- maybe a live pop; leave it,
+        if (now < staleAt) {
+          // still within the lease -- maybe a live pop; leave it,
           nextAt = Math.min(nextAt, staleAt); // but re-scan once it would age past the lease
           continue;
         }
@@ -820,9 +885,15 @@ export class Stash extends EventEmitter {
       // _verifiedStream contract). The verdict fires exactly once (the `resolved`
       // latch), so exactly one branch runs and drops the id.
       onCommit: async () => {
-        try { await onCommit(entry); }
-        catch (err) { this.#scheduleRecover(); throw err; } // a faulted commit leaves an interrupted destruction orphan
-        finally { this.#unguardClaim(ref); }
+        try {
+          await onCommit(entry);
+        } catch (err) {
+          this.#scheduleRecover();
+          throw err;
+        } finally {
+          // a faulted commit leaves an interrupted destruction orphan
+          this.#unguardClaim(ref);
+        }
       },
       // 'burn' destroys the entry the read could not consume: it runs the SAME
       // grave-then-commit-then-emit terminal a successful drain runs (a burned
@@ -834,8 +905,13 @@ export class Stash extends EventEmitter {
           await (this.#onPopFailure === "burn"
             ? this.#destroy(ref, entry, destruction.cause, destruction.event)
             : this.#backend.restore(ref));
-        } catch (err) { this.#scheduleRecover(); throw err; } // a faulted burn/restore leaves the claim an orphan
-        finally { this.#unguardClaim(ref); }
+        } catch (err) {
+          this.#scheduleRecover();
+          throw err;
+        } finally {
+          // a faulted burn/restore leaves the claim an orphan
+          this.#unguardClaim(ref);
+        }
       },
     });
   }
@@ -933,7 +1009,10 @@ export class Stash extends EventEmitter {
    *   const ref = await stash.push(ciphertext, { meta: { kind: "drop" }, ttl: "1h" });
    */
   async push(source, opts = {}) {
-    options(opts, "push", { allowed: ["meta", "ttl", "reads"], unimplemented: UNIMPLEMENTED_PUSH_OPTIONS });
+    options(opts, "push", {
+      allowed: ["meta", "ttl", "reads"],
+      unimplemented: UNIMPLEMENTED_PUSH_OPTIONS,
+    });
     let meta = {};
     if (opts.meta !== undefined) {
       plainObject(opts.meta, "push: meta");
@@ -1017,14 +1096,18 @@ export class Stash extends EventEmitter {
     // entry through the SAME commit path as pop. An unbudgeted entry stays
     // lock-free and pays nothing for the feature.
     if (entry.reads !== null) {
-      return this.#claimedRead(ref, async (claimed) => {
-        if (claimed.readsLeft === 1) {
-          await this.#destroy(ref, claimed, "spent", "dropped"); // the last credit: grave + commit + 'dropped'
-        } else {
-          await this.#backend.consumeRead(ref); // persist the debit BEFORE restoring
-          await this.#backend.restore(ref); // a non-terminal read destroys nothing -- no grave, no event
-        }
-      }, { cause: "spent", event: "dropped" }); // a burned budgeted read destroys the entry -> 'dropped'
+      return this.#claimedRead(
+        ref,
+        async (claimed) => {
+          if (claimed.readsLeft === 1) {
+            await this.#destroy(ref, claimed, "spent", "dropped"); // the last credit: grave + commit + 'dropped'
+          } else {
+            await this.#backend.consumeRead(ref); // persist the debit BEFORE restoring
+            await this.#backend.restore(ref); // a non-terminal read destroys nothing -- no grave, no event
+          }
+        },
+        { cause: "spent", event: "dropped" },
+      ); // a burned budgeted read destroys the entry -> 'dropped'
     }
     const source = await this.#backend.read(ref);
     // The gate above and this open are two awaits apart, so a short TTL can
@@ -1075,9 +1158,11 @@ export class Stash extends EventEmitter {
     await this.#recover();
     await this.#rejectIfClaimed(ref); // a concurrent pop's loser bails before the advisory stat
     await this.#statLive(ref); // advisory: reject an expired entry with zero claim taken
-    return this.#claimedRead(ref,
+    return this.#claimedRead(
+      ref,
       (entry) => this.#destroy(ref, entry, "pop", "popped"), // grave + commit + 'popped'
-      { cause: "pop", event: "popped" }); // a burned pop's delete also lands -> a 'pop' grave, 'popped'
+      { cause: "pop", event: "popped" },
+    ); // a burned pop's delete also lands -> a 'pop' grave, 'popped'
   }
 
   /**
@@ -1431,7 +1516,10 @@ export class Stash extends EventEmitter {
     // verify() must see the crash residue, not silently clean it. claimTimeout is
     // policy, passed down so the backend can age a stale claim without owning
     // the threshold; the tmp grace is C.AUDIT.
-    return this.#backend.verify({ repair: opts.repair === true, claimTimeoutMs: this.#claimTimeoutMs });
+    return this.#backend.verify({
+      repair: opts.repair === true,
+      claimTimeoutMs: this.#claimTimeoutMs,
+    });
   }
 
   // [Symbol.asyncIterator] -- `for await (const entry of stash)` is sugar over
@@ -1666,7 +1754,7 @@ export class Stash extends EventEmitter {
     // never double-counted (SPEC.md 4.3).
     const reaped = [];
     for (const entry of entries) {
-      if (isExpired(entry, now) && await this.#backend.remove(entry.id)) reaped.push(entry);
+      if (isExpired(entry, now) && (await this.#backend.remove(entry.id))) reaped.push(entry);
     }
     for (const entry of reaped) this.#emit("expired", entry);
     // Prune stale graves (SPEC.md 4.4): a tombstone older than tombstoneTtl is
@@ -1675,7 +1763,8 @@ export class Stash extends EventEmitter {
     // the same prune-is-loud-over-corruption discipline the entry scan holds.
     if (this.#tombstoneTtlMs !== null) {
       for (const grave of await this.#backend.listTombstones()) {
-        if (now - grave.destroyedAt >= this.#tombstoneTtlMs) await this.#backend.removeTombstone(grave.id);
+        if (now - grave.destroyedAt >= this.#tombstoneTtlMs)
+          await this.#backend.removeTombstone(grave.id);
       }
     }
     return reaped.length;

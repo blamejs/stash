@@ -72,32 +72,51 @@ for (const { name, create } of BACKENDS) {
   // GREEN: the shipped backends pass their own contract, driven by a foreign runner.
   test("the harness certifies the in-tree " + name + " backend with a foreign runner", async () => {
     const results = await runCollecting({ name, create });
-    assert.ok(results.length >= 20, "the harness registered its full core (" + results.length + " cases)");
+    assert.ok(
+      results.length >= 20,
+      "the harness registered its full core (" + results.length + " cases)",
+    );
     const failed = results.filter((r) => !r.ok);
     assert.deepEqual(
       failed.map((f) => f.name),
       [],
-      "a conforming backend passes every case" + (failed[0] ? " -- first failure: " + failed[0].err : ""),
+      "a conforming backend passes every case" +
+        (failed[0] ? " -- first failure: " + failed[0].err : ""),
     );
   });
 
   // RED: silent data loss on write is caught by the round-trip fidelity cases.
-  test("the harness CATCHES a " + name + " backend that silently drops bytes on write", async () => {
-    const results = await runCollecting({ name: "dropping-" + name, create: () => droppingWriteBackend(create()) });
-    const failed = results.filter((r) => !r.ok);
-    assert.ok(failed.length > 0, "silent data loss must fail at least one case, not certify clean");
-    assert.ok(
-      failed.some((f) => f.name.includes("round-trips a Buffer")),
-      "the Buffer round-trip is one of the failures",
-    );
-  });
+  test(
+    "the harness CATCHES a " + name + " backend that silently drops bytes on write",
+    async () => {
+      const results = await runCollecting({
+        name: "dropping-" + name,
+        create: () => droppingWriteBackend(create()),
+      });
+      const failed = results.filter((r) => !r.ok);
+      assert.ok(
+        failed.length > 0,
+        "silent data loss must fail at least one case, not certify clean",
+      );
+      assert.ok(
+        failed.some((f) => f.name.includes("round-trips a Buffer")),
+        "the Buffer round-trip is one of the failures",
+      );
+    },
+  );
 
   // RED: tampered bytes on read are caught (digest verification -> the case rejects).
-  test("the harness CATCHES a " + name + " backend that serves tampered bytes on read", async () => {
-    const results = await runCollecting({ name: "corrupting-" + name, create: () => corruptingReadBackend(create()) });
-    const failed = results.filter((r) => !r.ok);
-    assert.ok(failed.length > 0, "a read that returns tampered bytes must fail the suite");
-  });
+  test(
+    "the harness CATCHES a " + name + " backend that serves tampered bytes on read",
+    async () => {
+      const results = await runCollecting({
+        name: "corrupting-" + name,
+        create: () => corruptingReadBackend(create()),
+      });
+      const failed = results.filter((r) => !r.ok);
+      assert.ok(failed.length > 0, "a read that returns tampered bytes must fail the suite");
+    },
+  );
 }
 
 // The harness must call create AS A METHOD of the factory, preserving `this`: the
@@ -108,21 +127,27 @@ test("the harness preserves the factory receiver: a create() method that uses `t
   const factory = {
     name: "receiver-bound",
     make: BACKENDS.find((b) => b.name === "memory").create,
-    create() { return this.make(); }, // uses `this`; a bare call would throw on `this.make`
+    create() {
+      return this.make();
+    }, // uses `this`; a bare call would throw on `this.make`
   };
   const results = await runCollecting(factory);
   const failed = results.filter((r) => !r.ok);
   assert.deepEqual(
     failed.map((f) => f.name),
     [],
-    "a receiver-bound factory certifies clean" + (failed[0] ? " -- first failure: " + failed[0].err : ""),
+    "a receiver-bound factory certifies clean" +
+      (failed[0] ? " -- first failure: " + failed[0].err : ""),
   );
 });
 
 // Guard the input contract: the harness fails loud on a missing runner or a
 // malformed factory rather than silently registering nothing.
 test("runBackendConformance rejects a missing test runner and a malformed factory", () => {
-  assert.throws(() => runBackendConformance({ name: "x", create: () => new Object() }, {}), TypeError);
+  assert.throws(
+    () => runBackendConformance({ name: "x", create: () => new Object() }, {}),
+    TypeError,
+  );
   assert.throws(() => runBackendConformance({ name: "x", create: () => new Object() }), TypeError);
   assert.throws(() => runBackendConformance({ name: "x" }, { test: () => {} }), TypeError);
   assert.throws(() => runBackendConformance(null, { test: () => {} }), TypeError);
