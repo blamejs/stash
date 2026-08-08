@@ -32,9 +32,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # jazzer.js targets carry no native code; "none" is the oss-fuzz
-        # sanitizer for javascript projects.
-        sanitizer: [none]
+        # jazzer.js targets carry no native code, so the sanitizer is inert here --
+        # but ClusterFuzzLite validates this input against a fixed list
+        # (address / memory / undefined / coverage) and rejects "none", which is
+        # the value oss-fuzz project.yaml uses. Pick the list default.
+        sanitizer: [address]
     steps:
       - name: Build fuzzers (${{ matrix.sanitizer }})
         id: build
@@ -68,7 +70,7 @@ jobs:
         with:
           language: javascript
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          sanitizer: none
+          sanitizer: address
 
       - name: Prune corpus
         id: run
@@ -77,4 +79,4 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fuzz-seconds: 600
           mode: "prune"
-          sanitizer: none
+          sanitizer: address
