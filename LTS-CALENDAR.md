@@ -5,7 +5,8 @@
 | Version          | First release | Security patches through   | Node minimum | Dependency posture |
 |------------------|---------------|----------------------------|--------------|--------------------|
 | `v0.x` (pre-1.0) | 2026          | superseded by v1.0 (2026-07-23) | 24.18.0 | Zero dependencies, runtime and dev |
-| `v1.x`           | 2026-07-23    | current major; 24 months after v2.0 ships | 24.18.0 | Zero dependencies, runtime and dev |
+| `v1.x`           | 2026-07-23    | 2028-08-07 (24 months after v2.0) | 24.18.0 | Zero dependencies, runtime and dev |
+| `v2.x`           | 2026-08-07    | current major; 24 months after v3.0 ships | 24.18.0 | Zero dependencies, runtime and dev |
 
 ## What "security patches" means
 
@@ -20,3 +21,7 @@ The "Node minimum" column is the lowest Node version the library supports for th
 ## The v0.x line
 
 `v0.x` had no LTS commitment: every pre-1.0 release could change something consumers depended on, with no backwards-compatibility shims -- the surface was evolving toward the contract in [SPEC.md](SPEC.md). That contract is now stable as of `v1.0`, and this calendar and the deprecation policy in [MIGRATING.md](MIGRATING.md) are in effect. Consumers still on a `v0.x` release upgrade to `v1.x`, which is API-compatible with the final `v0.1.x` surface -- `v1.0` is the same feature-complete store with a stability commitment attached, not a breaking change. Read [CHANGELOG.md](CHANGELOG.md) before upgrading across more than a few releases at a time.
+
+## The v1.x line
+
+`v1.x` entered its security-only window when `v2.0` shipped on 2026-08-07, and receives critical and high-severity fixes through 2028-08-07. Upgrading to `v2.x` changes two error verdicts and nothing else -- no on-disk format change, so a `v1.x` store opens under `v2.0` unmodified. The recipe is in [MIGRATING.md](MIGRATING.md).
