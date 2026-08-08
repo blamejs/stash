@@ -80,6 +80,7 @@ const STATIC_STAGES = [
   { name: "changelog-regen", args: ["scripts/regen-changelog.js", "--check"] },
   { name: "readme-regen", args: ["scripts/regen-readme.js", "--check"] },
   { name: "pack-gate", args: ["scripts/check-pack-against-gitignore.js"] },
+  { name: "lockfile-sync", args: ["scripts/check-lockfile-sync.js"] },
 ];
 
 const RUNTIME_STAGES = [
