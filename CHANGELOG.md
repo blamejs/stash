@@ -45,6 +45,13 @@ under 2.0 unchanged.
   author certifying two backends in one run got two byte-identical sets of
   test titles and a failure that named no backend. If you were passing only
   `{ create }`, add a `name`.
+- `v1.x` is superseded and will NOT receive security patches, withdrawing the
+  24-month window `v1.0` announced would open when its successor shipped.
+  `v1.x` had no known consumers and `v2.0` is a two-edit upgrade with no
+  on-disk format change, so the line is retired rather than serviced. The
+  memory-disclosure fix below therefore ships only in `v2.x`; LTS-CALENDAR.md
+  and SECURITY.md record both facts. If you are on `v1.x` and cannot upgrade,
+  open a security advisory and the position will be revisited.
 - A `Uint8Array` created in another realm -- a `vm` context, a second module
   loader -- is now accepted as a `push()` or `store()` source. It was already
   accepted when yielded as a chunk, so the two paths disagreed about the same

@@ -5,8 +5,10 @@
 | Version          | First release | Security patches through   | Node minimum | Dependency posture |
 |------------------|---------------|----------------------------|--------------|--------------------|
 | `v0.x` (pre-1.0) | 2026          | superseded by v1.0 (2026-07-23) | 24.18.0 | Zero dependencies, runtime and dev |
-| `v1.x`           | 2026-07-23    | 2028-08-07 (24 months after v2.0) | 24.18.0 | Zero dependencies, runtime and dev |
+| `v1.x`           | 2026-07-23    | **not serviced** — superseded by v2.0 (2026-08-07); upgrade to `v2.x` | 24.18.0 | Zero dependencies, runtime and dev |
 | `v2.x`           | 2026-08-07    | current major; 24 months after v3.0 ships | 24.18.0 | Zero dependencies, runtime and dev |
+
+> **`v1.x` is not receiving security patches.** `v1.0` shipped on 2026-07-23 stating a 24-month window would open when its successor shipped. `v2.0` shipped 15 days later, and that window is not being serviced: `v1.x` had no known consumers, and `v2.0` is a two-edit upgrade with no on-disk format change ([MIGRATING.md](MIGRATING.md#upgrading-to-20)). This is a withdrawal of a commitment `v1.0` made, stated here rather than left to be discovered. A fix that exists only in `v2.x` is listed in [SECURITY.md](SECURITY.md#known-issues-in-unserviced-lines). If you are on `v1.x` and cannot upgrade, open a security advisory and the position will be revisited.
 
 ## What "security patches" means
 
@@ -24,4 +26,4 @@ The "Node minimum" column is the lowest Node version the library supports for th
 
 ## The v1.x line
 
-`v1.x` entered its security-only window when `v2.0` shipped on 2026-08-07, and receives critical and high-severity fixes through 2028-08-07. Upgrading to `v2.x` changes two error verdicts and nothing else -- no on-disk format change, so a `v1.x` store opens under `v2.0` unmodified. The recipe is in [MIGRATING.md](MIGRATING.md).
+`v1.x` is superseded and not serviced. `v2.0` is a two-edit upgrade with no on-disk format change, so a `v1.x` store opens under `v2.0` unmodified; the recipe is in [MIGRATING.md](MIGRATING.md#upgrading-to-20). At least one fix ships only in `v2.x` -- see [SECURITY.md](SECURITY.md#known-issues-in-unserviced-lines).

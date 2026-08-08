@@ -43,8 +43,34 @@ are especially valuable.
 
 ## Supported versions
 
-Pre-1.0, only the latest published `0.x.y` receives fixes. See
-`LTS-CALENDAR.md` for the support policy that applies from 1.0.
+Only the current major, `v2.x`, receives fixes. `v1.x` and `v0.x` are
+superseded and not serviced -- see [LTS-CALENDAR.md](LTS-CALENDAR.md), which
+records that the `v1.x` window `v1.0` announced is not being honored and why.
+Upgrading from `v1.x` is two edits with no on-disk format change
+([MIGRATING.md](MIGRATING.md#upgrading-to-20)).
+
+## Known issues in unserviced lines
+
+Fixed in `v2.0.0`, present in every `v1.x` and `v0.1.x` release, and not
+backported:
+
+- **A push or store source that misreports its own length made the store record
+  bytes the caller never supplied.** `length` on a typed array is an ordinary
+  property, so a `Uint8Array` subclass holding two bytes but reporting 512
+  caused the copy to allocate 512 bytes from Node's shared buffer pool and
+  write only the two real ones. The remainder was whatever that pool last held,
+  and the entry's `size` and digest were computed over it -- so the store
+  certified content it was never given, and charged `maxSize` / `maxTotal` for
+  it. In a process handling more than one tenant's bytes, the padding could
+  carry another entry's plaintext.
+
+  Reaching it requires the embedding application to pass an object it does not
+  control as a push or store source; an application passing its own `Buffer`,
+  string, `Readable`, or ordinary `Uint8Array` was never affected. `v2.0.0`
+  copies by the view's real byte length, which no property can forge.
+
+  If you are on `v1.x` and cannot upgrade, report it through the process above
+  and a backport will be reconsidered.
 
 ## Continuous fuzzing
 
