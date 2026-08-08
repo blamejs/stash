@@ -772,10 +772,11 @@ export class DiskBackend {
     // but the aggregate stays loud on a foreign name here as in every layout dir.
     for (const name of await readdir(await this.#containedDir("tombstones"))) {
       if (name.endsWith(".tmp")) continue;
-      const id = _requireSidecarId(name);
-      // a grave (<id>.json) is tiny and not part of the footprint count (SPEC.md 4
-      // fixes Stats at { entries, bytes, claimed }). This walk stays loud on a
-      // FOREIGN name here, like every layout dir.
+      // Called for its THROW, not its value: a grave (<id>.json) is tiny and not part
+      // of the footprint count (SPEC.md 4 fixes Stats at { entries, bytes, claimed }),
+      // so nothing here needs the id -- but the walk still refuses a FOREIGN name,
+      // like every layout dir.
+      _requireSidecarId(name);
     }
     return { entries, bytes, claimed };
   }
