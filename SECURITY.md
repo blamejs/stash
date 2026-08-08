@@ -77,13 +77,20 @@ backported:
 The store's untrusted-input surfaces -- hostile ref strings, the disk
 backend's entry-sidecar bytes, its tombstone-grave bytes, and the
 self-describing digest parser (`"<algo>:<hex>"`) -- are fuzzed
-continuously with ClusterFuzzLite (jazzer.js): pull requests that touch
-`src/` get a short fuzzing burst against the changed code, and a scheduled
-batch run fuzzes the grown corpus daily. The targets treat a typed `StashError` as the correct fail-closed
+continuously with jazzer.js: pull requests that touch `src/` get a short
+burst against every target, and a scheduled run each night fuzzes for
+longer. The targets treat a typed `StashError` as the correct fail-closed
 verdict on hostile input; anything else that escapes -- an untyped
-exception, a hang -- is reported as a crash. The harness lives in
-`.clusterfuzzlite/` (with a plain-node seed-corpus check at
-`node .clusterfuzzlite/local-smoke.js`) and never ships in the npm tarball.
+exception, a hang -- is reported as a crash, and its reproducer is kept as
+a run artifact. The harness lives in `.clusterfuzzlite/` (with a plain-node
+seed-corpus check at `node .clusterfuzzlite/local-smoke.js`, which runs in
+the smoke pipeline and needs no engine) and never ships in the npm tarball.
+
+The engine is installed only inside the fuzzing job, outside the checkout,
+so the library keeps zero dependencies including dev. ClusterFuzzLite drove
+these same targets previously and its workflows remain in the tree on manual
+dispatch; it cannot currently build a JavaScript project, which the note at
+the top of `.github/workflows/cflite_pr.yml` records in full.
 
 ## Hardening a deployment
 

@@ -29,6 +29,20 @@ under 2.0 unchanged.
 
 ### Changed
 
+- The Node floor moves from 24.18.0 to **24.19.0**. It remains a floor and
+  not a ceiling -- any newer 24.x, and later majors per the LTS calendar, are
+  supported -- and nothing the store does depends on a capability that first
+  shipped in 24.19; the patch level is a security-currency floor, kept
+  current at the major boundary where raising it is not a surprise. Consumers
+  pinned below 24.19.0 upgrade Node; nothing else changes.
+- Fuzzing runs the same targets under jazzer.js directly instead of through
+  ClusterFuzzLite, whose action cannot build a JavaScript project at any
+  sanitizer setting. Pull requests touching `src/` get a burst against every
+  target and a scheduled run fuzzes longer each night, with a crash's
+  reproducer kept as a run artifact. The seed-corpus verdict check still runs
+  with plain Node and no engine. The engine is installed only inside the
+  fuzzing job and outside the checkout, so the zero-dependency posture --
+  runtime and dev -- is unchanged.
 - An entry whose `meta` is too large for a sidecar is now rejected with
   `IntegrityError` (code `EINTEGRITY`) instead of `TypeError`. The bound is
   enforced by the backend write that serves both `push()` and `store()`, and

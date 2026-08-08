@@ -3,7 +3,7 @@
 //
 // CommonJS consumption is supported surface, not an accident: a CJS caller
 // can require() the ESM package main and both backend subpaths on the
-// 24.18.0 floor (Node's require(esm), since the graph has no top-level await
+// 24.19.0 floor (Node's require(esm), since the graph has no top-level await
 // and its only non-JS import is a synchronous JSON module). This pins it, so
 // a future change that would break it -- introducing top-level await, say --
 // fails here loudly instead of silently stranding CJS consumers.

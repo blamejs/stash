@@ -25,7 +25,7 @@ npm run gates   # codebase-patterns + comment-block validator + api-snapshot + s
 npm run test:sandboxed
 ```
 
-**Requirements:** Node.js 24.18.0 or newer (see `.node-version`). The library targets that floor as a floor, not a ceiling -- no polyfills, no compat shims, no version branches for older runtimes. Nothing is transpiled -- what ships is what runs.
+**Requirements:** Node.js 24.19.0 or newer (see `.node-version`). The library targets that floor as a floor, not a ceiling -- no polyfills, no compat shims, no version branches for older runtimes. Nothing is transpiled -- what ships is what runs.
 
 ## House rules
 

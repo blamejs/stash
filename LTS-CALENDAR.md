@@ -6,7 +6,7 @@
 |------------------|---------------|----------------------------|--------------|--------------------|
 | `v0.x` (pre-1.0) | 2026          | superseded by v1.0 (2026-07-23) | 24.18.0 | Zero dependencies, runtime and dev |
 | `v1.x`           | 2026-07-23    | **not serviced** — superseded by v2.0 (2026-08-07); upgrade to `v2.x` | 24.18.0 | Zero dependencies, runtime and dev |
-| `v2.x`           | 2026-08-07    | current major; 24 months after v3.0 ships | 24.18.0 | Zero dependencies, runtime and dev |
+| `v2.x`           | 2026-08-07    | current major; 24 months after v3.0 ships | 24.19.0 | Zero dependencies, runtime and dev |
 
 > **`v1.x` is not receiving security patches.** `v1.0` shipped on 2026-07-23 stating a 24-month window would open when its successor shipped. `v2.0` shipped 15 days later, and that window is not being serviced: `v1.x` had no known consumers, and `v2.0` is a two-edit upgrade with no on-disk format change ([MIGRATING.md](MIGRATING.md#upgrading-to-20)). This is a withdrawal of a commitment `v1.0` made, stated here rather than left to be discovered. A fix that exists only in `v2.x` is listed in [SECURITY.md](SECURITY.md#known-issues-in-unserviced-lines). If you are on `v1.x` and cannot upgrade, open a security advisory and the position will be revisited.
 
@@ -18,7 +18,7 @@
 
 ## Node minimum policy
 
-The "Node minimum" column is the lowest Node version the library supports for that line. Every line shipped so far -- `v0.x`, `v1.x`, and `v2.x` -- sits at 24.18.0, a floor, not a ceiling -- no polyfills, no compat shims, no version branches for older runtimes. The capabilities the library relies on all arrived at the Node 24 major level, not in the `.18` patch (see [SPEC.md](SPEC.md) section 2); the patch level is a conservative security-currency floor -- a maintained Node 24 patch rather than an early 24.x with since-fixed defects -- so a consumer on any newer 24.x patch is fully supported. A new major adopts whatever Node major is the active LTS at release. Once on the LTS line, the Node minimum is frozen for that major's security-patch window -- consumers on the LTS line are not forced onto a newer Node mid-window. Nothing is transpiled, so the supported Node version is exactly the version the source runs on.
+The "Node minimum" column is the lowest Node version the library supports for that line. `v0.x` and `v1.x` shipped against a 24.18.0 floor; `v2.x` raises it to 24.19.0. Either way it is a floor, not a ceiling -- no polyfills, no compat shims, no version branches for older runtimes. The capabilities the library relies on all arrived at the Node 24 major level, not in any one patch (see [SPEC.md](SPEC.md) section 2); the patch level is a conservative security-currency floor -- a maintained Node 24 patch rather than an earlier 24.x carrying since-fixed defects -- so a consumer on any newer 24.x patch is fully supported. A new major adopts whatever Node major is the active LTS at release. Once on the LTS line, the Node minimum is frozen for that major's security-patch window -- consumers on the LTS line are not forced onto a newer Node mid-window. Nothing is transpiled, so the supported Node version is exactly the version the source runs on.
 
 ## The v0.x line
 

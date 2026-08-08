@@ -17,7 +17,7 @@ runtime dependencies. No TypeScript. No build step.
 
 [![CI](https://github.com/blamejs/stash/actions/workflows/ci.yml/badge.svg)](https://github.com/blamejs/stash/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/blamejs/stash/actions/workflows/codeql.yml/badge.svg)](https://github.com/blamejs/stash/actions/workflows/codeql.yml)
-[![Fuzzing](https://github.com/blamejs/stash/actions/workflows/cflite_batch.yml/badge.svg)](https://github.com/blamejs/stash/actions/workflows/cflite_batch.yml)
+[![Fuzzing](https://github.com/blamejs/stash/actions/workflows/fuzz.yml/badge.svg)](https://github.com/blamejs/stash/actions/workflows/fuzz.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/blamejs/stash/badge)](https://scorecard.dev/viewer/?uri=github.com/blamejs/stash)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13632/badge)](https://www.bestpractices.dev/projects/13632)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev/spec/v1.0/levels#build-l3)
@@ -72,7 +72,7 @@ await stash.drop(ref);                     // gone
 npm install @blamejs/stash
 ```
 
-Requires Node `>= 24.18.0`.
+Requires Node `>= 24.19.0`.
 
 The package is authored in ESM (`import`), but a CommonJS project can consume
 it with `require` on that Node floor -- no build step, no shim. The package

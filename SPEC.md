@@ -31,13 +31,13 @@ else. Stop and ask.
 
 ## 2. Runtime and non-negotiable constraints
 
-- **Node 24.18.0.** `"engines": { "node": ">=24.18.0" }`, with a `.node-version` / `.nvmrc` of
-  `24.18.0`. Treat this as a floor to build against: no polyfills, no compatibility shims, no
+- **Node 24.19.0.** `"engines": { "node": ">=24.19.0" }`, with a `.node-version` / `.nvmrc` of
+  `24.19.0`. Treat this as a floor to build against: no polyfills, no compatibility shims, no
   `if (nodeVersion < x)` branches for older runtimes. The capabilities the store depends on all
-  arrived at the Node 24 *major* level, not in the `.18` patch: the stable permission model
+  arrived at the Node 24 *major* level, not in the `.19` patch: the stable permission model
   (`--permission`, §2.1), V8 13.6 explicit resource management behind `Symbol.asyncDispose`
   (§7.1), and `require(esm)` of the package's synchronous ESM graph (a CommonJS project can
-  `require` it with no build step). The specific `.18` patch is a conservative
+  `require` it with no build step). The specific `.19` patch is a conservative
   security-currency floor — it keeps consumers on a maintained Node 24 patch rather than an
   early 24.x carrying since-fixed defects — not a dependency on anything that first shipped in
   that release. It is a floor, not a ceiling: any newer 24.x, and later majors per the
@@ -51,7 +51,7 @@ else. Stop and ask.
 
 ### 2.1 Permission model posture
 
-The Node permission model went stable in 23.5, so on 24.18.0 the flag is `--permission`, not
+The Node permission model went stable in 23.5, so on 24.19.0 the flag is `--permission`, not
 `--experimental-permission`. StashJS should run cleanly under:
 
 ```
