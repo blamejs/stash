@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { Readable } from "node:stream";
+import { runInNewContext } from "node:vm";
 
 import { Stash, RefNotFound, RefClaimed, InvalidRef, IntegrityError, StashError, SizeExceeded, StashFull } from "../src/index.js";
 import { MemoryBackend } from "../src/backends/memory.js";
@@ -36,17 +37,18 @@ function storedEntryUnder(id, bytes, algo, overrides = {}) {
   };
 }
 for (const { name, create } of BACKENDS) {
-  suite("conformance: " + name, () => {
-    // The portable core of the SPEC.md 9 backend contract, shared verbatim with
-    // out-of-tree backend authors through @blamejs/stash/conformance: the library's
-    // own run here and a third party's run against their backend execute the
-    // IDENTICAL cases (single source of truth). Round-trip fidelity across every
-    // source type, identity, expiry, limits, claim atomicity, read budgets, and
-    // tombstone first-write-wins live in the shipped harness; the adversarial /
-    // fault-injection cases that must reach into a backend's storage (planted
-    // corruption, crash recovery, event assertions) stay inline below.
-    runBackendConformance({ name, create }, { test, assert });
+  // The portable core of the SPEC.md 9 backend contract, shared verbatim with
+  // out-of-tree backend authors through @blamejs/stash/conformance: the library's
+  // own run here and a third party's run against their backend execute the
+  // IDENTICAL cases (single source of truth). The harness labels every case with the
+  // factory's own name, so it registers at top level -- nesting it inside the suite
+  // below would print the backend twice.
+  runBackendConformance({ name, create }, { test, assert });
 
+  // The adversarial / fault-injection cases that must reach into a backend's storage
+  // (planted corruption, crash recovery, event assertions) are not portable, so they
+  // stay inline here rather than in the shipped harness.
+  suite("conformance: " + name, () => {
     test("list accepts includeExpired and rejects unknown options", async () => {
       const stash = new Stash({ backend: create() });
       const ref = await stash.push("listed");
@@ -1097,6 +1099,40 @@ for (const { name, create } of BACKENDS) {
         await assert.rejects(stash.store(makeStoredEntry(id, "bytes", { meta: badMeta }), "bytes"), IntegrityError);
         assert.equal(await stash.has(id), false, "nothing lands");
         assert.deepEqual(await stash.list(), [], "the store holds no unreadable entry -- list() does not choke");
+      }
+    });
+
+    test("a Uint8Array from another realm is a Uint8Array: accepted as a source, not just as a chunk", async () => {
+      // push documents its source set as "a Buffer, a Uint8Array, a UTF-8 string, a
+      // Readable, or any AsyncIterable" with no realm qualifier. A typed array minted
+      // in a vm context (or by a second module loader) is a genuine Uint8Array whose
+      // prototype comes from that realm, so a brand check must not be `instanceof` --
+      // that reads only THIS realm's intrinsic and refuses the value. The same array
+      // was already accepted when yielded as a CHUNK (the chunk path measures with the
+      // realm-proof ArrayBuffer.isView), so the two paths disagreed about the identical
+      // value; the source path is the one that under-delivered the documented contract.
+      const bytes = Buffer.from("cross-realm source");
+      const foreign = runInNewContext("new Uint8Array(n)", { n: [...bytes] });
+      assert.ok(!(foreign instanceof Uint8Array), "precondition: the value is from another realm");
+
+      const stash = new Stash({ backend: create() });
+      const ref = await stash.push(foreign);
+      assert.deepEqual(await drain(await stash.apply(ref)), bytes);
+
+      // The same value through store(), which shares _toChunkSource.
+      const id = generate();
+      const entry = makeStoredEntry(id, bytes);
+      assert.equal(await stash.store(entry, runInNewContext("new Uint8Array(n)", { n: [...bytes] })), true);
+      assert.deepEqual(await drain(await stash.apply(id)), bytes);
+    });
+
+    test("a foreign typed array that is NOT a Uint8Array is still refused (element-width confusion stays closed)", async () => {
+      // The realm-proof predicate must be isUint8Array, never ArrayBuffer.isView: the
+      // latter admits a Uint16Array, and Buffer.from(uint16array) copies each ELEMENT
+      // mod 256 -- silently storing different bytes than the caller handed over.
+      const stash = new Stash({ backend: create() });
+      for (const expr of ["new Uint16Array([1,2,3])", "new Float64Array([1.5])", "new Int32Array([7])"]) {
+        await assert.rejects(stash.push(runInNewContext(expr)), TypeError);
       }
     });
 

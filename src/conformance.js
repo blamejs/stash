@@ -97,14 +97,25 @@ async function retryOnClaimed(fn) {
  */
 export function runBackendConformance(factory, options) {
   const opts = options || {};
-  const test = opts.test;
+  const register = opts.test;
   const assert = opts.assert || defaultAssert;
-  if (typeof test !== "function") {
+  if (typeof register !== "function") {
     throw new TypeError("runBackendConformance(factory, { test }): `test` must be your test runner's registration function");
   }
-  if (factory === null || typeof factory !== "object" || typeof factory.create !== "function") {
+  if (
+    factory === null ||
+    typeof factory !== "object" ||
+    typeof factory.create !== "function" ||
+    typeof factory.name !== "string" ||
+    factory.name.length === 0
+  ) {
     throw new TypeError("runBackendConformance(factory, ...): factory must be { name, create() }");
   }
+  // `name` labels every case this harness registers. Certifying two backends in one
+  // run otherwise produces two byte-identical title sets, and a failure names no
+  // backend -- so the name is required, and required means enforced here rather than
+  // only described in the docs.
+  const test = (title, fn) => register(factory.name + ": " + title, fn);
   // Call create AS A METHOD of the factory, never a bare extracted reference: the
   // documented contract is `{ name, create() }`, so an author may legitimately write
   // create() as an object method that reads its own config through `this` (a root

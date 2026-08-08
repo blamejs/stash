@@ -34,6 +34,7 @@ import { Stash, RefNotFound, RefClaimed, InvalidRef, IntegrityError, SizeExceede
 import { DiskBackend, descriptorMatchesName, verifyDescriptorAgainstName, sameFile, _writeAll } from "../src/backends/disk.js";
 import { generate } from "../src/ref.js";
 import { freshScratchDir, cleanupScratch } from "./_scratch.js";
+import { drain, makeStoredEntry } from "./_helpers.js";
 
 function freshRoot() {
   return freshScratchDir("disk");
@@ -91,12 +92,6 @@ const SANDBOXED = typeof process.permission !== "undefined";
 // (which bypasses permission bits), so the verify-FAULT vector skips there and
 // runs on CI's unprivileged Linux runner.
 const CANNOT_FAULT = process.platform === "win32" || (typeof process.getuid === "function" && process.getuid() === 0);
-
-async function drain(readable) {
-  const chunks = [];
-  for await (const chunk of readable) chunks.push(chunk);
-  return Buffer.concat(chunks);
-}
 
 function freshStash() {
   const root = freshRoot();
@@ -256,11 +251,29 @@ suite("disk: layout and atomicity", () => {
     await assert.rejects(stash.show(ref), (err) => err instanceof IntegrityError);
   });
 
-  test("meta too large for a sidecar is refused at push, blob cleaned up", async () => {
+  test("meta too large for a sidecar is refused at push as IntegrityError, blob cleaned up", async () => {
+    // The sidecar size bound is a CONTENT verdict, not a caller-argument verdict:
+    // write() serves both push and store, and a replicated entry is untrusted stored
+    // input. It carries a code so a consumer can branch on it (README's contract),
+    // and it matches the read side of this same bound.
     const { root, stash } = freshStash();
     await assert.rejects(
       stash.push("padded", { meta: { pad: "x".repeat(96 * 1024) } }),
-      TypeError
+      (err) => err instanceof IntegrityError && err.code === "EINTEGRITY"
+    );
+    assert.deepEqual(readdirSync(join(root, "blobs")), []);
+  });
+
+  test("the same bound refuses an oversized replica through store(), with the same verdict", async () => {
+    // store() reaches the identical line through #storeOne -> backend.write. Before
+    // the verdict was unified this path reported a TypeError labelled "push:", naming
+    // a verb the caller never called and carrying no code at all.
+    const { root, stash } = freshStash();
+    const bytes = Buffer.from("replica bytes");
+    const entry = makeStoredEntry(generate(), bytes, { meta: { pad: "x".repeat(96 * 1024) } });
+    await assert.rejects(
+      stash.store(entry, bytes),
+      (err) => err instanceof IntegrityError && err.code === "EINTEGRITY"
     );
     assert.deepEqual(readdirSync(join(root, "blobs")), []);
   });

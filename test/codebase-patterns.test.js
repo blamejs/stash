@@ -1282,10 +1282,19 @@ test("every workflow action is github-owned or in the allow-list mirror (else th
   // always permitted; every OTHER `uses:` must match a pattern here AND the repo
   // setting -- keep the two in sync. Adding an action to a workflow means adding it
   // here and to the repo Actions allow-list, or CI silently stops running it.
+  // Each entry names ONE action, matching the repo setting entry for entry. A
+  // prefix pattern (`docker/`, `google/clusterfuzzlite/actions/`) would admit a
+  // sibling action the repo setting does not list -- the gate would pass and the
+  // workflow would still startup_fail, which is the failure this check exists to
+  // prevent. Breadth here is fail-open; keep every entry exact.
   const ALLOW = [
     /^ossf\/scorecard-action(\/|@)/,
-    /^google\/clusterfuzzlite\/actions\//,
-    /^docker\//,
+    /^google\/clusterfuzzlite\/actions\/build_fuzzers(\/|@)/,
+    /^google\/clusterfuzzlite\/actions\/run_fuzzers(\/|@)/,
+    /^docker\/setup-buildx-action(\/|@)/,
+    /^docker\/setup-qemu-action(\/|@)/,
+    /^docker\/build-push-action(\/|@)/,
+    /^docker\/login-action(\/|@)/,
     /^aquasecurity\/trivy-action(\/|@)/,
     /^sigstore\/cosign-installer(\/|@)/,
     /^hadolint\/hadolint-action(\/|@)/,

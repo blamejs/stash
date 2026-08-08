@@ -29,6 +29,7 @@
  */
 
 import { Readable } from "node:stream";
+import { isUint8Array } from "node:util/types";
 
 import { DEFAULT_DIGEST, algoOf, digestHash, finalize } from "../digest.js";
 import { spend } from "../entry.js";
@@ -83,9 +84,24 @@ import { assertValid, constantTimeEqual } from "../ref.js";
 // policy layer's guard registry needs, and it stays allocation-free and deterministic.
 let MEMORY_INSTANCE_SEQ = 0;
 
+// _digestMatches(held) -> boolean. Re-hash a held entry's chunks with the entry's
+// OWN stored algorithm (digests are self-describing) and compare timing-safe. The
+// one place verify() decides a stored blob still matches what was recorded, so the
+// unclaimed and claimed walks cannot drift apart on how integrity is judged -- they
+// differ only in what they DO with the verdict.
+function _digestMatches(held) {
+  const algo = algoOf(held.entry.digest);
+  const hash = digestHash(algo);
+  for (const buf of held.chunks) hash.update(buf);
+  return constantTimeEqual(finalize(hash, algo), held.entry.digest);
+}
+
 export class MemoryBackend {
   #entries = new Map();
-  // Tombstones: id -> { destroyedAt, cause }. A grave (SPEC.md 4.4) outlives the
+  // Tombstones: id -> { id, destroyedAt, cause }. The stored value is the whole
+  // grave, `id` included -- listTombstones returns these values verbatim and its
+  // consumers read `.id` off them, so the field is load-bearing, not a redundant
+  // copy of the key. A grave (SPEC.md 4.4) outlives the
   // entry it records so a destroyed id never comes back within the ttl. First-
   // write-wins -- an existing grave is never overwritten, since rewriting its
   // destroyedAt would extend the grave's own life.
@@ -120,7 +136,10 @@ export class MemoryBackend {
     const chunks = [];
     let size = 0;
     for await (const chunk of source) {
-      const buf = chunk instanceof Uint8Array ? Buffer.copyBytesFrom(chunk) : Buffer.from(chunk);
+      // isUint8Array, not `instanceof`: a chunk from another realm is still a
+      // Uint8Array and must take the copyBytesFrom path that snapshots the bytes
+      // (the caller may reuse the array after yielding it).
+      const buf = isUint8Array(chunk) ? Buffer.copyBytesFrom(chunk) : Buffer.from(chunk);
       hash.update(buf);
       size += buf.length;
       chunks.push(buf);
@@ -289,10 +308,7 @@ export class MemoryBackend {
     let scanned = 0;
     for (const [id, held] of this.#entries) {
       scanned += 1;
-      const algo = algoOf(held.entry.digest);
-      const hash = digestHash(algo);
-      for (const buf of held.chunks) hash.update(buf);
-      if (!constantTimeEqual(finalize(hash, algo), held.entry.digest)) {
+      if (!_digestMatches(held)) {
         findings.push({ kind: "digest-mismatch", id });
         if (opts.repair) {
           this.#entries.delete(id);
@@ -303,15 +319,12 @@ export class MemoryBackend {
     const now = Date.now();
     for (const [id, held] of this.#claims) {
       scanned += 1; // a claimed blob still occupies the store; disk counts its meta/ sidecar, so match
-      const algo = algoOf(held.entry.digest);
-      const hash = digestHash(algo);
-      for (const buf of held.chunks) hash.update(buf);
       // Digest-checked like any other (disk hashes the claimed blob), but a mismatch
       // is reported and NEVER repaired (mid-pop). In memory the claimed chunks are
       // the same object the digest was taken over at push, so this mismatch is
       // unreachable via the public API -- the check keeps the backends parallel and
       // would catch a future bug that mutated claimed chunks.
-      if (!constantTimeEqual(finalize(hash, algo), held.entry.digest)) findings.push({ kind: "digest-mismatch", id });
+      if (!_digestMatches(held)) findings.push({ kind: "digest-mismatch", id });
       if (now - held.claimedAt >= opts.claimTimeoutMs) findings.push({ kind: "stale-claim", id });
     }
     return { scanned, findings, repaired };
