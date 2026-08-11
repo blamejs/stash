@@ -35,13 +35,16 @@
 // bounds a wedged example, and keeps an example that writes to a relative path
 // (`new DiskBackend({ root: "./.stash" })`) away from the checkout.
 //
-// A body that throws is a failure. There is no "illustrative, skip it" verdict:
+// A body that throws is a failure, and there is no way to opt out of running:
 // the example world defines what an example may assume, and anything outside it
-// is a documentation bug. The single escape hatch is a first line reading
-// `// requires: <what the operator must already have>`, which is not executed --
-// and it lives in the DOCUMENTATION, so the reader sees the prerequisite too and
-// hiding a broken example behind it costs something visible. A skip list in this
-// file would cost nothing and mean nothing.
+// is a documentation bug. An earlier cut carried an escape hatch -- a leading
+// `// requires:` line naming an environment the gate could not build, which was
+// then skipped. It is deliberately absent. Nothing needed it, and a skipped
+// example can only be trusted as far as something can check that it still shows
+// the call it documents, which needs a JavaScript parser this package will not
+// take a dependency on. An unenforceable exemption is a skip list with better
+// manners. Re-open it when a documented call genuinely cannot be executed here,
+// with the enforcement designed alongside it.
 //
 // Before judging a single example, the gate proves it can still tell a good one
 // from a broken one: it runs the CANARIES below -- bodies carrying each defect it
@@ -76,11 +79,6 @@ const WORLD_URL = pathToFileURL(join(ROOT, "scripts", "doc-example-world.js")).h
 // exists so an example that never finishes is killed and reported as one named
 // failure instead of hanging the pipeline.
 const PER_EXAMPLE_MS = 30000;
-
-// An example may DECLARE the operator environment it assumes, as its first line.
-// See the header: this is a marker in the shipped documentation, not an allowlist
-// in a test file.
-const PREREQUISITE = /^\s*\/\/\s*requires:/;
 
 // The two import-declaration forms an @example may use. Anything else starting
 // with `import` cannot be hoisted reliably and is refused by name rather than
@@ -145,6 +143,11 @@ export const CANARIES = [
     expect: "fail",
     body: "// Drop the entry the ref names.\n// The ref is spent afterwards.",
   },
+  {
+    label: "an example that only imports, without showing a call",
+    expect: "fail",
+    body: 'import { Stash } from "@blamejs/stash";',
+  },
 ];
 
 // collectExamples(dir) -> [{ sig, index, body }]
@@ -181,15 +184,6 @@ export function collectExamples(dir = SRC_DIR) {
     }
   }
   return found;
-}
-
-// declaresPrerequisite(body) -- true when the first non-blank line declares the
-// operator environment the example assumes.
-export function declaresPrerequisite(body) {
-  const first = String(body || "")
-    .split("\n")
-    .find((line) => line.trim() !== "");
-  return PREREQUISITE.test(first || "");
 }
 
 // Names bound by the example's own imports -- the world must not redeclare one.
@@ -264,13 +258,10 @@ export function buildExampleModule(body, worldUrl = WORLD_URL) {
   }
   // A body of pure prose runs clean and proves nothing, which would make
   // "delete the code, keep the comment" the cheapest way past a red gate -- the
-  // silent skip this file exists to refuse. An example that genuinely describes a
-  // call it cannot make says so with `// requires:`, which is counted and shown.
-  if (imports.length === 0 && _executableSource(rest) === "") {
-    throw new Error(
-      "has no executable statement -- an @example must run something, or declare " +
-        "`// requires: ...` on its first line",
-    );
+  // silent skip this file exists to refuse. Imports do not satisfy it either: an
+  // example that only names where a symbol comes from never shows it being used.
+  if (_executableSource(rest) === "") {
+    throw new Error("has no executable statement -- an @example must show the call it documents");
   }
   const shadowed = _importedBindings(imports);
   const injected = WORLD_KEYS.filter((key) => !shadowed.has(key));
@@ -310,15 +301,18 @@ function _tail(text, lines) {
     .join(" | ");
 }
 
-// runExample({ sig, index, body }, dir) -> { outcome: "ran" | "declared" | "fail" }
+// runExample({ sig, index, body }, dir) -> { outcome: "ran" | "fail" }
 // Writes the generated module into `dir` (which must exist) and runs it as its own
 // process, with `dir` as its cwd. Exported so the gate's own canaries drive this
 // exact path rather than a copy of it -- a harness only its own checks can reach
 // proves nothing about the gate.
 export function runExample(item, dir) {
   if (item.unrunnable) return { outcome: "fail", error: item.unrunnable };
-  if (declaresPrerequisite(item.body)) return { outcome: "declared" };
 
+  // The static half: an example importing a subpath the package does not publish,
+  // or showing no call at all, is wrong before anything is executed -- and the
+  // comment-block validator catches neither, because it strips import lines
+  // before parse-checking.
   let source;
   try {
     source = buildExampleModule(item.body);
@@ -368,7 +362,7 @@ export function runCanaries(dir, canaries = CANARIES) {
   return wrong;
 }
 
-// runExamples() -> { total, ran, declared, failures, canaries, brokenCanaries }
+// runExamples() -> { total, ran, failures, canaries, brokenCanaries }
 // Runs from a disposable directory; leaves nothing behind. `canaries` is the
 // number that actually ran, so the summary's claim about them is drawn from the
 // run rather than from the length of a constant.
@@ -379,33 +373,17 @@ export function runExamples(canaries = CANARIES) {
     // A gate that cannot tell a broken example from a good one has no verdict to
     // give on the real ones, so it does not pretend to.
     if (brokenCanaries.length > 0) {
-      return {
-        total: 0,
-        ran: 0,
-        declared: 0,
-        failures: [],
-        canaries: canaries.length,
-        brokenCanaries,
-      };
+      return { total: 0, ran: 0, failures: [], canaries: canaries.length, brokenCanaries };
     }
     const items = collectExamples();
     const failures = [];
     let ran = 0;
-    let declared = 0;
     for (const item of items) {
       const result = runExample(item, dir);
       if (result.outcome === "ran") ran += 1;
-      else if (result.outcome === "declared") declared += 1;
       else failures.push({ sig: item.sig, index: item.index, ...result });
     }
-    return {
-      total: items.length,
-      ran,
-      declared,
-      failures,
-      canaries: canaries.length,
-      brokenCanaries,
-    };
+    return { total: items.length, ran, failures, canaries: canaries.length, brokenCanaries };
   } finally {
     try {
       rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -438,9 +416,7 @@ export function report(result) {
     result.ran +
     " of " +
     result.total +
-    " @example blocks executed" +
-    (result.declared ? " (" + result.declared + " declare an operator prerequisite)" : "") +
-    "; " +
+    " @example blocks executed; " +
     result.canaries +
     " canaries discriminate";
   if (result.failures.length > 0) {

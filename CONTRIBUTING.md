@@ -83,19 +83,9 @@ New behavior lands with a test that **reproduces the failure first** (red on the
 
 Every `@example` in a `src/` comment block is run by `node scripts/run-doc-examples.js`, in CI and in the smoke pipeline. Parsing is not enough -- an example calling a method that was renamed, or passing an option the code no longer accepts, compiles perfectly and is still wrong -- so the gate executes each body as a real ES module, in its own process, and the example is proven only when that process exits 0. Import specifiers resolve through the package's published `exports` map, so `@blamejs/stash/backends/disk` is checked against what actually ships.
 
-Most examples are one or two lines because they assume a store and a ref already exist. `scripts/doc-example-world.js` defines that ambient state and is the list of identifiers an example may use without declaring them: `stash`, `ref`, `ciphertext`, `data`, `sink`, `backend`, `primary`, `replica`, `from`, `to`, `bytesFor`. Anything else has to be declared or imported by the example itself. There is no skip list: an example that does not run fails the build.
+Most examples are one or two lines because they assume a store and a ref already exist. `scripts/doc-example-world.js` defines that ambient state and is the list of identifiers an example may use without declaring them: `stash`, `ref`, `ciphertext`, `data`, `sink`, `backend`, `primary`, `replica`, `from`, `to`, `bytesFor`. Anything else has to be declared or imported by the example itself.
 
-If an example genuinely describes a call against an environment it cannot set up -- something the operator must already have running -- say so on its first line:
-
-```js
-/**
- * @example
- *   // requires: a store the host application already opened
- *   await stash.close();
- */
-```
-
-That line is not executed, and it renders on the primitive's page, so the reader sees the prerequisite too.
+There is no way to opt out. An example that does not run fails the build, and one whose body is only prose -- or only imports -- fails too, because it never shows the call it documents. If you hit a case where a documented call genuinely cannot be executed here, raise it on the PR rather than working around the gate: an exemption nothing can check is a skip list, and the answer is either a wider example world or a narrower example.
 
 ## Developer Certificate of Origin (DCO)
 

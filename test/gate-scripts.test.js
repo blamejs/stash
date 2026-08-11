@@ -40,7 +40,6 @@ import {
   CANARIES,
   buildExampleModule,
   collectExamples,
-  declaresPrerequisite,
   report,
   runExample,
   runExamples,
@@ -318,17 +317,26 @@ test("doc-examples: the generated module wraps the body and injects the world", 
   assert.match(source, /finally \{ await __world\.close\(\); \}/);
 });
 
-test("doc-examples: a declared prerequisite is not executed", (t) => {
-  const result = runExample(
-    {
-      sig: "vector.prereq",
-      index: 1,
-      body: "// requires: a store already opened by the host application\nthisWouldThrow();",
-    },
-    exampleDir(t),
+test("doc-examples: there is no verdict that skips execution", { skip: SANDBOXED }, (t) => {
+  // Every example either runs or fails. A body that names an environment it
+  // wants instead of running -- the shape of an opt-out -- gets no special
+  // treatment, and one whose only content is a leading comment fails on the
+  // statement check like any other prose-only body.
+  const dir = exampleDir(t);
+  const outcomes = new Set(
+    [
+      "// requires: a store already opened by the host application\nawait stash.close();",
+      "const entry = await stash.show(ref);\nentry.size;",
+    ].map((body, i) => runExample({ sig: "vector.noskip" + i, index: 1, body }, dir).outcome),
   );
-  assert.equal(result.outcome, "declared");
-  assert.equal(declaresPrerequisite("const x = 1; // requires: nothing"), false);
+  assert.deepEqual([...outcomes], ["ran"]);
+
+  const prose = runExample(
+    { sig: "vector.prose", index: 1, body: "// requires: a store, and nothing else" },
+    dir,
+  );
+  assert.equal(prose.outcome, "fail");
+  assert.match(prose.error, /no executable statement/);
 });
 
 test("doc-examples: @exampleFile cannot silently opt a primitive out of execution", (t) => {
@@ -370,7 +378,7 @@ test("doc-examples: an import that cannot be hoisted is refused by name", () => 
 });
 
 test("doc-examples: node builtins pass through untouched", () => {
-  const source = buildExampleModule('import { test } from "node:test";');
+  const source = buildExampleModule('import { test } from "node:test";\ntest("x", () => {});');
   assert.match(source, /import \{ test \} from "node:test"/);
 });
 
@@ -390,17 +398,15 @@ test("doc-examples: import expressions stay in the body and still resolve", () =
 
 test("doc-examples: an empty parse is a finding, not a pass", () => {
   assert.equal(
-    quietly(() => report({ total: 0, ran: 0, declared: 0, failures: [] })),
+    quietly(() => report({ total: 0, ran: 0, failures: [] })),
     1,
   );
   assert.equal(
-    quietly(() => report({ total: 3, ran: 3, declared: 0, failures: [] })),
+    quietly(() => report({ total: 3, ran: 3, failures: [] })),
     0,
   );
   assert.equal(
-    quietly(() =>
-      report({ total: 3, ran: 2, declared: 0, failures: [{ sig: "s", index: 1, error: "boom" }] }),
-    ),
+    quietly(() => report({ total: 3, ran: 2, failures: [{ sig: "s", index: 1, error: "boom" }] })),
     1,
   );
 });
@@ -412,7 +418,6 @@ test("doc-examples: a canary that stopped discriminating fails the gate", () => 
       report({
         total: 0,
         ran: 0,
-        declared: 0,
         failures: [],
         brokenCanaries: ["a renamed method: expected to fail, got ran"],
       }),
@@ -453,6 +458,9 @@ test("doc-examples: an example whose body executes nothing is refused", () => {
     /no executable statement/,
   );
   assert.throws(() => buildExampleModule("/* only a block comment */"), /no executable statement/);
-  // An imports-only body DOES run something -- the import itself.
-  assert.doesNotThrow(() => buildExampleModule('import { Stash } from "@blamejs/stash";'));
+  // An import names where a symbol comes from; it never shows it being used.
+  assert.throws(
+    () => buildExampleModule('import { Stash } from "@blamejs/stash";'),
+    /no executable statement/,
+  );
 });

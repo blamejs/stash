@@ -28,11 +28,10 @@ the reader's terminal.
   backend-conformance snippet does, is judged on the assertions rather than
   on the import returning. Import specifiers resolve through this package's
   own `exports` map, so an example naming `@blamejs/stash/backends/disk` is
-  checked against what the package actually publishes. There is no way to opt
-  an example out: one that describes a call against an environment it cannot
-  set up declares that on its first line as `// requires: ...`, which is
-  printed in the documentation so the reader sees the prerequisite too.
-  CONTRIBUTING.md describes what an example may assume.
+  checked against what the package actually publishes, and an example whose
+  body is only prose or only imports is rejected for showing no call. There
+  is no way to opt an example out. CONTRIBUTING.md describes what an example
+  may assume.
 
 ### Fixed
 
