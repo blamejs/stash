@@ -79,6 +79,24 @@ Tests run with plain `node --test`; no framework. Backends share one conformance
 
 New behavior lands with a test that **reproduces the failure first** (red on the current tree, green on the fix), driving the real consumer path (`stash.push(...)` / `stash.pop(ref)`, not a poked backend internal) with the adversarial input that triggers it. Root-cause the whole class the bug samples, not just the one input. Use `await using` for any test that needs a live `Stash`.
 
+### Documentation examples are executed
+
+Every `@example` in a `src/` comment block is run by `node scripts/run-doc-examples.js`, in CI and in the smoke pipeline. Parsing is not enough -- an example calling a method that was renamed, or passing an option the code no longer accepts, compiles perfectly and is still wrong -- so the gate executes each body as a real ES module, in its own process, and the example is proven only when that process exits 0. Import specifiers resolve through the package's published `exports` map, so `@blamejs/stash/backends/disk` is checked against what actually ships.
+
+Most examples are one or two lines because they assume a store and a ref already exist. `scripts/doc-example-world.js` defines that ambient state and is the list of identifiers an example may use without declaring them: `stash`, `ref`, `ciphertext`, `data`, `sink`, `backend`, `primary`, `replica`, `from`, `to`, `bytesFor`. Anything else has to be declared or imported by the example itself. There is no skip list: an example that does not run fails the build.
+
+If an example genuinely describes a call against an environment it cannot set up -- something the operator must already have running -- say so on its first line:
+
+```js
+/**
+ * @example
+ *   // requires: a store the host application already opened
+ *   await stash.close();
+ */
+```
+
+That line is not executed, and it renders on the primitive's page, so the reader sees the prerequisite too.
+
 ## Developer Certificate of Origin (DCO)
 
 Contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/). By adding a `Signed-off-by` line to each commit you certify that you wrote the patch -- or otherwise have the right to submit it -- under the project's Apache-2.0 license. Sign off with `git commit -s` (which appends `Signed-off-by: Your Name <you@example.com>`); the sign-off must match the commit author.
@@ -92,6 +110,7 @@ Contributions are accepted under the [Developer Certificate of Origin](https://d
    - `node --test test/` passes.
    - `npm run gates` exits 0 -- the structural detectors, comment-block validator, and api-snapshot are clean. Intentional public-surface changes regenerate the snapshot and commit it alongside the change.
    - `npm run test:sandboxed` passes -- the suite under `--permission` scoped to the test root.
+   - `node scripts/run-doc-examples.js` exits 0 -- every `@example` you touched still runs.
    - The section 13.1 greps are clean (no cipher imports, no `node:sqlite`, no `password`).
 5. **Commit message style:** lowercase imperative. The first line is a one-sentence summary; the body explains *why* and *what tradeoff*, and cites the SPEC.md section that governs the behavior.
 6. **Open the PR.** Wait for CI green.

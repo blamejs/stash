@@ -16,6 +16,17 @@
 //
 //   source-comment-block validate(): an empty parse (wrong libDir, or a
 //     tree with every doc block deleted) is a finding, not a pass.
+//
+//   run-doc-examples: the @example execution gate proves on every run that
+//     it can still fail, by running canaries -- bodies carrying each defect
+//     it exists to catch -- before it judges a single example. The vector
+//     that matters most here hands it a canary whose expected verdict is
+//     deliberately wrong and asserts the whole gate refuses to report:
+//     without it, the line wiring the canaries in is the one thing nothing
+//     checks, and deleting it would leave every run green. That vector
+//     spawns, so it skips under the sandboxed suite the way cli.test.js
+//     does; the rest -- the module shape, the imports refused, the world
+//     injected -- needs no child and always runs.
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -23,9 +34,20 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { diffSnapshot, isClean } from "../scripts/check-api-snapshot.js";
+import { WORLD_KEYS, makeWorld } from "../scripts/doc-example-world.js";
 import { loadNotes, render } from "../scripts/regen-changelog.js";
+import {
+  CANARIES,
+  buildExampleModule,
+  collectExamples,
+  declaresPrerequisite,
+  report,
+  runExample,
+  runExamples,
+} from "../scripts/run-doc-examples.js";
 import * as engine from "../examples/wiki/lib/source-comment-block-validator.js";
 import * as parser from "../examples/wiki/lib/source-doc-parser.js";
+import { SANDBOXED } from "./_helpers.js";
 import { freshScratchDir } from "./_scratch.js";
 
 // ---------------------------------------------------------------------------
@@ -220,4 +242,217 @@ test("comment-blocks: an empty parse is a finding, not a pass", (t) => {
     "zero findings on a tree with zero documented files is fail-open",
   );
   assert.match(findings[0].msg, /no documented source files/);
+});
+
+// ---------------------------------------------------------------------------
+// run-doc-examples -- the @example execution gate can actually fail
+// ---------------------------------------------------------------------------
+
+function exampleDir(t) {
+  const dir = freshScratchDir("doc-examples");
+  mkdirSync(dir, { recursive: true });
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10 }));
+  return dir;
+}
+
+// report() writes an operator's gate verdict. Called for its exit code from a
+// passing test, it puts lines like "FAIL parsed no @example blocks" into a green
+// suite log, where they read as a real failure -- so these calls are silenced.
+function quietly(fn) {
+  const real = { log: console.log, error: console.error };
+  console.log = () => {};
+  console.error = () => {};
+  try {
+    return fn();
+  } finally {
+    console.log = real.log;
+    console.error = real.error;
+  }
+}
+
+test("doc-examples: the world hands out exactly the documented bindings", async () => {
+  const world = await makeWorld();
+  try {
+    assert.deepEqual(Object.keys(world.bindings).sort(), [...WORLD_KEYS].sort());
+    // Not just shaped right -- the state has to be real, or every example that
+    // touches it would pass on a world that does nothing.
+    assert.equal(typeof world.bindings.ref, "string");
+    assert.equal(await world.bindings.stash.has(world.bindings.ref), true);
+    assert.equal((await world.bindings.primary.list()).length, 2);
+    assert.equal((await world.bindings.primary.tombstones()).length, 1);
+    const [live] = await world.bindings.primary.list();
+    assert.ok(Buffer.isBuffer(world.bindings.bytesFor(live.id)));
+  } finally {
+    await world.close();
+  }
+});
+
+test("doc-examples: the parse walks the real tree", () => {
+  const found = collectExamples();
+  assert.ok(found.length > 0, "an empty parse would make the gate pass vacuously");
+  assert.ok(found.every((item) => item.sig && item.body));
+  assert.ok(found.some((item) => item.sig === "stash.push"));
+});
+
+test("doc-examples: the canary set still covers both directions", () => {
+  // The gate runs every example in its own process, which the sandboxed suite
+  // (--permission, no spawn) cannot do -- so the vectors that prove a broken
+  // example FAILS live in the gate itself, as canaries it runs before judging
+  // anything. What is guarded here is that the set has not been hollowed out:
+  // canaries in one direction only would let the gate pass everything, or fail
+  // everything, and still look green from this file.
+  assert.ok(CANARIES.some((c) => c.expect === "ran"));
+  assert.ok(CANARIES.filter((c) => c.expect === "fail").length >= 4);
+  assert.ok(CANARIES.every((c) => c.label && c.body));
+  // The one that cannot be caught by importing a module and watching for a
+  // throw: the failure lands after the import has already resolved.
+  assert.ok(CANARIES.some((c) => c.expect === "fail" && c.body.includes("node:test")));
+});
+
+test("doc-examples: the generated module wraps the body and injects the world", () => {
+  const source = buildExampleModule("const stash = 1;\nstash + 1;");
+  // A function body, not module top level: an example that declares its own
+  // `const stash` or a `var` must shadow the ambient binding, not collide.
+  assert.match(source, /await \(async \(\) => \{/);
+  assert.match(source, /const \{ [^}]*\bstash\b[^}]*\} = __world\.bindings;/);
+  assert.match(source, /finally \{ await __world\.close\(\); \}/);
+});
+
+test("doc-examples: a declared prerequisite is not executed", (t) => {
+  const result = runExample(
+    {
+      sig: "vector.prereq",
+      index: 1,
+      body: "// requires: a store already opened by the host application\nthisWouldThrow();",
+    },
+    exampleDir(t),
+  );
+  assert.equal(result.outcome, "declared");
+  assert.equal(declaresPrerequisite("const x = 1; // requires: nothing"), false);
+});
+
+test("doc-examples: @exampleFile cannot silently opt a primitive out of execution", (t) => {
+  // The comment-block validator accepts @exampleFile in place of @example. This
+  // gate cannot run one, so it has to say so rather than pass over it.
+  const result = runExample(
+    { sig: "vector.file", index: 1, body: "", unrunnable: "documents itself with @exampleFile" },
+    exampleDir(t),
+  );
+  assert.equal(result.outcome, "fail");
+  assert.match(result.error, /@exampleFile/);
+});
+
+test("doc-examples: an import of an unpublished subpath fails the gate", () => {
+  assert.throws(
+    () => buildExampleModule('import { X } from "@blamejs/stash/backends/nosuchbackend";'),
+    /does not publish/,
+  );
+  assert.throws(
+    () => buildExampleModule('import x from "some-other-package";'),
+    /does not publish/,
+  );
+});
+
+test("doc-examples: an example must import by package name, not by path", () => {
+  // A relative import resolves only from inside this checkout, so a reader who
+  // copies the example gets a broken line.
+  assert.throws(
+    () => buildExampleModule('import { Stash } from "../src/index.js";'),
+    /published package name/,
+  );
+});
+
+test("doc-examples: an import that cannot be hoisted is refused by name", () => {
+  assert.throws(
+    () => buildExampleModule('import {\n  Stash,\n} from "@blamejs/stash";'),
+    /cannot hoist/,
+  );
+});
+
+test("doc-examples: node builtins pass through untouched", () => {
+  const source = buildExampleModule('import { test } from "node:test";');
+  assert.match(source, /import \{ test \} from "node:test"/);
+});
+
+test("doc-examples: import expressions stay in the body and still resolve", () => {
+  // `import(...)` and `import.meta` are expressions, not declarations. Hoisting
+  // them would be wrong, and refusing them would block a legitimate example --
+  // but a dynamic specifier still has to resolve like every other one.
+  const source = buildExampleModule(
+    'const mod = await import("@blamejs/stash");\nimport.meta.url;\nmod.Stash;',
+  );
+  assert.doesNotMatch(source, /^import\("/m, "a dynamic import must not be hoisted");
+  assert.match(source, /await import\("file:\/\/[^"]*src\/index\.js"\)/);
+  assert.match(source, /import\.meta\.url;/);
+  // The doc rule holds for a dynamic specifier too.
+  assert.throws(() => buildExampleModule('await import("../src/index.js");'), /package name/);
+});
+
+test("doc-examples: an empty parse is a finding, not a pass", () => {
+  assert.equal(
+    quietly(() => report({ total: 0, ran: 0, declared: 0, failures: [] })),
+    1,
+  );
+  assert.equal(
+    quietly(() => report({ total: 3, ran: 3, declared: 0, failures: [] })),
+    0,
+  );
+  assert.equal(
+    quietly(() =>
+      report({ total: 3, ran: 2, declared: 0, failures: [{ sig: "s", index: 1, error: "boom" }] }),
+    ),
+    1,
+  );
+});
+
+test("doc-examples: a canary that stopped discriminating fails the gate", () => {
+  // The gate is only worth its exit code while it can still tell the two apart.
+  assert.equal(
+    quietly(() =>
+      report({
+        total: 0,
+        ran: 0,
+        declared: 0,
+        failures: [],
+        brokenCanaries: ["a renamed method: expected to fail, got ran"],
+      }),
+    ),
+    1,
+  );
+});
+
+test(
+  "doc-examples: the gate consults its canaries before judging anything",
+  { skip: SANDBOXED },
+  () => {
+    // Hand the real gate one canary whose expected verdict is wrong. If it still
+    // runs the canaries, it notices and refuses to report on the examples; if the
+    // wiring is ever cut, this comes back clean and every run stays green.
+    const result = runExamples([
+      {
+        label: "a body that throws",
+        expect: "ran",
+        body: 'throw new Error("this must not pass");',
+      },
+    ]);
+    assert.deepEqual(result.brokenCanaries, ["a body that throws: expected to ran, got fail"]);
+    assert.equal(result.total, 0, "a gate that cannot discriminate judges nothing");
+    assert.equal(result.canaries, 1);
+    assert.equal(
+      quietly(() => report(result)),
+      1,
+    );
+  },
+);
+
+test("doc-examples: an example whose body executes nothing is refused", () => {
+  // Deleting the code and keeping the prose would otherwise be the cheapest way
+  // past a red gate, and it would be counted as executed.
+  assert.throws(
+    () => buildExampleModule("// Drop the entry the ref names.\n// The ref is spent afterwards."),
+    /no executable statement/,
+  );
+  assert.throws(() => buildExampleModule("/* only a block comment */"), /no executable statement/);
+  // An imports-only body DOES run something -- the import itself.
+  assert.doesNotThrow(() => buildExampleModule('import { Stash } from "@blamejs/stash";'));
 });

@@ -13,12 +13,17 @@
 //     3. node scripts/check-api-snapshot.js
 //     4. node scripts/check-status-lifecycle.js
 //     5. node scripts/regen-changelog.js --check
-//     6. node scripts/check-pack-against-gitignore.js
+//     6. node scripts/regen-readme.js --check
+//     7. node scripts/check-pack-against-gitignore.js
+//     8. node scripts/check-lockfile-sync.js
 //
 //   Runtime stages (PARALLEL, after every static gate is green):
-//     7. node --test          (full suite, wiki e2e included by discovery)
-//     8. node scripts/run-sandboxed.js
-//     9. node .clusterfuzzlite/local-smoke.js  (fuzz targets load + discriminate)
+//     9. node --test          (full suite, wiki e2e included by discovery)
+//    10. node scripts/run-sandboxed.js
+//    11. node .clusterfuzzlite/local-smoke.js  (fuzz targets load + discriminate)
+//    12. node bench/smoke.js
+//    13. node scripts/run-examples.js          (examples/ scripts)
+//    14. node scripts/run-doc-examples.js      (@example blocks in src/)
 //
 // Every child's full output is persisted to .test-output/smoke.log via
 // synchronous fd writes, so a failing run's detail is on disk even if the
@@ -89,6 +94,7 @@ const RUNTIME_STAGES = [
   { name: "fuzz-smoke", args: [".clusterfuzzlite/local-smoke.js"] },
   { name: "bench-smoke", args: ["bench/smoke.js"] },
   { name: "examples", args: ["scripts/run-examples.js"] },
+  { name: "doc-examples", args: ["scripts/run-doc-examples.js"] },
 ];
 
 function runStage(stage) {

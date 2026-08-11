@@ -1798,6 +1798,8 @@ export class Stash extends EventEmitter {
    * never blocks process exit, but it keeps the `Stash` reachable until closed.
    *
    * @example
+   *   import { Stash } from "@blamejs/stash";
+   *
    *   const stash = new Stash({ backend, sweepInterval: "5m" });
    *   try {
    *     await stash.push(data);
