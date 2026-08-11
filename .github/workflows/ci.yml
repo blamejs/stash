@@ -107,3 +107,9 @@ jobs:
 
       - name: Runnable examples
         run: node scripts/run-examples.js
+
+      - name: Doc examples (@example blocks in src/ comment blocks)
+        # The comment-block validator only parse-checks an @example. This runs
+        # every one of them, so a block documenting a method that was renamed or
+        # an option that was removed fails here rather than in a reader's editor.
+        run: node scripts/run-doc-examples.js
