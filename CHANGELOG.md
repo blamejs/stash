@@ -77,12 +77,15 @@ the API reference, are substantially shorter.
   line so it rendered with a space after the hyphen.
 - The documentation site invited crawlers to index its search page, which
   renders a different result set for every query string and duplicates pages
-  already in the sitemap. Search results now carry `noindex,follow` and
-  `robots.txt` holds the path back, along with the container health probe.
-  The link preview card also declared a wide image while the only image on
-  the site is the square logo, so a share preview letterboxed it; the card
-  type now matches the asset, and its dimensions are declared so a scraper
-  need not fetch the file to lay the card out.
+  already in the sitemap. Search results now carry `noindex,follow`, and the
+  page stays crawlable on purpose so that tag can be read: a `robots.txt`
+  disallow would stop the fetch, leaving an already-indexed URL with no way
+  to observe the removal request. The health probe answers JSON and carries
+  no tag, so it is the one path `robots.txt` holds back. The link preview
+  card also declared a wide image while the only image on the site is the
+  square logo, so a share preview letterboxed it; the card type now matches
+  the asset, and its dimensions are declared so a scraper need not fetch the
+  file to lay the card out.
 
 ## 2.0.1 — 2026-08-11
 

@@ -331,8 +331,14 @@ async function run() {
     check("GET /robots.txt -> 200", rb.status === 200);
     check("robots points at the sitemap", rb.body.indexOf("Sitemap: ") !== -1);
     check("robots welcomes every crawler on the docs", /User-agent:\s*\*/.test(rb.body) && /^Allow:\s*\/$/m.test(rb.body));
-    check("robots holds back the per-query search page", /^Disallow:\s*\/search$/m.test(rb.body));
     check("robots holds back the container probe", /^Disallow:\s*\/healthz$/m.test(rb.body));
+    // A Disallow stops the fetch, so a crawler never reads the noindex in the
+    // response and an already-indexed URL has no way to learn it should go.
+    // Anything relying on a noindex tag for removal must stay crawlable.
+    check(
+      "robots does NOT disallow /search, which relies on its noindex tag to be read",
+      !/^Disallow:\s*\/search\b/m.test(rb.body),
+    );
 
     // ---- indexability: docs are indexed, search results are not ----
     var seoPage = await _get(port, "/stash");

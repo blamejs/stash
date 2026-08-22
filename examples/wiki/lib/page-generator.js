@@ -767,16 +767,22 @@ export function build(opts) {
     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
     sitemapEntries.join("\n") + "\n</urlset>\n";
 
-  // Every crawler is welcome on the documentation itself. Two paths are held
-  // back: /search renders a different page per query string, so an indexer
-  // following it spends its budget on thin duplicates of pages already in the
-  // sitemap, and /healthz is a container probe with no content. Neither is
-  // linked from the sitemap; the Disallow saves the crawl budget, and the
-  // noindex tag on the search page handles a copy discovered from a link.
+  // Every crawler is welcome on the documentation itself.
+  //
+  // /search is deliberately NOT disallowed, even though it renders a different
+  // page per query string and must stay out of the index. The two mechanisms
+  // work at different layers and cancel each other out: a Disallow stops the
+  // crawler FETCHING the URL, so it never sees the noindex tag in the response,
+  // and a /search URL already discovered from a link can sit in the index
+  // indefinitely with no way to observe the removal request. Keeping it
+  // crawlable is what lets `noindex,follow` do its job, which is to drop the
+  // page while still following its links through to the real ones.
+  //
+  // /healthz is different and IS disallowed: it answers JSON, so there is no
+  // meta tag to carry a noindex, and nothing anywhere links to it.
   var robotsTxt =
     "User-agent: *\n" +
     "Allow: /\n" +
-    "Disallow: /search\n" +
     "Disallow: /healthz\n" +
     "\nSitemap: " + siteUrl + "/sitemap.xml\n";
 
