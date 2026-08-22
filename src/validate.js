@@ -2,18 +2,14 @@
 // Copyright (c) blamejs contributors
 //
 // @internal -- no operator-facing namespace. The documented surface is the
-// TypeError each public method throws at config time; this is the one
-// mechanism behind all of them.
+// TypeError each public method throws at config time.
 //
 // validate -- config-time input-shape validation, defined ONCE.
 //
-// The policy layer names WHICH options a method accepts and which are
-// fail-loud placeholders for an unshipped milestone; this module owns HOW
-// that is enforced, so the reject-unknown / reject-unimplemented mechanics
-// cannot drift apart across methods (an option whitelist that one method
-// forgets is a silent fail-open).
+// The policy layer names WHICH options a method accepts; this module owns HOW
+// that is enforced, so the mechanics cannot drift apart across methods (an
+// option whitelist one method forgets is a silent fail-open).
 
-// plainObject(value, label) -> value | throws TypeError.
 // @enforced-by validator-shape-reinlined
 // @validator-shape expected a plain object
 export function plainObject(value, label) {
@@ -23,10 +19,9 @@ export function plainObject(value, label) {
   return value;
 }
 
-// options(opts, label, spec) -> opts | throws TypeError.
-// spec.allowed: keys the method accepts today. spec.unimplemented: keys
-// SPEC.md defines whose milestone has not shipped -- each throws rather
-// than sitting silently unenforced.
+// spec.allowed: keys the method accepts today. spec.unimplemented: spec'd keys
+// whose milestone has not shipped, each throwing rather than sitting silently
+// unenforced.
 // @enforced-by validator-shape-reinlined
 // @validator-shape unknown option
 export function options(opts, label, spec) {
@@ -46,12 +41,9 @@ export function options(opts, label, spec) {
   return opts;
 }
 
-// oneOf(value, label, allowed) -> value | throws TypeError. A closed-enum
-// option: the value must be one of the `allowed` tokens or a config-time
-// TypeError names the label and the permitted set (onPopFailure is one such
-// option). The tokens are configuration vocabulary, not capabilities, so the
-// allowed set is safe to echo; the message SHAPE is what stays static per
-// validator class, and the failing value is never quoted back.
+// A closed-enum option. The allowed tokens are configuration vocabulary, not
+// capabilities, so echoing the permitted set is safe; the failing value is never
+// quoted back.
 // @enforced-by validator-shape-reinlined
 // @validator-shape expected one of
 export function oneOf(value, label, allowed) {

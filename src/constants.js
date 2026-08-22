@@ -2,13 +2,11 @@
 // Copyright (c) blamejs contributors
 //
 // @internal -- no operator-facing namespace. Operators pass human-readable
-// forms ('24h', '100mb'); these are the scale facts those forms resolve
-// through.
+// forms ('24h', '100mb'); these are the scale facts they resolve through.
 //
-// constants -- the one home for scale and shape facts. A magnitude used by
-// two modules is declared here once; nothing else in src/ multiplies its
-// own time or byte literals (the raw-scale-literal detector enforces it).
-// Frozen: a constant a caller can reassign is a config surface nobody
+// constants -- the one home for scale and shape facts. Nothing else in src/
+// multiplies its own time or byte literals (the raw-scale-literal detector
+// enforces it). Frozen: a reassignable constant is a config surface nobody
 // audits.
 
 function deepFreeze(obj) {
@@ -23,10 +21,9 @@ const TIME = {
   MINUTE: 60 * 1000,
   HOUR: 60 * 60 * 1000,
   DAY: 24 * 60 * 60 * 1000,
-  // The 2^31-1 ceiling Node's timers accept: a delay above it silently
-  // wraps to ~1ms and fires in a busy loop (a TimeoutOverflowWarning +
-  // backend hammering). A sweepInterval above this is a config error, not a
-  // rounding; operators needing rarer sweeps call prune() on their own clock.
+  // The 2^31-1 ceiling Node's timers accept: a delay above it silently wraps to
+  // ~1ms and fires in a busy loop, so a larger sweepInterval is a config error
+  // rather than a rounding.
   MAX_TIMER_MS: 2_147_483_647,
 };
 
@@ -45,11 +42,8 @@ export const C = deepFreeze({
   },
   AUDIT: {
     // A blobs/<id>.tmp younger than this is a push in flight, not a crash
-    // orphan: verify neither reports nor repairs it, so an audit racing a live
-    // writer cannot delete its half-written blob (CWE-367). One aged past this
-    // grace is a crashed write's orphan -- reported as orphan-tmp, and
-    // discarded under repair. One hour is orders of magnitude above any real
-    // push, composed from TIME.
+    // orphan, so an audit racing a live writer cannot delete its half-written
+    // blob (CWE-367). One aged past the grace is reported as orphan-tmp.
     TMP_GRACE_MS: TIME.HOUR,
   },
 });

@@ -9,13 +9,12 @@
  *
  * @intro
  *   The backend interface (SPEC.md 9) is a stable contract, and this module
- *   is its executable form. A backend holds bytes; `Stash` holds policy. Any
+ *   is its executable form. A backend holds bytes, `Stash` holds policy. Any
  *   object implementing the SPEC.md 9 method set can be handed to
  *   `new Stash({ backend })`, so a store on a filesystem this library does
- *   not ship -- an object store, a remote block device, whatever a
- *   deployment already trusts -- is a first-class backend the moment it
- *   passes the same behavioral cases the in-tree memory and disk backends
- *   pass.
+ *   not ship (an object store, a remote block device, whatever a deployment
+ *   already trusts) is a first-class backend the moment it passes the same
+ *   behavioral cases the in-tree memory and disk backends pass.
  *
  *   `runBackendConformance` registers that behavioral suite against a
  *   backend factory, driving the shipped consumer path (`stash.push(...)`,
@@ -24,13 +23,12 @@
  *   over `maxSize`, `EFULL` over `maxEntries`). It is test-runner-agnostic:
  *   the caller wires their own runner's `test` (and, optionally, an assert),
  *   so it never imports one at module load. The in-tree suite runs the
- *   identical cases against memory and disk, so a third-party backend earns
- *   the same interchangeability claim by running them too.
+ *   identical cases against memory and disk.
  *
  * @card
- *   The SPEC.md 9 backend contract as a runnable suite -- point it at your
- *   own backend factory and your runner's `test`, and it certifies the
- *   store behaves like the ones that ship.
+ *   The SPEC.md 9 backend contract as a runnable suite: point it at your own
+ *   backend factory and your runner's `test`, and it certifies the store
+ *   behaves like the ones that ship.
  */
 
 import { strict as defaultAssert } from "node:assert";
@@ -39,20 +37,16 @@ import { Readable } from "node:stream";
 import { Stash } from "./stash.js";
 import { RefClaimed, RefNotFound, SizeExceeded, StashFull } from "./errors.js";
 
-// drain(readable) -> Buffer. Collect a Readable to a single Buffer. The
-// suite never buffers a real payload; the fixtures here are small.
+// Collect a Readable to one Buffer. Only the small fixtures here are ever buffered.
 async function drain(readable) {
   const chunks = [];
   for await (const chunk of readable) chunks.push(chunk);
   return Buffer.concat(chunks);
 }
 
-// retryOnClaimed(fn) -> awaited fn(), retried while it loses the claim race
-// (RefClaimed). A pop or a budgeted read serializes on an atomic claim; a
-// loser retries until it wins or the entry is exhausted (RefNotFound). The
-// retry yields to the MACROTASK queue (setImmediate), not a microtask spin:
-// a tight microtask loop would starve the claim holder's stream drain (it
-// advances on IO/macrotasks) and livelock -- nobody makes progress.
+// Retry `fn` while it loses the claim race, until it wins or the entry is exhausted. The
+// retry yields to the MACROTASK queue (setImmediate): a microtask spin would starve the
+// claim holder's stream drain, which advances on IO and macrotasks, and livelock.
 async function retryOnClaimed(fn) {
   for (;;) {
     try {
@@ -76,17 +70,16 @@ async function retryOnClaimed(fn) {
  * @related    stash.Stash, stash.backends.MemoryBackend
  *
  * Register the SPEC.md 9 backend conformance suite against a backend
- * `factory` -- `{ name, create() }`, where `create()` returns a fresh
- * backend per case and `name` is a required non-empty string that labels
- * every case this registers (`"<name>: <case>"`), so two backends certified
- * in one run produce two distinguishable suites. A factory missing either
- * member is a `TypeError`. `options.test` is your runner's test function
- * (`(title, fn) => void`); `options.assert` is a `node:assert/strict`-shaped
- * assertion object, defaulting to the built-in when omitted. Every case
- * drives the shipped `Stash` consumer path against a `Stash` wrapping the
- * factory's backend, so passing the suite is proof the backend is
- * interchangeable with the ones that ship. Zero dependencies, and no test
- * runner is imported here -- the caller owns that choice.
+ * `factory` of `{ name, create() }`, where `create()` returns a fresh backend
+ * per case and `name` is a required non-empty string labelling every case
+ * (`"<name>: <case>"`), so two backends certified in one run produce two
+ * distinguishable suites. A factory missing either member is a `TypeError`.
+ * `options.test` is your runner's test function (`(title, fn) => void`);
+ * `options.assert` is a `node:assert/strict`-shaped assertion object,
+ * defaulting to the built-in when omitted. Every case drives the shipped
+ * `Stash` consumer path against a `Stash` wrapping the factory's backend, so
+ * passing the suite is proof the backend is interchangeable with the ones
+ * that ship. No test runner is imported here; the caller owns that choice.
  *
  * @example
  *   import { test } from "node:test";
@@ -116,20 +109,15 @@ export function runBackendConformance(factory, options) {
   ) {
     throw new TypeError("runBackendConformance(factory, ...): factory must be { name, create() }");
   }
-  // `name` labels every case this harness registers. Certifying two backends in one
-  // run otherwise produces two byte-identical title sets, and a failure names no
-  // backend -- so the name is required, and required means enforced here rather than
-  // only described in the docs.
+  // Without the label, two backends certified in one run produce byte-identical title
+  // sets and a failure that names no backend.
   const test = (title, fn) => register(factory.name + ": " + title, fn);
-  // Call create AS A METHOD of the factory, never a bare extracted reference: the
-  // documented contract is `{ name, create() }`, so an author may legitimately write
-  // create() as an object method that reads its own config through `this` (a root
-  // path, a client handle). Extracting `factory.create` and calling it bare would
-  // strip that receiver and hand create() a `this` of undefined.
+  // Called AS A METHOD, never a bare extracted reference: the contract is
+  // `{ name, create() }`, so an author may read config through `this`, and extracting
+  // the function would hand create() a `this` of undefined.
   const create = () => factory.create();
 
   // ---- Round-trip fidelity: every source type in, identical bytes out ----
-  // A backend that drops, reorders, aliases, or re-encodes bytes fails here.
 
   test("round-trips a Buffer; apply is non-destructive", async () => {
     const stash = new Stash({ backend: create() });
@@ -174,10 +162,8 @@ export function runBackendConformance(factory, options) {
   });
 
   test("round-trips mixed chunk types: a streamed string chunk and a typed-array chunk encode as bytes", async () => {
-    // A streamed string chunk is the ONLY way to reach the per-chunk UTF-8
-    // measurement and encoding of a source (a top-level string is converted to a
-    // Buffer before the stream runs), so a backend must size and encode it the same
-    // as the disk and memory backends do -- the byte length is UTF-8, not char count.
+    // A streamed string chunk is the ONLY way to reach per-chunk UTF-8 encoding (a
+    // top-level string becomes a Buffer first), and it is measured in bytes, not chars.
     const stash = new Stash({ backend: create() });
     async function* chunks() {
       yield "text chunk ";
@@ -190,10 +176,9 @@ export function runBackendConformance(factory, options) {
   });
 
   test("stream chunks are copied at write: caller buffer reuse cannot rewrite stored bytes", async () => {
-    // A source that reuses its chunk buffer after the yield -- the pooled
-    // slab / scratch-buffer pattern. The store outlives the push, so a
-    // backend that retains the caller's buffer instead of an owned copy
-    // lets a later mutation rewrite stored bytes out from under the digest.
+    // The pooled-slab pattern. The store outlives the push, so a backend retaining the
+    // caller's buffer instead of an owned copy lets a later mutation rewrite stored
+    // bytes out from under the digest.
     const stash = new Stash({ backend: create() });
     const scratch = Buffer.from("aaaa");
     async function* reusing() {
@@ -219,10 +204,9 @@ export function runBackendConformance(factory, options) {
   });
 
   test("an abandoned apply leaves the entry intact and releases its handle", async () => {
-    // Destroy the stream after the first chunk: apply is non-destructive,
-    // so the entry must survive a partial read, a later apply must drain in
-    // full, and drop must succeed immediately -- a read handle left open by
-    // the abort would block the delete on some filesystems.
+    // Destroying the stream after the first chunk must leave the entry readable and
+    // droppable: a read handle left open by the abort would block the delete on some
+    // filesystems.
     const stash = new Stash({ backend: create() });
     const payload = Buffer.alloc(262144, 7);
     const ref = await stash.push(payload);
@@ -384,9 +368,8 @@ export function runBackendConformance(factory, options) {
 
   test("concurrent pop: exactly one drains the payload, the other is RefClaimed (ECLAIMED)", async () => {
     const stash = new Stash({ backend: create() });
-    // A payload above the stream highWaterMark: the winner's claim stays
-    // held (backpressure) until it is drained, so the loser genuinely races
-    // a live claim rather than a payload that already auto-committed.
+    // Above the stream highWaterMark, so backpressure holds the winner's claim until it
+    // is drained and the loser races a live claim, not one that already auto-committed.
     const payload = Buffer.alloc(65536, 7);
     const ref = await stash.push(payload);
     const settled = await Promise.allSettled([stash.pop(ref), stash.pop(ref)]);

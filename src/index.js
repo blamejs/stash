@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) blamejs contributors
 //
-// The public surface of @blamejs/stash: the Stash policy class and the
-// typed error set. Backends load from their own subpath
-// (@blamejs/stash/backends/memory) so a consumer's bundle carries only the
-// storage it uses.
+// The public surface: the Stash policy class and the typed error set. Backends
+// load from their own subpath so a bundle carries only the storage it uses.
 
 import pkg from "../package.json" with { type: "json" };
 

@@ -6,18 +6,15 @@
 //
 // entry -- the canonical Entry structure (SPEC.md 4), defined ONCE.
 //
-// One structure, both directions: every path that constructs an entry --
-// a push, the disk backend's meta read, store()'s replication input --
-// composes this module, so the writer's shape and a reader's
-// validation can never diverge. A second Entry construction site is the
-// bug class this file exists to prevent -- the readsLeft field-literal
-// shape is detector-enforced.
+// One structure, both directions: a push, the disk backend's meta read, and
+// store()'s replication input all compose this module, so the writer's shape and
+// a reader's validation can never diverge. A second Entry construction site is
+// the bug class this file exists to prevent.
 
 import { isValidDigest } from "./digest.js";
 import { isValid } from "./ref.js";
 
-// The frozen field set, in canonical order. The sidecar codec derives its
-// accept-list from THIS array, not a second copy.
+// The sidecar codec derives its accept-list from THIS array, not a second copy.
 export const FIELDS = Object.freeze([
   "id",
   "size",
@@ -37,14 +34,10 @@ function _isCount(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
-// assertShape(value, ErrorClass) -> value | throws new ErrorClass(...).
-// Strict input validation of stored bytes (CWE-20; the sidecar is RFC 8259
-// JSON). The read direction of the canonical shape: a STORED entry (a disk
-// sidecar, a replicated insert) must carry exactly the FIELDS set with
-// every field well-typed -- extra keys, missing keys, or a type drift are
-// the caller's verdict class, never a partially-trusted object. Messages
-// name the failing FIELD, never a value: field names are contract, values
-// are capabilities.
+// The read direction: stored bytes are untrusted (CWE-20; the sidecar is RFC
+// 8259 JSON), so a stored entry must carry exactly FIELDS with every field
+// well-typed. Messages name the failing FIELD, never a value: field names are
+// contract, values are capabilities.
 // @enforced-by behavioral -- the hostile-sidecar battery drives every
 //   rejection branch through the shipped read path; the shape itself has
 //   no rename-proof code signature apart from entry.make's, which the
@@ -72,11 +65,9 @@ export function assertShape(value, ErrorClass) {
   if (budgeted !== (value.readsLeft !== null)) {
     throw new ErrorClass("stored entry rejected: read budget coherence");
   }
-  // A LIVE budgeted entry has readsLeft in [1, reads]: the read that spends the last
-  // credit destroys the entry, so 0 (or below) never persists -- an entry that carries
-  // it is exhausted-but-undestroyed, a malformed shape a replica must not be able to
-  // smuggle in (store() would otherwise accept it, and applying it streams the bytes
-  // then throws a bare TypeError from the debit and orphans the claim). Reject it here.
+  // A LIVE budgeted entry has readsLeft in [1, reads]: the read spending the last
+  // credit destroys the entry, so 0 never persists. An entry carrying it is
+  // exhausted-but-undestroyed, which a replica must not be able to smuggle in.
   if (
     budgeted &&
     (!(Number.isSafeInteger(value.readsLeft) && value.readsLeft > 0) ||
@@ -88,31 +79,21 @@ export function assertShape(value, ErrorClass) {
   return value;
 }
 
-// isExpired(entry, nowMs) -> boolean. The ONE expiry comparator: a null
-// expiresAt never expires; otherwise the entry is expired once `nowMs` reaches
-// its deadline. The boundary is `<=`, not `<` -- an entry whose deadline is the
-// current instant IS expired, which is what makes a `ttl: 0` push deterministic
-// (expired at birth, no clock-race in the tests). Every read verb's lazy gate,
-// list's filter, and prune() route their expiry decision through here so a
-// second relational comparison of `.expiresAt` can never drift from this one.
+// The ONE expiry comparator. The boundary is `<=`, not `<`: an entry whose
+// deadline is the current instant IS expired, which is what makes a `ttl: 0`
+// push deterministic rather than a clock race.
 // @enforced-by guard-shape-reinlined
 // @guard-shape \.expiresAt\s*[<>]
 export function isExpired(entry, nowMs) {
   return entry.expiresAt !== null && entry.expiresAt <= nowMs;
 }
 
-// make(id, meta, ttlMs, reads) -> a fresh entry. Size and digest are the
-// backend's to fill during the write stream. `ttlMs` (null = no expiry) stamps
-// `expiresAt` from the SAME `createdAt` clock read, so the two can never come
-// from two different reads. The sum must land on a safe integer -- an expiresAt
-// past 2^53-1 serializes as a lie (JSON turns a non-finite into null = "never
-// expires") or manufactures an integrity verdict on every later read -- so a
-// ttl that overflows it is a config-time TypeError, caught here at the single
-// construction site. `reads` (null = unlimited) is the read budget; a budgeted
-// entry initializes `readsLeft` equal to `reads`, and both travel together
-// through the sidecar so a reader can never see one without the other. A
-// non-positive or non-integer budget is a config-time TypeError, at the same
-// single site.
+// Size and digest are the backend's to fill during the write stream. `expiresAt`
+// is stamped from the SAME `createdAt` clock read, so the two can never come
+// from different reads, and the sum must land on a safe integer: an expiresAt
+// past 2^53-1 serializes as a lie (JSON turns a non-finite into null, meaning
+// "never expires"). `reads` and `readsLeft` travel together, so a reader can
+// never see one without the other.
 // @enforced-by guard-shape-reinlined
 // @guard-shape readsLeft\s*:
 export function make(id, meta, ttlMs = null, reads = null) {
@@ -139,34 +120,23 @@ export function make(id, meta, ttlMs = null, reads = null) {
   };
 }
 
-// The tombstone schema -- a grave's canonical shape (SPEC.md 4.4), defined ONCE
-// alongside the Entry it outlives, so the disk sidecar reader and tombstones()
-// validate through one home. A tombstone says only "never accept this id again":
-// id + when + how, and NOTHING that describes the body -- no digest, no size, no
-// meta -- because recording what the entry was would leak the content the
-// destruction removed. `CAUSES` is the frozen set of early-destruction paths
-// (SPEC.md 4.4); expiry writes no grave, so it is not among them.
+// A grave's canonical shape (SPEC.md 4.4). It says only "never accept this id
+// again": id, when, how, and NOTHING describing the body, because recording what
+// the entry was would leak the content the destruction removed. `CAUSES` is the
+// frozen set of early-destruction paths; expiry writes no grave.
 export const TOMBSTONE_FIELDS = Object.freeze(["id", "destroyedAt", "cause"]);
 export const CAUSES = Object.freeze(["pop", "drop", "clear", "spent"]);
 
-// makeTombstone(id, cause) -> a fresh tombstone. `destroyedAt` is stamped from
-// the one clock read at the single construction site (the Entry.make precedent),
-// so a grave's timestamp is never assembled from two reads. The write direction
-// of the tombstone shape; no other module hand-rolls a `{ id,
-// destroyedAt, cause }` literal (the field-literal shape is detector-enforced).
+// The write direction. No other module hand-rolls a
+// `{ id, destroyedAt, cause }` literal.
 // @enforced-by guard-shape-reinlined
 // @guard-shape destroyedAt\s*:
 export function makeTombstone(id, cause) {
   return { id, destroyedAt: Date.now(), cause };
 }
 
-// assertTombstoneShape(value, ErrorClass) -> value | throws. The read direction:
-// a STORED grave (a disk tombstone sidecar) is untrusted bytes -- exactly the
-// TOMBSTONE_FIELDS set, an id that passes the ref whitelist, a `destroyedAt` safe
-// non-negative integer, and a `cause` in the frozen set. Extra keys, missing
-// keys, a type drift, or an unknown cause are the caller's verdict class. Messages
-// name the failing FIELD, never a value: field names are contract, values (the id
-// especially) are capabilities.
+// The read direction: a stored grave is untrusted bytes. Messages name the
+// failing FIELD, never a value, since the id especially is a capability.
 // @enforced-by behavioral -- the hostile-tombstone battery drives every rejection
 //   branch through the shipped tombstones()/store() path; the shape has no
 //   rename-proof code signature apart from makeTombstone's, which the guard owns.
@@ -186,14 +156,11 @@ export function assertTombstoneShape(value, ErrorClass) {
   return value;
 }
 
-// spend(entry) -> a COPY with `readsLeft` decremented by one. The monotone
-// read-budget debit (SPEC.md 4.1, 4.2), owned by the schema home so no backend
-// hand-rolls `readsLeft` arithmetic -- the guard-shape tripwire keeps the field
-// literal here. It never mutates its argument (structuredClone discipline). A
-// caller contract, not hostile input: spending an unbudgeted entry, or one with
-// no credit left, is a TypeError -- never a silent no-op that would let a
-// budgeted entry outlive its budget. The decrement is only ever applied while
-// the caller holds the entry's claim, which is the cross-process mutex.
+// The monotone read-budget debit (SPEC.md 4.1, 4.2), returning a COPY so no
+// backend hand-rolls `readsLeft` arithmetic. Spending an unbudgeted or exhausted
+// entry is a TypeError, never a silent no-op that would let a budgeted entry
+// outlive its budget. Applied only while the caller holds the entry's claim,
+// which is the cross-process mutex.
 // @enforced-by guard-shape-reinlined
 // @guard-shape readsLeft\s*:
 export function spend(entry) {

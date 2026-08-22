@@ -73,8 +73,31 @@ function isInternal(p) {
 // anchor stripped; absolute URLs and pure in-page anchors are skipped, and the
 // scope is targets ending in `.md` so a shipped doc's cross-references stay
 // inside the tarball. A hit is a broken local link for a package consumer.
+//
+// BOTH reference forms count. A markdown link renders as a link, and a bare
+// `FILENAME.md` code span renders as a filename the reader is told to open;
+// either one sends a tarball consumer to a file that is not there. Checking only
+// the link form is how README's "read ARCHITECTURE.md / THREAT-MODEL.md" pointed
+// at two files the tarball omitted while this gate stayed green.
 function checkDocLinks(packedSet, violations) {
+  // [text](target.md) and [text](target.md#anchor)
   const LINK = /\]\(([^)\s]+)\)/g;
+  // `NAME.md` as an inline code span, the "go read this file" form
+  const CODE_SPAN = /`([A-Za-z0-9._][A-Za-z0-9._/-]*\.md)`/g;
+
+  const flag = (doc, target, form) => {
+    const resolved = join(dirname(doc), target).replace(/\\/g, "/").replace(/^\.\//, "");
+    if (packedSet.has(resolved)) return;
+    violations.push(
+      doc +
+        " " +
+        form +
+        " " +
+        JSON.stringify(target) +
+        " which the tarball omits -- a broken local reference for package consumers",
+    );
+  };
+
   for (const doc of packedSet) {
     if (!doc.endsWith(".md")) continue;
     let text;
@@ -84,6 +107,7 @@ function checkDocLinks(packedSet, violations) {
       continue;
     }
     let m;
+    LINK.lastIndex = 0;
     while ((m = LINK.exec(text)) !== null) {
       let target = m[1];
       if (/^[a-z][a-z0-9+.-]*:/i.test(target)) continue; // absolute URL (has a scheme)
@@ -91,15 +115,11 @@ function checkDocLinks(packedSet, violations) {
       const hash = target.indexOf("#");
       if (hash !== -1) target = target.slice(0, hash);
       if (!target.endsWith(".md")) continue; // scope: doc cross-references
-      const resolved = join(dirname(doc), target).replace(/\\/g, "/").replace(/^\.\//, "");
-      if (!packedSet.has(resolved)) {
-        violations.push(
-          doc +
-            " links to " +
-            JSON.stringify(target) +
-            " which the tarball omits -- a broken local link for package consumers",
-        );
-      }
+      flag(doc, target, "links to");
+    }
+    CODE_SPAN.lastIndex = 0;
+    while ((m = CODE_SPAN.exec(text)) !== null) {
+      flag(doc, m[1], "names");
     }
   }
 }

@@ -69,6 +69,9 @@ function _readmeLink(href) {
 var esc = ent.escapeHtml;
 
 var BRAND = "StashJS";
+// The shipped logo is square, and og:image:width/height declare it so a card
+// scraper does not have to fetch the file to lay the card out.
+var OG_IMAGE_SIZE = 1254;
 var SITE_DESCRIPTION = "A zero-dependency, ephemeral, crypto-agnostic content store for Node.js: bytes in, ref out, bytes out once and they're gone - random-capability refs, streaming-first, fail-closed typed errors.";
 
 // A one-line meta description from prose: strip tags/whitespace, cap length.
@@ -283,7 +286,11 @@ function _shell(opts) {
     '<meta name="viewport" content="width=device-width,initial-scale=1">',
     "<title>" + fullTitle + "</title>",
     '<meta name="description" content="' + esc(desc) + '">',
-    '<meta name="robots" content="index,follow">',
+    // A search-result page is thin, duplicated content that changes with every
+    // query string, so it is followed (its links lead to the real pages) but
+    // never indexed. robots.txt disallows it too; the tag is what handles a
+    // copy a crawler already discovered from a link.
+    '<meta name="robots" content="' + (opts.noindex ? "noindex,follow" : "index,follow") + '">',
     '<meta name="color-scheme" content="dark light">',
     '<link rel="canonical" href="' + esc(canonical) + '">',
     // Icons + PWA install surface: the logo doubles as the favicon and
@@ -304,10 +311,16 @@ function _shell(opts) {
     '<meta property="og:description" content="' + esc(desc) + '">',
     '<meta property="og:url" content="' + esc(canonical) + '">',
     '<meta property="og:image" content="' + esc(ogImage) + '">',
+    // Declared so a scraper can lay out the card without fetching the file.
+    '<meta property="og:image:width" content="' + OG_IMAGE_SIZE + '">',
+    '<meta property="og:image:height" content="' + OG_IMAGE_SIZE + '">',
+    '<meta property="og:image:type" content="image/png">',
     '<meta property="og:image:alt" content="' + BRAND + '">',
     '<meta property="og:locale" content="en_US">',
     // Twitter card.
-    '<meta name="twitter:card" content="summary_large_image">',
+    // `summary`, not `summary_large_image`: the site's only card image is the
+    // square logo, and a wide card centre-crops a square into a letterbox.
+    '<meta name="twitter:card" content="summary">',
     '<meta name="twitter:title" content="' + fullTitle + '">',
     '<meta name="twitter:description" content="' + esc(desc) + '">',
     '<meta name="twitter:image" content="' + esc(ogImage) + '">',
@@ -489,6 +502,7 @@ export function renderSearch(built, q) {
   return _shell({
     title: "Search",
     path: "/search",
+    noindex: true,
     description: "Full-text search over the StashJS documentation.",
     nav: _renderNav(built.navGroups, "/search", null),
     main: main.join("\n"),
@@ -739,16 +753,38 @@ export function build(opts) {
   var symbols = symbolIndex.build(entries, docsByNs, { bare: _bare, anchor: _anchor });
   var symbolsJson = JSON.stringify({ count: symbols.length, symbols: symbols });
 
-  var today = new Date().toISOString().slice(0, 10);
+  // <loc> only. The pages are generated at boot, so the only <lastmod> this
+  // process could compute is "today", which would restamp every URL as freshly
+  // modified on every container restart. A lastmod that is always today is a
+  // false signal, and a crawler that catches one stops trusting the field
+  // altogether, so the honest sitemap omits it. <changefreq> and <priority> are
+  // omitted for the same reason: they are self-reported hints the major
+  // crawlers document as ignored, and inventing values for them says nothing.
   var sitemapEntries = Object.keys(pages).sort().map(function (p) {
-    return "  <url><loc>" + esc(siteUrl + p) + "</loc><lastmod>" + today + "</lastmod>" +
-      "<changefreq>weekly</changefreq><priority>" + (p === "/" ? "1.0" : "0.8") + "</priority></url>";
+    return "  <url><loc>" + esc(siteUrl + p) + "</loc></url>";
   });
   var sitemapXml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
     sitemapEntries.join("\n") + "\n</urlset>\n";
 
-  var robotsTxt = "User-agent: *\nAllow: /\n\nSitemap: " + siteUrl + "/sitemap.xml\n";
+  // Every crawler is welcome on the documentation itself.
+  //
+  // /search is deliberately NOT disallowed, even though it renders a different
+  // page per query string and must stay out of the index. The two mechanisms
+  // work at different layers and cancel each other out: a Disallow stops the
+  // crawler FETCHING the URL, so it never sees the noindex tag in the response,
+  // and a /search URL already discovered from a link can sit in the index
+  // indefinitely with no way to observe the removal request. Keeping it
+  // crawlable is what lets `noindex,follow` do its job, which is to drop the
+  // page while still following its links through to the real ones.
+  //
+  // /healthz is different and IS disallowed: it answers JSON, so there is no
+  // meta tag to carry a noindex, and nothing anywhere links to it.
+  var robotsTxt =
+    "User-agent: *\n" +
+    "Allow: /\n" +
+    "Disallow: /healthz\n" +
+    "\nSitemap: " + siteUrl + "/sitemap.xml\n";
 
   function groupForPath(p) { return pathToGroup[p] || null; }
 

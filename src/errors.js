@@ -9,26 +9,21 @@
  *
  * @intro
  *   Every failure StashJS reports is a typed error with a stable `.code`.
- *   Consumers branch on the code, never on the message text -- messages are
- *   free to improve between patches; codes are frozen. All classes extend
+ *   Consumers branch on the code, never on the message text: messages are
+ *   free to improve between patches, codes are frozen. All classes extend
  *   `StashError`, so `err instanceof StashError` separates a stash verdict
  *   from an unrelated bug.
  *
- *   One rule binds every message: it never contains a ref, a `meta` value,
- *   or a filesystem path (the CWE-209 / CWE-532 exposure classes). A ref is
- *   a capability, and an error that echoes a capability into a log file has
- *   leaked it. Messages describe the failure class; the caller already
- *   holds the identifiers it passed in.
+ *   No message ever contains a ref, a `meta` value, or a filesystem path
+ *   (the CWE-209 / CWE-532 exposure classes). A ref is a capability, and an
+ *   error that echoes one into a log file has leaked it.
  *
  * @card
- *   Typed error classes with stable codes -- the fail-closed verdict surface
+ *   Typed error classes with stable codes: the fail-closed verdict surface
  *   of the store.
  */
 
-/**
- * Base class for every StashJS error. Carries a stable string `code`;
- * subclasses fix the code and a capability-free default message.
- */
+/** Base class for every StashJS error. Subclasses fix a stable string `code` and a capability-free default message. */
 export class StashError extends Error {
   constructor(message) {
     super(message);
