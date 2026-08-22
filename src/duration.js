@@ -2,21 +2,17 @@
 // Copyright (c) blamejs contributors
 //
 // @internal -- no operator-facing namespace. Constructor and push options
-// ('24h', '30m', '7d') are parsed here; operators never call this module
-// directly.
+// ('24h', '30m', '7d') are parsed here.
 //
 // duration -- parse a human duration into milliseconds.
 //
-// Accepted forms: a non-negative finite number (already ms), a string of
-// the shape <count><unit> with unit one of s / m / h / d, or null /
-// undefined (meaning "no duration" -> null). Anything else is a TypeError
-// at config time -- a mistyped TTL should fail at boot, not silently
-// become "no expiry".
+// Accepted: a non-negative safe integer (already ms), <count><unit> with unit
+// s / m / h / d, or null / undefined ("no duration"). Anything else is a
+// config-time TypeError, so a mistyped TTL fails at boot rather than silently
+// becoming "no expiry".
 
 import { C } from "./constants.js";
 
-// Every consumer resolves durations through parse() rather than
-// multiplying its own literals; the scale facts live in constants.
 const UNIT_MS = {
   s: C.TIME.SECOND,
   m: C.TIME.MINUTE,
@@ -26,15 +22,12 @@ const UNIT_MS = {
 
 const DURATION_PATTERN = /^(\d+)(s|m|h|d)$/;
 
-// parse(value, label) -> number(ms) | null | throws TypeError.
 // @enforced-by raw-time-scale-literal
 export function parse(value, label = "duration") {
   if (value === null || value === undefined) return null;
   if (typeof value === "number") {
-    // A safe integer, not merely finite: a fractional ms (1500.5) or a value
-    // past 2^53-1 (Number.MAX_VALUE) makes expiresAt = createdAt + ms a
-    // non-safe-integer -- which JSON serializes as a lie or trips the stored
-    // shape's integer check on every later read. Reject the bad duration here.
+    // Safe integer, not merely finite: a fractional or over-range ms makes
+    // expiresAt = createdAt + ms non-exact, which JSON then serializes as a lie.
     if (!Number.isSafeInteger(value) || value < 0) {
       throw new TypeError(label + ": expected a non-negative integer number of milliseconds");
     }
@@ -46,9 +39,8 @@ export function parse(value, label = "duration") {
       throw new TypeError(label + ": expected a duration like '30m', '24h', or '7d'");
     }
     const ms = Number(match[1]) * UNIT_MS[match[2]];
-    // The number path demands a finite value; the computed path holds the
-    // stronger exact-integer bound -- a count that overflows to Infinity or
-    // sheds precision would silently change the configured terms.
+    // The computed path holds the same exact-integer bound: an overflow would
+    // silently change the configured terms.
     if (!Number.isSafeInteger(ms)) {
       throw new TypeError(label + ": duration overflows the exact millisecond range");
     }

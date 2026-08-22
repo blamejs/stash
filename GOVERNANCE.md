@@ -10,7 +10,7 @@ It exists so a consumer betting their stack on the library can answer three ques
 
 ## Current governance model
 
-Solo maintainer, pre-1.0.
+Solo maintainer.
 
 - **Maintainer:** dotCooCoo (Robert Lee), via GitHub user [dotCooCoo](https://github.com/dotCooCoo).
 - **Organization:** github.com/blamejs.
@@ -22,7 +22,7 @@ The project transitions to a multi-maintainer model when an aligned co-maintaine
 
 - **Technical direction.** Maintainer-final, within the boundaries [SPEC.md](SPEC.md) draws. The spec is the contract: a behavior change requires a spec change first, and the spec's "do not build these" list (section 3) is binding on the maintainer too. Consumer input arrives via GitHub Issues + Discussions; the maintainer weighs it but the final call rests with them. There is no formal vote. The delivery plan is public in SPEC.md section 12.
 - **Security-vulnerability triage.** Coordinated disclosure via [GitHub Security Advisories](https://github.com/blamejs/stash/security/advisories/new), a fix target for High / Critical vulnerabilities in the library's own code, and a public advisory on remediation. There are no dependencies, vendored or otherwise, so there is no third-party-CVE triage lane.
-- **Consumer-impacting changes.** Pre-1.0 the library reserves the right to break consumer-facing surface in any release; post-1.0, breaking changes ship deprecation warnings at least one minor before removal, with a 24-month LTS window per [LTS-CALENDAR.md](LTS-CALENDAR.md) and the upgrade recipe recorded in [MIGRATING.md](MIGRATING.md).
+- **Consumer-impacting changes.** Breaking changes ship deprecation warnings at least one minor before removal, with a 24-month LTS window per [LTS-CALENDAR.md](LTS-CALENDAR.md) and the upgrade recipe recorded in [MIGRATING.md](MIGRATING.md). Where a release has not met that commitment, it is named in MIGRATING.md rather than left to be discovered.
 - **Releases.** Patch is the default; minor requires an explicit decision the maintainer documents in the release notes; major requires a deprecation cycle.
 - **Governance change process.** Edits to this file require a consumer-facing 30-day RFC period via GitHub Discussions. RFCs open at the proposal stage and close with a maintainer decision + rationale in the discussion thread.
 
@@ -37,7 +37,7 @@ Bus-factor-1 is the largest non-technical risk the project carries. This section
 A named successor requires:
 
 - An aligned contributor with sustained commit cadence to a core area (the policy layer, the backend interface, the ref/capability machinery, or the release workflow).
-- Demonstrated familiarity with the design decisions recorded in [SPEC.md](SPEC.md) and [ARCHITECTURE.md](ARCHITECTURE.md) -- in particular, why the "do not build these" list rejects what it rejects.
+- Demonstrated familiarity with the design decisions recorded in [SPEC.md](SPEC.md) and [ARCHITECTURE.md](ARCHITECTURE.md), in particular why the "do not build these" list rejects what it rejects.
 - A documented commitment to the project's stated discipline: zero dependencies, crypto-agnosticism (no key ever lives in the store), fail-loud typed errors, and the monotone lifecycle.
 
 The maintainer reviews successor candidacy whenever a contributor crosses the sustained-core-area-commit threshold. Until a successor is named, the sections below describe the fallback path.
@@ -71,9 +71,9 @@ Every release commit and tag is signed.
 
 Design decisions land in **public, repo-resident artifacts**:
 
-- [SPEC.md](SPEC.md) -- the authoritative specification, including the reasoning behind every deliberate rejection.
-- [ARCHITECTURE.md](ARCHITECTURE.md) -- the layer shape and the design principles behind it.
-- [CHANGELOG.md](CHANGELOG.md) -- consumer-facing surface evolution.
+- [SPEC.md](SPEC.md), the authoritative specification, including the reasoning behind every deliberate rejection.
+- [ARCHITECTURE.md](ARCHITECTURE.md), the layer shape and the design principles behind it.
+- [CHANGELOG.md](CHANGELOG.md), consumer-facing surface evolution.
 
 A successor inheriting the project relies on these artifacts plus the source code itself; there is no private decision record a successor would be missing.
 

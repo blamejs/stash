@@ -11,30 +11,29 @@
  * @intro
  *   The operational CLI: inspect and maintain a disk-backed stash from the shell
  *   without writing a Node program. It ships as the `stashjs` command
- *   (`npx @blamejs/stash <subcommand>`), and it composes ONLY the shipped query
- *   and maintenance verbs -- `verify`, `stats`, `prune`, `list`, `tombstones`,
- *   `has`. It never moves bytes: `push` / `apply` / `pop` / `store` mint or stream
- *   capabilities and blobs, and `drop` / `clear` destroy by ref, so they belong to
- *   the embedding application, not a maintenance tool. The CLI hands out no
- *   capability and streams no blob.
+ *   (`npx @blamejs/stash <subcommand>`) and composes ONLY the query and
+ *   maintenance verbs: `verify`, `stats`, `prune`, `list`, `tombstones`, `has`.
+ *   It never moves bytes, hands out no capability, and streams no blob, so
+ *   `push`, `apply`, `pop`, `store`, `drop`, and `clear` belong to the embedding
+ *   application rather than a maintenance tool.
  *
- *   The root comes from `--root <dir>`, else `STASH_ROOT`, else `./.stash`. It must
- *   already exist as a disk backend layout: the CLI refuses a missing root rather
- *   than conjuring an empty store from a typo. Add `--json` to any subcommand for a
- *   machine-readable document instead of the human table.
+ *   The root comes from `--root <dir>`, else `STASH_ROOT`, else `./.stash`, and it
+ *   must already exist as a disk backend layout: a missing root is refused, never
+ *   conjured from a typo. Add `--json` to any subcommand for a machine-readable
+ *   document instead of the human table.
  *
  *   Single-writer-per-root is the store's operating constraint (SPEC.md 6): every
- *   subcommand except `verify` runs the crash-recovery scan first, which can
- *   reclaim a stale claim -- so point the CLI at a stash whose owning process is
- *   stopped, or at a cold-standby replica, never at a root a live app is serving.
+ *   subcommand except `verify` runs the crash-recovery scan first and can reclaim a
+ *   stale claim, so point the CLI at a stash whose owning process is stopped, or at
+ *   a cold-standby replica, never at a root a live app is serving.
  *
  *   Errors fail closed with stable exit codes and never echo a ref, a meta value,
  *   or a filesystem path. Run under `node --permission` with read/write scoped to
  *   the root (plus read on the install dir) exactly as the library requires.
  *
  * @card
- *   Inspect and maintain a disk stash from the shell -- verify, stats, prune,
- *   list, tombstones, has -- without writing Node. Never moves bytes.
+ *   Inspect and maintain a disk stash from the shell (verify, stats, prune, list,
+ *   tombstones, has) without writing Node. Never moves bytes.
  */
 
 import { realpathSync, statSync } from "node:fs";
@@ -47,8 +46,8 @@ import { StashError } from "./errors.js";
 import { Stash, version } from "./index.js";
 import { isValid } from "./ref.js";
 
-// Stable, documented exit codes (fail-closed): distinct for each verdict class so a
-// cron/fsck caller can branch. Frozen alongside the error catalog (SPEC.md 10).
+// One exit code per verdict class so a cron/fsck caller can branch; frozen alongside the
+// error catalog (SPEC.md 10).
 export const EXIT = Object.freeze({
   OK: 0, // success, or a clean verify
   DAMAGE: 1, // verify found findings (the fsck convention -- alert on non-zero)
@@ -58,9 +57,7 @@ export const EXIT = Object.freeze({
   FAULT: 5, // an I/O or access fault, or any other typed error
 });
 
-// exitForError(err) -> a stable exit code for a thrown error. Keys on the frozen
-// StashError code (SPEC.md 10), never the message, so the mapping cannot drift with
-// wording. A non-StashError (an fs fault, an access denial) is FAULT.
+// Keys on the frozen StashError code (SPEC.md 10), never the message, so it cannot drift.
 function exitForError(err) {
   if (err instanceof StashError) {
     if (err.code === "EBADREF") return EXIT.BAD_REF;
@@ -69,8 +66,8 @@ function exitForError(err) {
   return EXIT.FAULT;
 }
 
-// A usage fault (exit 2). Static messages only -- never interpolate operator input
-// (a ref mistyped as a subcommand must not echo back as a pseudo-capability).
+// A usage fault (exit 2). Static messages only: a ref mistyped as a subcommand must not
+// echo back as a pseudo-capability.
 class UsageError extends Error {}
 
 const HELP = `stashjs -- inspect and maintain a disk-backed @blamejs/stash from the shell.
@@ -93,24 +90,18 @@ Add --json to any command for a machine-readable document. --version prints the
 version. Point this only at a quiesced stash or a cold-standby replica: every
 command except verify runs the crash-recovery scan and can reclaim a stale claim.`;
 
-// resolveRoot(flags, env) -> the disk root (SPEC.md 4 default ./.stash).
 function resolveRoot(flags, env) {
   if (flags.root !== undefined) return flags.root;
   if (env.STASH_ROOT) return env.STASH_ROOT;
   return "./.stash";
 }
 
-// assertStashLayout(root) -- refuse a missing/non-stash root rather than letting
-// DiskBackend #init conjure an empty store from a typo (which would report "0
-// entries" and mask the mistake). No path is echoed (capability-in-error-message) --
-// the operator sees their own --root argument.
+// Refuse a missing root rather than letting DiskBackend #init conjure an empty store
+// from a typo, which would report "0 entries" and mask the mistake.
 function assertStashLayout(root) {
-  // A real disk root carries the FULL layout; require EVERY directory #init creates
-  // (SUBDIRS, imported so this can never drift from the backend), so a partial or wrong
-  // directory is refused, not silently completed into an empty store -- #init would
-  // otherwise re-create any missing one on first use. A missing directory (ENOENT/ENOTDIR)
-  // is "no stash here" -- a usage error the operator fixes by correcting --root -- but an
-  // access or I/O fault (EACCES, ...) is a REAL fault surfaced distinctly, never masked.
+  // Require EVERY directory #init creates (SUBDIRS, imported so this cannot drift),
+  // since #init would otherwise re-create a missing one on first use. ENOENT/ENOTDIR is
+  // "no stash here"; an access or I/O fault is a REAL fault, surfaced and never masked.
   for (const sub of SUBDIRS) {
     let st;
     try {
@@ -127,7 +118,6 @@ function assertStashLayout(root) {
   }
 }
 
-// The per-subcommand flag specs handed to parseArgs (strict: unknown flags fault).
 const COMMON = { root: { type: "string" }, json: { type: "boolean", default: false } };
 const COMMANDS = {
   verify: {
@@ -146,13 +136,11 @@ const COMMANDS = {
   has: { options: { ...COMMON }, positionals: 1, refPositional: true, run: cmdHas },
 };
 
-// The subcommand names, exported so a test pins that --help documents every one --
-// a command added to COMMANDS but not to HELP is caught by the test suite.
+// Exported so a test pins that --help documents every subcommand.
 export const COMMAND_NAMES = Object.freeze(Object.keys(COMMANDS));
 
-// A fresh one-shot Stash over the root: no sweep timer (construct, run one verb,
-// exit), the safe restore-on-pop-failure default (an inspection tool must never
-// silently BURN an abandoned claim), and the standard identity guards.
+// One-shot: no sweep timer, and the restore-on-pop-failure default, because an
+// inspection tool must never silently BURN an abandoned claim.
 function openStash(root) {
   assertStashLayout(root);
   return new Stash({ backend: new DiskBackend({ root }), sweepInterval: null });
@@ -183,10 +171,8 @@ async function cmdVerify(stash, flags, _pos, io) {
       lines.push(`  ${pad(f.kind, 18)} ${f.id === null ? "(unnamed)" : f.id}`);
     io.out.write(lines.join("\n") + "\n");
   }
-  // DAMAGE only if damage REMAINS: a dry run (repaired empty) leaves every finding
-  // unresolved; --repair clears the findings it condemned, so what remains is the
-  // damage repair could not or would not fix (a spared stale-claim, a claimed entry).
-  // A --repair run that resolved everything it found is a clean exit.
+  // DAMAGE only if damage REMAINS: a dry run leaves every finding unresolved, while
+  // --repair clears what it condemned, so what is left is what repair would not fix.
   const unresolved = report.findings.filter(
     (f) => !report.repaired.some((r) => r.kind === f.kind && r.id === f.id),
   );
@@ -215,8 +201,7 @@ async function cmdList(stash, flags, _pos, io) {
   if (flags.json) {
     io.out.write(JSON.stringify(entries) + "\n");
   } else {
-    // The human view omits `meta` (caller-supplied opaque hints -- a needless
-    // disclosure in a casual table); --json carries it for scripting.
+    // The human view omits `meta`, a needless disclosure in a casual table.
     const lines = [
       `${pad("ref", 47)} ${pad("size", 10)} ${pad("created", 26)} ${pad("expires", 26)} reads`,
     ];
@@ -245,16 +230,15 @@ async function cmdTombstones(stash, flags, _pos, io) {
 
 async function cmdHas(stash, flags, pos, io) {
   // stash.has validates the ref at the whitelist BEFORE any backend access, so a
-  // malformed ref throws InvalidRef (EBADREF) -> caught below -> BAD_REF. Present and
+  // malformed ref throws InvalidRef (EBADREF), caught below as BAD_REF. Present and
   // absent both exit OK; the boolean is the answer, a non-zero exit is a real error.
   const present = await stash.has(pos[0]);
   render(io, flags.json, present ? "true" : "false", { present });
   return EXIT.OK;
 }
 
-// main(argv, io) -> exit code. `io` = { out, err, env } so the whole surface is
-// testable by spawning the entry AND callable in-process. Never calls process.exit
-// itself; the entry guard below does, from the returned code.
+// `io` = { out, err, env } so the surface is testable in-process. Never calls
+// process.exit; the entry guard below does, from the returned code.
 export async function main(argv, io) {
   if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
     io.out.write(HELP + "\n");
@@ -264,12 +248,9 @@ export async function main(argv, io) {
     io.out.write(version + "\n");
     return EXIT.OK;
   }
-  // COMMANDS is indexed by an UNTRUSTED argv token, so membership is Object.hasOwn,
-  // never a bare `COMMANDS[name]` read: a token naming an inherited Object.prototype
-  // member ("constructor", "__proto__", "toString") would resolve to that member and
-  // slip past the `spec === undefined` guard as a phantom command (CWE-1321,
-  // prototype-key confusion) -- the same discipline digest.js applies to a stored
-  // digest's algorithm prefix.
+  // COMMANDS is indexed by an UNTRUSTED argv token, so membership is Object.hasOwn: a
+  // token naming an inherited Object.prototype member ("constructor", "__proto__") would
+  // resolve and slip past the `spec === undefined` guard as a phantom command (CWE-1321).
   const name = argv[0];
   const spec = Object.hasOwn(COMMANDS, name) ? COMMANDS[name] : undefined;
   if (spec === undefined) {
@@ -285,8 +266,7 @@ export async function main(argv, io) {
       strict: true,
     });
   } catch {
-    // parseArgs throws on an unknown/malformed flag; its message can quote operator
-    // input, so it is swallowed and a static usage line is printed instead.
+    // parseArgs's message can quote operator input, so it is swallowed for a static line.
     io.err.write("stashjs: invalid options (run stashjs --help)\n");
     return EXIT.USAGE;
   }
@@ -294,9 +274,7 @@ export async function main(argv, io) {
     io.err.write("stashjs: wrong number of arguments (run stashjs --help)\n");
     return EXIT.USAGE;
   }
-  // A ref argument is validated at the whitelist BEFORE the root is opened -- ref
-  // validation precedes any storage access, so a malformed ref is refused with zero
-  // filesystem I/O, regardless of the root's state.
+  // Ref validation precedes any storage access, so a malformed ref costs zero I/O.
   if (spec.refPositional && !isValid(parsed.positionals[0])) {
     io.err.write("stashjs: EBADREF\n");
     return EXIT.BAD_REF;
@@ -320,9 +298,8 @@ export async function main(argv, io) {
   }
 }
 
-// Entry guard: run only when invoked as the process entry (the bin), never on
-// import (the suite spawns the entry, it does not import it). Compare real paths so
-// a relative argv, a symlinked bin shim, and Windows separators all resolve alike.
+// Run only when invoked as the bin, never on import. Compare real paths so a relative
+// argv, a symlinked bin shim, and Windows separators all resolve alike.
 function invokedAsEntry() {
   if (process.argv[1] === undefined) return false;
   let entry = null;
@@ -331,8 +308,7 @@ function invokedAsEntry() {
     entry = realpathSync(process.argv[1]);
     self = realpathSync(fileURLToPath(import.meta.url));
   } catch {
-    // A path that cannot be resolved is not this entry -- fall through to the
-    // inequality below rather than returning from the catch (both stay null).
+    // An unresolvable path is not this entry: fall through with both left null.
     entry = null;
   }
   return entry !== null && entry === self;

@@ -1,6 +1,6 @@
 {
   "name": "@blamejs/stash",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Zero-dependency, ephemeral, crypto-agnostic content store for Node.js. Bytes in, ref out; bytes out once, and they're gone.",
   "keywords": [
     "stash",
@@ -35,7 +35,11 @@
   },
   "files": [
     "src/",
+    "ARCHITECTURE.md",
     "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
+    "CONTRIBUTING.md",
+    "GOVERNANCE.md",
     "LICENSE",
     "LTS-CALENDAR.md",
     "MIGRATING.md",
@@ -43,7 +47,9 @@
     "README.md",
     "ROADMAP.md",
     "SECURITY.md",
-    "SPEC.md"
+    "SPEC.md",
+    "SUPPORT.md",
+    "THREAT-MODEL.md"
   ],
   "scripts": {
     "test": "node --expose-gc --test",

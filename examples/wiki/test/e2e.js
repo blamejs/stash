@@ -323,9 +323,31 @@ async function run() {
     var sm = await _get(port, "/sitemap.xml");
     check("GET /sitemap.xml -> 200 xml", sm.status === 200 && String(sm.headers["content-type"]).indexOf("application/xml") === 0);
     check("sitemap lists every page", (sm.body.match(/<url>/g) || []).length === Object.keys(built.pages).length);
+    check(
+      "sitemap claims no lastmod (a boot-stamped date would restamp every URL on restart)",
+      sm.body.indexOf("<lastmod>") === -1,
+    );
     var rb = await _get(port, "/robots.txt");
     check("GET /robots.txt -> 200", rb.status === 200);
     check("robots points at the sitemap", rb.body.indexOf("Sitemap: ") !== -1);
+    check("robots welcomes every crawler on the docs", /User-agent:\s*\*/.test(rb.body) && /^Allow:\s*\/$/m.test(rb.body));
+    check("robots holds back the per-query search page", /^Disallow:\s*\/search$/m.test(rb.body));
+    check("robots holds back the container probe", /^Disallow:\s*\/healthz$/m.test(rb.body));
+
+    // ---- indexability: docs are indexed, search results are not ----
+    var seoPage = await _get(port, "/stash");
+    check("a documentation page is indexable", seoPage.body.indexOf('name="robots" content="index,follow"') !== -1);
+    check("a documentation page declares its canonical URL", seoPage.body.indexOf('rel="canonical"') !== -1);
+    var seoSearch = await _get(port, "/search?q=capability");
+    check(
+      "a search-result page is noindex,follow",
+      seoSearch.body.indexOf('name="robots" content="noindex,follow"') !== -1,
+    );
+    check(
+      "card image declares its dimensions so a scraper need not fetch it",
+      seoPage.body.indexOf('property="og:image:width"') !== -1 &&
+        seoPage.body.indexOf('property="og:image:height"') !== -1,
+    );
 
     // ---- Vendored Prism: pinned hashes verify, languages cover the site ----
     var vendorDir = path.join(import.meta.dirname, "..", "public", "vendor");

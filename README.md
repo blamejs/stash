@@ -41,7 +41,7 @@ import { MemoryBackend } from "@blamejs/stash/backends/memory";
 const stash = new Stash({ backend: new MemoryBackend() });
 
 const ref = await stash.push(ciphertext, { meta: { kind: "drop" } });
-// 'v1_...' -- 256 bits of random capability, never a content hash
+// 'v1_...' is 256 bits of random capability, never a content hash
 
 const readable = await stash.apply(ref);   // digest-verified stream
 await stash.drop(ref);                     // gone
@@ -50,21 +50,21 @@ await stash.drop(ref);                     // gone
 ## Why this store
 
 - **It can't decrypt anything.** No method takes a key; no cipher primitive is
-  imported anywhere in the tree, and CI proves it on every commit. A store
-  that *chooses* not to decrypt is a promise; a store with nowhere for a key
-  to live is an architecture. Encryption belongs to the layer above.
-- **Refs are capabilities, not addresses.** `v1_` + 32 random bytes,
-  unguessable, never derived from content -- so holding a suspect document
-  never lets anyone probe whether it is stored. Ref validation is a strict
-  whitelist that doubles as path-traversal defense.
-- **Write-once, monotone lifecycle.** Every state change moves an entry closer
-  to destruction -- read budgets only decrement, expiry only arrives, and
-  nothing can argue an entry back from the brink. There is no `touch()`.
-- **Fail-closed verdicts.** Every failure is a typed `StashError` with a
-  frozen `.code`; no path returns a default in place of an answer, and no
-  error message ever contains a ref, a `meta` value, or a path.
-- **Zero dependencies.** Runtime *and* development. Node builtins only, ESM,
-  no build step. `npm install @blamejs/stash` adds exactly one package.
+  imported anywhere in the tree, and CI proves it on every commit. A store that
+  *chooses* not to decrypt is a promise; a store with nowhere for a key to live
+  is an architecture. Encryption belongs to the layer above.
+- **Refs are capabilities, not addresses.** `v1_` plus 32 random bytes,
+  unguessable, never derived from content, so holding a suspect document never
+  lets anyone probe whether it is stored. Ref validation is a strict whitelist
+  that doubles as path-traversal defense.
+- **Write-once, monotone lifecycle.** Every state change moves an entry closer to
+  destruction. Read budgets only decrement, expiry only arrives, and nothing can
+  argue an entry back from the brink. There is no `touch()`.
+- **Fail-closed verdicts.** Every failure is a typed `StashError` with a frozen
+  `.code`. No path returns a default in place of an answer, and no error message
+  ever contains a ref, a `meta` value, or a path.
+- **Zero dependencies.** Runtime *and* development. Node builtins only, ESM, no
+  build step. `npm install @blamejs/stash` adds exactly one package.
 
 ## Install
 
@@ -74,8 +74,8 @@ npm install @blamejs/stash
 
 Requires Node `>= 24.19.0`.
 
-The package is authored in ESM (`import`), but a CommonJS project can consume
-it with `require` on that Node floor -- no build step, no shim. The package
+The package is authored in ESM (`import`), but a CommonJS project can consume it
+with `require` on that Node floor, with no build step and no shim. The package
 graph has no top-level await, so Node loads it synchronously under `require`:
 
 ```js
@@ -87,124 +87,147 @@ const stash = new Stash({ backend: new MemoryBackend() });
 
 ## What ships today
 
-The complete delivery plan (`SPEC.md` section 12), plus digest agility, the `stashjs` CLI, and a consumable backend contract:
-
-- `push` / `pop` / `apply` / `show` / `has` / `list` / `reconcilable` / `stats` /
-  `verify` / `store` / `tombstones` / `drop` / `clear` over either backend, with size
-  and a self-describing digest computed as the bytes stream through and
-  digest-verified reads (algorithm chosen at construction; `sha256` by default).
-- **Pop & read budgets**: `pop(ref)` streams an entry and destroys it the
-  instant the stream drains cleanly -- bytes out once, then gone -- with two
-  concurrent pops racing on an atomic claim so exactly one drains and the other
-  rejects `RefClaimed`. `push(source, { reads: N })` gives an entry a finite
-  read budget: a credit is spent only on a full, digest-verified `apply` drain
-  (an abandoned or corrupted read costs nothing), concurrent budgeted readers
-  serialize so the last credit is never double-spent, and the read that
-  exhausts the budget destroys the entry. A read that fails to drain is resolved
-  by `onPopFailure` -- `'restore'`d for a retry by default, or `'burn'`ed. On
-  the disk backend, a claim abandoned by a process killed mid-pop is reclaimed
-  on the next construction (`claimTimeout` sets the grace window), and a drop
-  during a live claim is monotone -- the entry never comes back.
-- **Limits**: `maxSize` bounds each entry and is checked as the bytes stream, so
-  an oversized or unbounded source aborts with `SizeExceeded` at the limit
-  rather than filling the disk; `maxEntries` and `maxTotal` bound the whole
-  store and refuse an over-budget push with `StashFull` without evicting
-  anything already stored. Expired-but-unswept entries are reaped before the
-  store is judged full, and every rejected push leaves no partial behind.
-- **Audit & events**: `verify()` walks the store and reports physical damage --
-  a bit-flipped blob, a corrupt sidecar, an orphaned blob or half-written
-  `.tmp`, a foreign file, a stale claim, a corrupt tombstone -- re-hashing every blob with its own algorithm;
-  it is a dry run by default, and `verify({ repair: true })` removes only what it
-  condemns, sparing healthy entries, an in-flight `.tmp`, and a claim recovery
-  owns. A `Stash` is an `EventEmitter` -- `'pushed'` / `'popped'` / `'dropped'` /
-  `'expired'` (exactly once per reaped entry) / `'sweepError'` (never the
-  process-killing `'error'`) -- and is async-iterable. `has(ref)` is a boolean
-  existence check; `stats()` returns `{ entries, bytes, claimed }`.
-- **Expiry**: a construct-time `ttl` default (`'24h'`, `'7d'`, ms, or `null`),
-  overridable per `push`. An expired entry reads back as `RefNotFound` and is
-  dropped in passing, before any sweep. `list()` hides expired entries by
-  default (`{ includeExpired: true }` reveals them); `prune()` reaps on demand;
-  `sweepInterval` arms an `unref()`'d background sweep that never holds the
-  process open. `close()` -- or `await using` via `Symbol.asyncDispose` --
-  stops it. Terms are fixed at push and only ever move an entry toward
-  destruction; there is no touch or extend.
-- **The disk backend** (`@blamejs/stash/backends/disk`): one blob + one JSON
-  sidecar per entry, no central index to corrupt, atomic
-  tmp-fsync-rename writes, `0700`/`0600` modes, realpath containment that
-  refuses planted symlinks instead of following them, and strict
-  size-bounded sidecar validation -- corruption is a typed `IntegrityError`,
-  never silently bad bytes and never a silent skip.
-- The in-memory backend, same contract, for tests and process-lifetime
-  stashes. One conformance suite runs against both, unmodified.
-- **A stable backend contract, and a way to certify against it.** The
-  `SPEC.md` section 9 backend interface is a public extension point: any object
-  implementing its method set is a first-class backend, so a store this library
-  doesn't ship (an S3-compatible object store, a remote block device, an
-  in-house key/value service) plugs into `new Stash({ backend })` with the
-  network and encryption kept in your layer. `@blamejs/stash/conformance`
-  exports `runBackendConformance(factory, { test })` -- the behavioral suite the
-  in-tree backends pass, driving the shipped consumer path and asserting the
-  frozen verdicts (`ENOREF`, `ECLAIMED`, `E2BIG`, `EFULL`). It imports no test
-  runner, so you wire your own (`node:test` or otherwise) and prove your backend
-  is interchangeable rather than reading prose:
-
-  ```js
-  import { test } from "node:test";
-  import { runBackendConformance } from "@blamejs/stash/conformance";
-  import { MyBackend } from "./my-backend.js";
-
-  runBackendConformance({ name: "my-backend", create: () => new MyBackend() }, { test });
-  ```
-- The full typed error set (`RefNotFound`, `RefClaimed`, `IntegrityError`,
-  `SizeExceeded`, `StashFull`, `InvalidRef` -- all `StashError`, all with
-  frozen codes).
-- Ref generation and whitelist validation.
-
-- **Replication**: `store(entry, source)` files an already-created entry with its
-  identity intact -- the caller supplies the full `Entry` and it lands verbatim,
-  the bytes verified against the supplied digest and size as they stream so
-  transfer corruption is caught on the way in. A malformed id, a tombstoned id, an
-  already-expired entry, or a digest conflict is refused before anything lands; an
-  identical entry is an idempotent no-op, so retrying a sync is free. A replicated
-  entry honors the stash limits like a push -- one larger than `maxSize`, or past
-  `maxEntries` / `maxTotal`, is refused rather than slipping the capacity -- and two
-  concurrent stores of the same id are serialized so conflicting replicas can't both land. `store` emits
-  no event, so a sync daemon never echoes its own writes. Every early destruction --
-  `pop`, `drop`, `clear`, a spent read budget -- leaves a tombstone of
-  `{ id, destroyedAt, cause }` (expiry leaves none); `tombstones()` returns them for
-  reconciliation, and feeding each id to a replica's `drop()` converges two stores
-  with no resurrection. `tombstoneTtl` (default `'30d'`, `null` never prunes) reaps
-  a grave once older than the window -- keep it above the longest gap between
-  reconciliations, or a forgotten grave lets an id come back. A sync reads its source
-  with `reconcilable()`, not `list()`: `list()` fails the whole listing on one corrupt
-  sidecar (right for an audit, wrong for a sync), so `reconcilable()` returns the
-  healthy `entries` to copy plus the `corrupt` ref ids whose sidecars are unreadable
-  -- surfaced for `verify({ repair: true })` -- so a single damaged entry never halts
-  replication of the sound ones.
-
-- **Digest agility**: the integrity hash is a construct-time choice --
-  `new Stash({ backend, digest })` selects `sha256` (default), `sha512`, `sha3-256`,
-  `sha3-512`, or `shake256` (`node:crypto` builtins; still no encryption -- this is
-  integrity, not confidentiality). The stored digest is self-describing
-  (`"algo:hex"`), so reads and `verify()` hash with each entry's own algorithm and a
-  store may mix algorithms; the default leaves every existing store byte-identical.
-
-Every option `SPEC.md` defines is accepted and enforced; an unknown option is a
+Every option `SPEC.md` defines is accepted and enforced. An unknown option is a
 config-time `TypeError`.
 
-The `SPEC.md` section 12 delivery plan is complete, and the public surface is
-stable: every verb, option, error code, and on-disk format carries a
-semantic-versioning commitment -- a breaking change ships a new major, preceded
-by a deprecation warning at least one minor ahead ([MIGRATING.md](MIGRATING.md)),
-under the support window in [LTS-CALENDAR.md](LTS-CALENDAR.md). `SPEC.md` is the
-contract.
+### Moving bytes
 
-The current major is `v2.x`. Upgrading from `v1.x` changes two error verdicts
-and nothing else -- there is no on-disk format change, so a `v1.x` store opens
-under `v2.0` unmodified. `v2.0` is an exception to the deprecation rule above:
-it shipped without a preceding deprecation minor, so read
-[MIGRATING.md](MIGRATING.md) rather than relying on having been warned at
-runtime.
+`push`, `pop`, `apply`, `show`, `has`, `list`, `reconcilable`, `stats`, `verify`,
+`store`, `tombstones`, `drop`, and `clear` all run against either backend,
+unmodified. Size and a self-describing digest are computed as the bytes stream
+through, and reads are digest-verified. The algorithm is chosen at construction
+and defaults to `sha256`.
+
+### Pop and read budgets
+
+`pop(ref)` streams an entry and destroys it the instant the stream drains
+cleanly. Two concurrent pops race on an atomic claim, so exactly one drains and
+the other rejects `RefClaimed`.
+
+`push(source, { reads: N })` gives an entry a finite read budget. A credit is
+spent only on a full, digest-verified `apply` drain, so an abandoned or corrupted
+read costs nothing. Concurrent budgeted readers serialize, so the last credit is
+never double-spent, and the read that exhausts the budget destroys the entry.
+
+A read that fails to drain is resolved by `onPopFailure`: restored for a retry by
+default, or burned. On the disk backend, a claim abandoned by a process killed
+mid-pop is reclaimed on the next construction, with `claimTimeout` setting the
+grace window, and a drop during a live claim is monotone, so the entry never
+comes back.
+
+### Limits
+
+`maxSize` bounds each entry and is checked as the bytes stream, so an oversized
+or unbounded source aborts with `SizeExceeded` at the limit rather than filling
+the disk.
+
+`maxEntries` and `maxTotal` bound the whole store and refuse an over-budget push
+with `StashFull`, without evicting anything already stored. Expired-but-unswept
+entries are reaped before the store is judged full, and every rejected push
+leaves no partial behind.
+
+### Expiry
+
+A construct-time `ttl` default (`'24h'`, `'7d'`, a number of milliseconds, or
+`null`), overridable per `push`. An expired entry reads back as `RefNotFound` and
+is dropped in passing, before any sweep.
+
+`list()` hides expired entries by default, and `{ includeExpired: true }` reveals
+them. `prune()` reaps on demand. `sweepInterval` arms an `unref()`'d background
+sweep that never holds the process open, and `close()`, or `await using` via
+`Symbol.asyncDispose`, stops it.
+
+Terms are fixed at push and only ever move an entry toward destruction. There is
+no touch or extend.
+
+### Audit and events
+
+`verify()` walks the store and reports physical damage: a bit-flipped blob, a
+corrupt sidecar, an orphaned blob or half-written `.tmp`, a foreign file, a stale
+claim, a corrupt tombstone. It re-hashes every blob with that blob's own
+algorithm. It is a dry run by default; `verify({ repair: true })` removes only
+what it condemns, sparing healthy entries, an in-flight `.tmp`, and a claim
+recovery owns.
+
+A `Stash` is an `EventEmitter`. It emits `'pushed'`, `'popped'`, `'dropped'`,
+`'expired'` (exactly once per reaped entry), and `'sweepError'`, never the
+process-killing `'error'`. It is also async-iterable. `has(ref)` is a boolean
+existence check, and `stats()` returns `{ entries, bytes, claimed }`.
+
+### Replication
+
+`store(entry, source)` files an already-created entry with its identity intact.
+The caller supplies the full `Entry` and it lands verbatim, with the bytes
+verified against the supplied digest and size as they stream, so transfer
+corruption is caught on the way in.
+
+A malformed id, a tombstoned id, an already-expired entry, or a digest conflict
+is refused before anything lands. An identical entry is an idempotent no-op, so
+retrying a sync is free. A replicated entry honors the stash limits like a push:
+one larger than `maxSize`, or past `maxEntries` or `maxTotal`, is refused rather
+than slipping the capacity. Two concurrent stores of the same id are serialized,
+so conflicting replicas cannot both land. `store` emits no event, so a sync
+daemon never echoes its own writes.
+
+Every early destruction (`pop`, `drop`, `clear`, a spent read budget) leaves a
+tombstone of `{ id, destroyedAt, cause }`; expiry leaves none. `tombstones()`
+returns them for reconciliation, and feeding each id to a replica's `drop()`
+converges two stores with no resurrection. `tombstoneTtl` (default `'30d'`, or
+`null` to never prune) reaps a grave once older than the window. Keep it above
+the longest gap between reconciliations, or a forgotten grave lets an id come
+back.
+
+A sync reads its source with `reconcilable()` rather than `list()`. `list()`
+fails the whole listing on one corrupt sidecar, which is right for an audit and
+wrong for a sync, so `reconcilable()` returns the healthy `entries` to copy plus
+the `corrupt` ref ids whose sidecars are unreadable, surfaced for
+`verify({ repair: true })`. A single damaged entry never halts replication of the
+sound ones.
+
+### Digest agility
+
+The integrity hash is a construct-time choice. `new Stash({ backend, digest })`
+selects `sha256` (the default), `sha512`, `sha3-256`, `sha3-512`, or `shake256`,
+all `node:crypto` builtins. This is integrity, not confidentiality; there is
+still no encryption.
+
+The stored digest is self-describing (`"algo:hex"`), so reads and `verify()` hash
+with each entry's own algorithm and a store may mix algorithms. The default
+leaves every existing store byte-identical.
+
+### Backends
+
+The disk backend (`@blamejs/stash/backends/disk`) keeps one blob and one JSON
+sidecar per entry, so there is no central index to corrupt. It writes atomically
+through tmp-fsync-rename, uses `0700` and `0600` modes, enforces realpath
+containment that refuses planted symlinks instead of following them, and
+validates sidecars under a strict size bound. Corruption is a typed
+`IntegrityError`, never silently bad bytes and never a silent skip.
+
+The in-memory backend implements the same contract, for tests and
+process-lifetime stashes. One conformance suite runs against both, unmodified.
+
+### A stable backend contract, and a way to certify against it
+
+The `SPEC.md` section 9 backend interface is a public extension point. Any object
+implementing its method set is a first-class backend, so a store this library
+doesn't ship, such as an S3-compatible object store, a remote block device, or an
+in-house key/value service, plugs into `new Stash({ backend })` with the network
+and encryption kept in your layer.
+
+`@blamejs/stash/conformance` exports `runBackendConformance(factory, { test })`,
+the behavioral suite the in-tree backends pass. It drives the shipped consumer
+path and asserts the frozen verdicts (`ENOREF`, `ECLAIMED`, `E2BIG`, `EFULL`). It
+imports no test runner, so you wire your own, whether `node:test` or otherwise,
+and prove your backend is interchangeable rather than reading prose:
+
+```js
+import { test } from "node:test";
+import { runBackendConformance } from "@blamejs/stash/conformance";
+import { MyBackend } from "./my-backend.js";
+
+runBackendConformance({ name: "my-backend", create: () => new MyBackend() }, { test });
+```
 
 ## The verbs
 
@@ -231,12 +254,14 @@ queries and janitorial work. Every verb runs against either backend, unmodified.
 
 ## Error codes
 
-Every OPERATIONAL failure -- a bad ref, a missing entry, a corrupt blob, a full
-store -- is a typed `StashError` with a frozen `.code`: branch on the code, never
-the message (messages improve between patches; codes do not, `SPEC.md` section 10),
-and no message ever contains a ref, a `meta` value, or a path. Configuration
-mistakes are separate: an unknown option or a source that isn't a supported type
-throws a native `TypeError` at the call, before any storage is touched.
+Every operational failure, whether a bad ref, a missing entry, a corrupt blob, or
+a full store, is a typed `StashError` with a frozen `.code`. Branch on the code,
+never the message: messages improve between patches and codes do not (`SPEC.md`
+section 10). No message ever contains a ref, a `meta` value, or a path.
+
+Configuration mistakes are separate. An unknown option, or a source that isn't a
+supported type, throws a native `TypeError` at the call, before any storage is
+touched.
 
 <!-- BEGIN error-codes (generated from src/errors.js by scripts/regen-readme.js) -->
 
@@ -253,15 +278,7 @@ throws a native `TypeError` at the call, before any storage is touched.
 
 ## Recipes
 
-**Materialize an entry to a file, in one copy.** There is deliberately no `materializeTo(dest)`
-method: `apply` already returns a digest-verified stream, so piping it to a destination is a single
-copy the store never buffers, the bytes are verified end to end, it works against any backend, and
-the write lands inside the caller's own filesystem grant. A store-side copy would give up the
-digest-verified read, cross the write-scope boundary (the store writes only within its own root),
-and only work on a filesystem backend. Use `apply`: on an entry with no read budget it is
-non-destructive, so a failed write leaves the source intact to retry. (On a read-budgeted entry,
-`apply` spends one credit per full drain and the budget-exhausting drain destroys it — so a
-retry there consumes another credit, and a materialization is best run against unbudgeted refs.)
+**Materialize an entry to a file, in one copy.**
 
 ```js
 import { pipeline } from "node:stream/promises";
@@ -271,9 +288,21 @@ import { createWriteStream } from "node:fs";
 await pipeline(await stash.apply(ref), createWriteStream(dest));
 ```
 
-To *move* an unbudgeted entry out of the store, materialize it with `apply` and then `drop(ref)`
-once the write has durably landed — never `pop` into a file, since a failed write would leave the
-entry destroyed and the file incomplete.
+There is deliberately no `materializeTo(dest)` method. `apply` already returns a
+digest-verified stream, so piping it to a destination is a single copy the store
+never buffers, the bytes are verified end to end, it works against any backend,
+and the write lands inside the caller's own filesystem grant. A store-side copy
+would give up the digest-verified read, cross the write-scope boundary (the store
+writes only within its own root), and only work on a filesystem backend.
+
+On an entry with no read budget, `apply` is non-destructive, so a failed write
+leaves the source intact to retry. On a read-budgeted entry it spends one credit
+per full drain and the budget-exhausting drain destroys it, so a retry there
+consumes another credit; run a materialization against unbudgeted refs.
+
+To *move* an unbudgeted entry out of the store, materialize it with `apply` and
+then `drop(ref)` once the write has durably landed. Never `pop` into a file: a
+failed write would leave the entry destroyed and the file incomplete.
 
 ## Runnable examples
 
@@ -301,22 +330,25 @@ npx @blamejs/stash tombstones                       # the graves left by destroy
 npx @blamejs/stash has <ref>                        # true / false
 ```
 
-The root comes from `--root`, else `$STASH_ROOT`, else `./.stash`, and must already
-exist. Add `--json` to any command for a machine-readable document. The CLI exposes
-only the query and maintenance verbs -- it never moves bytes and never destroys by
-ref, so it hands out no capability and streams no blob -- fails closed with stable
-exit codes, and runs under `--permission` exactly as the library does. Point it at a
-stash whose owning process is stopped, or a cold-standby replica: like every access
-to a disk root it is single-writer, and each command except `verify` runs the
-crash-recovery scan first.
+The root comes from `--root`, else `$STASH_ROOT`, else `./.stash`, and must
+already exist. Add `--json` to any command for a machine-readable document.
+
+The CLI exposes only the query and maintenance verbs. It never moves bytes and
+never destroys by ref, so it hands out no capability and streams no blob. It
+fails closed with stable exit codes and runs under `--permission` exactly as the
+library does.
+
+Point it at a stash whose owning process is stopped, or at a cold-standby
+replica. Like every access to a disk root it is single-writer, and each command
+except `verify` runs the crash-recovery scan first.
 
 ## Run it sandboxed
 
 StashJS is designed to run under the Node permission model, with the WRITE grant
-scoped to the store. The read grant spans the app directory -- Node loads its
-module graph (your code and `node_modules`) from disk -- while only the store's
+scoped to the store. The read grant spans the app directory, because Node loads
+its module graph (your code and `node_modules`) from disk, while only the store's
 directory is writable. Create that directory first: under the sandbox the backend
-can fill it but not create it (creating it would need write on its parent).
+can fill it but not create it, which would need write on its parent.
 
 ```
 mkdir -p .stash
@@ -324,25 +356,43 @@ node --permission --allow-fs-read=. --allow-fs-write=./.stash app.js
 ```
 
 The Node permission model is a process-level filesystem allowlist, not per-module
-isolation: it confines the whole process -- StashJS and every dependency loaded
-alongside it -- to the granted paths, so a compromised dependency cannot reach
-the wider filesystem (your keys, other apps' data), only the stash root and the
-app's own source. Code sharing the process can still read the stash root; run the
-stash in its own process to isolate it from other code in the tree. (On Node 24.x
-`--permission` does not gate the network; StashJS opens no sockets regardless.)
-The store never spawns child processes, never starts worker threads, and never
-accepts a file descriptor as input, so no wider grant is ever needed.
+isolation. It confines the whole process, StashJS and every dependency loaded
+alongside it, to the granted paths, so a compromised dependency cannot reach the
+wider filesystem, only the stash root and the app's own source. Code sharing the
+process can still read the stash root, so run the stash in its own process to
+isolate it from other code in the tree.
+
+On Node 24.x, `--permission` does not gate the network; StashJS opens no sockets
+regardless. The store never spawns child processes, never starts worker threads,
+and never accepts a file descriptor as input, so no wider grant is ever needed.
+
+## Versioning and support
+
+The public surface is stable. Every verb, option, error code, and on-disk format
+carries a semantic-versioning commitment: a breaking change ships a new major,
+preceded by a deprecation warning at least one minor ahead
+([MIGRATING.md](MIGRATING.md)), under the support window in
+[LTS-CALENDAR.md](LTS-CALENDAR.md). `SPEC.md` is the contract.
+
+The current major is `v2.x`. Upgrading from `v1.x` changes two error verdicts and
+nothing else. There is no on-disk format change, so a `v1.x` store opens under
+`v2.0` unmodified. `v2.0` is an exception to the deprecation rule above: it
+shipped without a preceding deprecation minor, so read
+[MIGRATING.md](MIGRATING.md) rather than relying on having been warned at
+runtime.
 
 ## Documentation
 
-- `SPEC.md` -- the full specification: API, semantics, threat reasoning, and
-  the do-not-build list.
-- `ARCHITECTURE.md` -- the policy/backend split and the design invariants.
-- `THREAT-MODEL.md` -- what the store defends against, and what it refuses to
-  pretend to defend against.
-- `examples/wiki` -- the documentation site, generated from the source's own
-  comment blocks (`npm run wiki:e2e` proves it; `node examples/wiki/server.js`
-  serves it).
+- [SPEC.md](SPEC.md), the full specification: API, semantics, threat reasoning,
+  and the do-not-build list.
+- [ARCHITECTURE.md](ARCHITECTURE.md), the policy/backend split and the design
+  invariants.
+- [THREAT-MODEL.md](THREAT-MODEL.md), what the store defends against, and what it
+  refuses to pretend to defend against.
+- [ROADMAP.md](ROADMAP.md), what landed in which release.
+- `examples/wiki` in the repository, the documentation site generated from the
+  source's own comment blocks (`npm run wiki:e2e` proves it, and
+  `node examples/wiki/server.js` serves it).
 
 ## License
 

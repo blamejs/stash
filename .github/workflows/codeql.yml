@@ -32,7 +32,7 @@ jobs:
       # step, no transpilation); the language ID picks up the .js files
       # under src/ regardless.
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81  # v4.37.3
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
         with:
           languages: javascript-typescript
           # Scope (paths) + query suite (security-extended) are inline so
@@ -52,6 +52,6 @@ jobs:
       # Auto-build is skipped because plain ESM files don't need a build
       # step; CodeQL extracts straight from source.
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81  # v4.37.3
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
         with:
           category: "/language:javascript-typescript"
