@@ -96,7 +96,7 @@ config-time `TypeError`.
 `store`, `tombstones`, `drop`, and `clear` all run against either backend,
 unmodified. Size and a self-describing digest are computed as the bytes stream
 through, and reads are digest-verified. The algorithm is chosen at construction
-and defaults to `sha256`.
+and defaults to `sha3-512`.
 
 ### Pop and read budgets
 
@@ -187,9 +187,14 @@ sound ones.
 ### Digest agility
 
 The integrity hash is a construct-time choice. `new Stash({ backend, digest })`
-selects `sha256` (the default), `sha512`, `sha3-256`, `sha3-512`, or `shake256`,
+selects `sha3-512` (the default), `sha256`, `sha512`, `sha3-256`, or `shake256`,
 all `node:crypto` builtins. This is integrity, not confidentiality; there is
 still no encryption.
+
+SHA-3 has no hardware acceleration where SHA-2 does, so the default hashes at
+roughly a sixth of `sha256`'s rate, and the store hashes every byte on the way
+in and again on every verified read. If that throughput matters more to you than
+the algorithm choice, set `digest: 'sha256'` explicitly.
 
 The stored digest is self-describing (`"algo:hex"`), so reads and `verify()` hash
 with each entry's own algorithm and a store may mix algorithms. The default

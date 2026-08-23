@@ -564,6 +564,59 @@ for (const { name, create } of BACKENDS) {
       assert.equal((await stash.list()).length, 1);
     });
 
+    test("maxTotal overshoot stays bounded under every digest algorithm, not just the default", async () => {
+      // The capacity charge runs BEFORE the backend finalizes the entry, so whatever
+      // the charge fails to account for lands as stored bytes above maxTotal. The
+      // digest is the big term: it is `null` at charge time and becomes
+      // "<algo>:<hex>", which is 64 hex characters under sha256 and 128 under
+      // sha3-512. Charging the pre-write shape made the overshoot a function of
+      // which algorithm happened to be the default, so changing the default
+      // silently widened it from 69 bytes to 135.
+      //
+      // Every algorithm is driven here rather than just the default, because that
+      // is the coupling this pins: the bound must hold whichever one is selected.
+      // The blob has to be the term that consumes the residual, which is why this
+      // searches for the largest accepted size rather than pushing a fixed small
+      // one. A blob well under the residual never reaches the boundary, and a test
+      // written that way passes on the defect.
+      const ALGOS = ["sha256", "sha512", "sha3-256", "sha3-512", "shake256"];
+      const BOUND = 32; // the residual is the `size` digits alone, deliberately left uncharged
+      const MAX_TOTAL = 4096;
+      for (const digest of ALGOS) {
+        let lo = 0;
+        // The ceiling has to sit ABOVE the real boundary or the search never
+        // reaches it. The largest accepted blob is maxTotal minus one sidecar,
+        // which is well over three thousand bytes here, so a lower cap would make
+        // this test pass on the defect it exists to catch.
+        let hi = MAX_TOTAL;
+        let stored = null;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          const stash = new Stash({ backend: create(), digest, maxTotal: MAX_TOTAL });
+          let landed = null;
+          try {
+            await stash.push(Buffer.alloc(mid, 1));
+            landed = (await stash.stats()).bytes;
+          } catch {
+            landed = null;
+          }
+          await stash.close();
+          if (landed === null) hi = mid - 1;
+          else {
+            stored = landed;
+            lo = mid + 1;
+          }
+        }
+        assert.notEqual(stored, null, `${digest}: no blob size was accepted at all`);
+        assert.ok(
+          stored - MAX_TOTAL <= BOUND,
+          `${digest}: the largest accepted push left ${stored} bytes stored against a ` +
+            `maxTotal of ${MAX_TOTAL}, an overshoot of ${stored - MAX_TOTAL} bytes over the ` +
+            `${BOUND}-byte bound`,
+        );
+      }
+    });
+
     test("with both bounds set, a per-entry overflow reports SizeExceeded, not StashFull", async () => {
       // maxSize is the per-entry cap, maxTotal the whole-store cap. A blob over
       // maxSize reports the permanent verdict (SizeExceeded) -- a retry can't shrink
@@ -632,8 +685,13 @@ for (const { name, create } of BACKENDS) {
         [live1],
       );
 
+      // The gauge entry must have the SAME SIDECAR SHAPE as the entry being sized
+      // against it. A ttl gives `expiresAt` a 13-digit timestamp where an
+      // unexpiring entry serializes `null`, so gauging with no ttl and then
+      // pushing one under-measures the sidecar by about nine bytes and the entry
+      // does not really fit in the room the test thinks it made.
       const gauge = create();
-      await new Stash({ backend: gauge }).push(Buffer.alloc(12, 9));
+      await new Stash({ backend: gauge }).push(Buffer.alloc(12, 9), { ttl: 60_000 });
       const oneEntry = (await gauge.stats()).bytes; // one 12-byte-blob entry: blob plus sidecar
       const s2 = new Stash({ backend: create(), maxTotal: oneEntry }); // room for exactly one
       await s2.push(Buffer.alloc(12, 9), { ttl: 0 }); // fat and expired, fills the store
@@ -2323,23 +2381,36 @@ for (const { name, create } of BACKENDS) {
     });
 
     test("store() replicates an entry with its OWN algorithm intact (self-describing)", async () => {
-      const stash = new Stash({ backend: create() }); // default sha256 for its own pushes
+      // The replicated entry must use an algorithm the receiving store would NOT
+      // have chosen, or "preserved" and "rewritten to the default" look identical
+      // and the test proves nothing.
+      const stash = new Stash({ backend: create() }); // the default for its own pushes
       const id = generate();
-      const bytes = "replicated under sha3-512";
-      const entry = makeStoredEntry(id, bytes, { digest: digestOf(bytes, "sha3-512") });
-      assert.equal(await stash.store(entry, bytes), true, "the sha3-512 entry lands");
+      const bytes = "replicated under sha256";
+      const entry = makeStoredEntry(id, bytes, { digest: digestOf(bytes, "sha256") });
+      // Behavioural, so it keeps holding whatever the default becomes: the store's
+      // own push must land under a different algorithm than the entry being
+      // replicated, or the assertion below cannot tell the two outcomes apart.
+      const ownPush = await stash.push("what this store chooses on its own");
+      assert.ok(
+        !(await stash.show(ownPush)).digest.startsWith("sha256:"),
+        "this case needs the store's default to differ from the replicated entry's algorithm",
+      );
+      assert.equal(await stash.store(entry, bytes), true, "the sha256 entry lands");
       assert.equal(
         (await stash.show(id)).digest,
-        digestOf(bytes, "sha3-512"),
-        "its algorithm is preserved, not rewritten to sha256",
+        digestOf(bytes, "sha256"),
+        "its algorithm is preserved, not rewritten to the store's default",
       );
       assert.deepEqual(await drain(await stash.apply(id)), Buffer.from(bytes));
     });
 
-    test("a corrupted read under a non-sha256 digest errors with IntegrityError (verified with the STORED algo, not sha256)", async () => {
+    test("a corrupted read under a NON-DEFAULT digest errors with IntegrityError (verified with the STORED algo)", async () => {
       const inner = create();
       const corrupting = corruptingReadBackend(inner);
-      const stash = new Stash({ backend: corrupting, digest: "sha3-512" });
+      // Deliberately not the default: this pins that the read verifies with the
+      // algorithm the entry was written under rather than the configured one.
+      const stash = new Stash({ backend: corrupting, digest: "sha256" });
       const ref = await stash.push("original bytes");
       await assert.rejects(
         drain(await stash.apply(ref)),
@@ -2368,7 +2439,8 @@ for (const { name, create } of BACKENDS) {
       // A custom backend written to the SPEC.md 9 three-argument contract cannot see a
       // positional arg beyond `entry`. If the chosen algorithm were threaded as a
       // fourth write() argument, such a backend would silently drop it and hash with
-      // the default -- an operator asking for sha3-512 would get sha256 with no error.
+      // the default -- an operator asking for a specific algorithm would silently get
+      // the default one with no error.
       // The selection must travel inside the entry the backend is already handed.
       const inner = create();
       const documented = wrapBackend(inner, {

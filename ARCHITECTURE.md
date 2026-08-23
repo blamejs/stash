@@ -229,8 +229,8 @@ delivery plan is complete, and the public surface is stable;
   `popped`, `dropped`, `expired`, `sweepError`), and async iteration.
 - **Replication.** Tombstones, `store()`, `tombstones()`, `reconcilable()`, and
   `tombstoneTtl`.
-- **Digest agility.** A selectable integrity hash (`sha256` by default, plus
-  `sha512`, `sha3-256`, `sha3-512`, `shake256`) with a self-describing stored
+- **Digest agility.** A selectable integrity hash (`sha3-512` by default, plus
+  `sha256`, `sha512`, `sha3-256`, `shake256`) with a self-describing stored
   digest, so a single store can mix algorithms.
 - **The `stashjs` CLI.** Inspect and maintain a disk-backed stash from the shell
   with `verify`, `stats`, `prune`, `list`, `tombstones`, and `has`.

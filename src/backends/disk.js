@@ -302,7 +302,8 @@ export class DiskBackend {
   async write(id, source, entry) {
     assertValid(id);
     // The algorithm rides IN the entry's self-describing digest, so the policy layer's
-    // selection arrives through the documented argument; a markerless entry is sha256.
+    // selection arrives through the documented argument; a markerless entry takes
+    // the store's default.
     const algo = algoOf(entry.digest) ?? DEFAULT_DIGEST;
     const blobDir = await this.#containedDir("blobs");
     const tmpPath = join(blobDir, id + ".tmp");

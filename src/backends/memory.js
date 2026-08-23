@@ -97,7 +97,7 @@ export class MemoryBackend {
   }
 
   // The digest algorithm rides IN the entry (digests are self-describing); a markerless
-  // entry defaults to sha256. Every retained chunk is an OWNED COPY: the store outlives
+  // entry takes DEFAULT_DIGEST. Every retained chunk is an OWNED COPY: the store outlives
   // the push, so a caller reusing its buffer must not rewrite stored bytes.
   async write(id, source, entry) {
     const algo = algoOf(entry.digest) ?? DEFAULT_DIGEST;
