@@ -331,7 +331,7 @@ So the ref is a capability, not an address.
   integrity on read. It is never a lookup key and never appears in an API surface that accepts
   it as input.
 - The integrity **algorithm** is a construct-time choice: `digest` on the constructor, one of
-  `sha256` (default), `sha512`, `sha3-256`, `sha3-512`, `shake256` (`node:crypto` builtins;
+  `sha3-512` (default), `sha256`, `sha512`, `sha3-256`, `shake256` (`node:crypto` builtins;
   sha2 is FIPS 180-4, sha3/shake are FIPS 202; `shake256` output is pinned to 64 bytes). This is
   crypto-agnosticism for INTEGRITY, not confidentiality. §1 is untouched, still no key and no
   cipher. The stored digest is **self-describing** (`"<algo>:<hex>"`), so a read verifies with the
@@ -547,7 +547,7 @@ holds the bytes.
 
 ```js
 {
-  async write(id, readable, entry) {},  // → Entry; computes size + digest, hashing with the algorithm named by entry.digest's "<algo>:" prefix (default sha256)
+  async write(id, readable, entry) {},  // → Entry; computes size + digest, hashing with the algorithm named by entry.digest's "<algo>:" prefix (a markerless entry takes the store default)
   async read(id) {},                    // → Readable
   async claim(id) {},                   // atomic; throws RefClaimed if already claimed
   async restore(id) {},                 // undo a claim
@@ -717,7 +717,7 @@ The M1-M8 plan above is the original delivery contract and is complete. Post-M8 
 it (each still spec-first, test-first, and patch-versioned):
 
 **M9: Digest agility.** The integrity hash is a construct-time choice (§5): `digest` selects
-`sha256` (default) / `sha512` / `sha3-256` / `sha3-512` / `shake256`. The stored digest is
+`sha256` / `sha512` / `sha3-256` / `sha3-512` / `shake256`. The stored digest is
 self-describing (`"<algo>:<hex>"`); reads and `verify()` hash with the entry's own algorithm.
 *Done when:* a round-trip under every algorithm verifies; a store holding entries under different
 algorithms reads and audits clean; a replicated `sha3-512` entry keeps its algorithm; an unknown

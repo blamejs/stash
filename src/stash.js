@@ -50,6 +50,7 @@ import {
   digestHash,
   digestMarker,
   finalize,
+  isValidDigest,
 } from "./digest.js";
 import { parse } from "./duration.js";
 import { assertShape, isExpired, make, makeTombstone } from "./entry.js";
@@ -328,10 +329,12 @@ function _positiveCount(value, label) {
  * pruning. Size it above the longest gap between replica reconciliations, or a
  * forgotten grave lets an id come back.
  *
- * `opts.digest` picks the integrity hash for new pushes: `'sha256'` (the
- * default), `'sha512'`, `'sha3-256'`, `'sha3-512'`, or `'shake256'`. The stored
+ * `opts.digest` picks the integrity hash for new pushes: `'sha3-512'` (the
+ * default), `'sha256'`, `'sha512'`, `'sha3-256'`, or `'shake256'`. The stored
  * digest is self-describing, so a read verifies with the entry's OWN algorithm
- * and one store may mix them.
+ * and one store may mix them. SHA-3 is not hardware-accelerated where SHA-2 is,
+ * so the default trades throughput for its algorithm choice; `'sha256'` buys the
+ * throughput back.
  *
  * Every option this constructor accepts is enforced; an unknown one is a
  * config-time TypeError.
@@ -493,7 +496,7 @@ export class Stash extends EventEmitter {
     const tombstoneTtl =
       opts.tombstoneTtl === undefined ? DEFAULT_TOMBSTONE_TTL : opts.tombstoneTtl;
     this.#tombstoneTtlMs = parse(tombstoneTtl, "new Stash: tombstoneTtl");
-    // The integrity hash for new writes: a registry algorithm (default sha256).
+    // The integrity hash for new writes: a registry algorithm (DEFAULT_DIGEST).
     this.#digestAlgo = assertDigestAlgo(
       opts.digest === undefined ? DEFAULT_DIGEST : opts.digest,
       "new Stash: digest",
@@ -780,10 +783,28 @@ export class Stash extends EventEmitter {
     if (this.#maxTotal === null) return null;
     // maxTotal bounds the stored footprint, blob plus sidecar, so this entry's own metadata is
     // charged before the blob streams: otherwise unbounded `meta` (or an endless run of
-    // zero-byte blobs, each still costing a sidecar) slips past the limit. It under-counts by
-    // the `size`/`digest` a push adds after the write, a bounded sub-100-byte overshoot, and
-    // never over-counts, so it cannot reject an entry that would have fit.
-    const sidecarBytes = Buffer.byteLength(JSON.stringify(entry));
+    // zero-byte blobs, each still costing a sidecar) slips past the limit.
+    //
+    // The DIGEST is measured at the width it will be stored at, not the `null` a fresh push
+    // still carries. The backend finalizes it after the blob streams, so measuring the entry
+    // as-is under-counts the sidecar by the whole hex string: 69 bytes while the default was
+    // sha256, and 135 under a 512-bit default. That is how a longer digest would quietly widen
+    // a bound this comment promises. Charging the finalized width makes the bound a property
+    // of the arithmetic rather than of whichever algorithm happens to be the default.
+    //
+    // The width comes from hashing nothing with the entry's own algorithm, so it tracks the
+    // registry rather than restating a hex length the registry already owns.
+    //
+    // `size` is deliberately left at its pre-write 0. It grows by at most the digits of the
+    // final byte count, so the charge still under-counts a stored entry by under twenty bytes
+    // and NEVER over-counts one, which is what stops this check rejecting an entry that would
+    // have fit. Trading that guarantee away to close a sixteen-byte gap would be the wrong way
+    // round.
+    const algo = algoOf(entry.digest) ?? this.#digestAlgo;
+    const measured = isValidDigest(entry.digest)
+      ? entry
+      : { ...entry, digest: finalize(digestHash(algo), algo) };
+    const sidecarBytes = Buffer.byteLength(JSON.stringify(measured));
     const residual = this.#maxTotal - stats.bytes - sidecarBytes;
     if (residual < 0) throw new StashFull();
     return residual;
@@ -801,7 +822,7 @@ export class Stash extends EventEmitter {
    * Store bytes; resolve to the entry's ref. The source may be a Buffer, a
    * Uint8Array, a UTF-8 string, a Readable, or any AsyncIterable of chunks; it
    * streams through to the backend, which computes size and the digest as the bytes
-   * pass, using the algorithm chosen at construction (`sha256` by default).
+   * pass, using the algorithm chosen at construction (`sha3-512` by default).
    *
    * `opts.meta` is a caller-owned plain object, round-tripped verbatim as JSON and
    * never interpreted. `opts.ttl` overrides the constructor default for this entry

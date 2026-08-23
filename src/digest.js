@@ -34,8 +34,17 @@ export const DIGESTS = Object.freeze({
   }),
 });
 
-// Keeps every existing store byte-identical when `digest` is omitted.
-export const DEFAULT_DIGEST = "sha256";
+// The algorithm a push gets when `digest` is omitted. Because the stored digest
+// is self-describing, changing this is safe for data already on disk: an entry
+// written under an older default keeps its own prefix and still verifies with
+// the algorithm it was written with. Only NEW entries take the new default, and
+// a store may hold both.
+//
+// It costs throughput. SHA-3 has no hardware acceleration where SHA-2 does, so
+// sha3-512 hashes at roughly a sixth of sha256's rate, and the store hashes
+// every byte on the way in and again on every verified read. Operators who need
+// the throughput back set `digest: 'sha256'` explicitly.
+export const DEFAULT_DIGEST = "sha3-512";
 
 // Caller has already validated `algo` (assertDigestAlgo at config time, or a
 // stored digest's own prefix on the read path), so the row is always present.

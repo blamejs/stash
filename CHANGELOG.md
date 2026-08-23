@@ -2,6 +2,54 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 2.1.0 — 2026-08-22
+
+The default integrity hash changes and nothing else does: same verbs, same
+options, same error codes, same on-disk layout, no migration step and no data
+to convert. A stored digest has always carried its own algorithm, so an entry
+written before this release is still read, verified, and audited with the
+algorithm it was written with, and a store may hold both without complaint.
+Replication reconciles on byte identity rather than on the digest string, so
+a 2.0 store and a 2.1 store still converge. What changes is what a new push
+records: `sha3-512:<128 hex>` where it used to be `sha256:<64 hex>`. That is
+consumer-visible, which under the policy this project published at 1.0 would
+make it a major; it ships as a minor by maintainer decision, and the
+deviation is recorded in MIGRATING.md rather than the promise being quietly
+rewritten. Two costs are worth knowing before you upgrade. SHA-3 has no
+hardware acceleration where SHA-2 does, so the new default hashes at roughly
+a sixth of the old rate, and the store hashes every byte on the way in and
+again on every verified read. And a `sha3-512` digest is 64 more hex
+characters than a `sha256` one, so each entry's stored metadata grows by
+about that much, which counts against `maxTotal`. Both are bought back by
+naming `digest: 'sha256'` explicitly.
+
+### Changed
+
+- The `digest` constructor option now defaults to `sha3-512`. It previously
+  defaulted to `sha256`. The set of accepted values is unchanged: `sha3-512`,
+  `sha256`, `sha512`, `sha3-256`, `shake256`, all `node:crypto` builtins.
+  This is integrity, not confidentiality; there is still no key and no cipher
+  anywhere in the store.
+- The published API surface is otherwise identical. No verb, option, error
+  code, event, or on-disk format changed, and the primitive count in the API
+  snapshot is unchanged.
+
+### Fixed
+
+- `maxTotal` now charges an entry's digest at the width it will be stored at,
+  so a push that fills the store no longer overshoots the limit by the length
+  of a hash. The capacity check runs before the backend finalizes the entry,
+  and it used to measure the sidecar while `digest` was still `null`, which
+  under-counted by the whole hex string: a store could end up 69 bytes over
+  `maxTotal` under `sha256` and would have gone to 135 under the new default.
+  The overshoot is now about three bytes and no longer depends on which
+  algorithm you choose. The check still never over-counts, so it cannot
+  refuse an entry that would have fit.
+- The architecture, specification, and README all described `sha256` as the
+  default in prose. They now describe the shipped default, and each states
+  the throughput trade so the choice is visible at the point a reader picks
+  an algorithm.
+
 ## 2.0.2 — 2026-08-21
 
 A documentation and packaging release. No API, behavior, error, or on-disk
