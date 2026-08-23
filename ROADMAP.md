@@ -263,6 +263,45 @@ Every example in the API documentation now runs on each build. The one that had
 quietly stopped working, the snippet for `close()`, which used `Stash` without
 importing it, is corrected.
 
+## v2.0.2. SHIPPED (2.0.2)
+
+The package now contains the documents it tells you to read. README and
+SECURITY.md pointed at `ARCHITECTURE.md` and `THREAT-MODEL.md`, neither of which
+shipped in the tarball, so a reader following the README's own reading list found
+nothing. Six documents were added to the published file list, and the packaging
+gate was widened to catch a filename named in prose rather than only one behind a
+markdown link.
+
+The contributor setup instructions documented a test command that fails on
+current Node and silently skips a chaos vector. Every document was rewritten for
+clarity, and the source comments, which ship in the tarball and generate the API
+reference, are considerably shorter.
+
+## v2.1.0. SHIPPED (2.1.0)
+
+New entries are hashed with `sha3-512` instead of `sha256`. Entries written
+before this release keep their own algorithm and keep verifying, because a stored
+digest has always been self-describing, and a store may hold both. Replication
+reconciles on byte identity rather than on the digest string, so stores on either
+side of the change still converge. `digest: 'sha256'` pins the previous
+behaviour and has existed since 0.1.12.
+
+Two costs come with it. SHA-3 has no hardware acceleration where SHA-2 does, so
+the new default hashes at roughly a sixth of the old rate, and the store hashes
+every byte on the way in and again on every verified read. A `sha3-512` digest is
+also 64 more hex characters, so each entry's metadata grows by about that much.
+
+`maxTotal` no longer under-charges the digest. The capacity check runs before the
+backend finalizes an entry, and it measured the sidecar while `digest` was still
+`null`, so a store could finish 69 bytes over the limit under `sha256` and would
+have gone to 135 under the new default. The charge now uses the width the digest
+will be stored at, taken from the algorithm registry, and the overshoot is about
+three bytes regardless of algorithm.
+
+This release is a minor carrying a consumer-visible change, which the policy in
+[MIGRATING.md](MIGRATING.md#policy) makes a major. The deviation and its
+reasoning are recorded there rather than the policy being rewritten.
+
 ## Standing constraints
 
 Every release honors the one rule (no decrypt capability), zero dependencies,
