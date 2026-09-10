@@ -71,7 +71,10 @@ function _walk(dir, files, opts) {
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) _walk(full, files, opts);
-    else if (/\.js$/.test(entry.name)) files.push(full);
+    // package.json packs src/ whole, so a .mjs or .cjs added there ships. A
+    // walk that took .js alone would leave it inside the tarball and outside
+    // every detector that reads this list.
+    else if (/\.(?:js|mjs|cjs)$/.test(entry.name)) files.push(full);
   }
   return files;
 }
