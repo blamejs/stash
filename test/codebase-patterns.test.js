@@ -494,6 +494,32 @@ test("crypto-import-allowlist -- the scanner reads every import position and for
     "a newline inside require()",
   );
 
+  // The engine decodes escapes before resolving, so an escaped specifier
+  // reaches the same builtin and is held to the same list.
+  assert.equal(
+    scan(HEADER + 'import { sign } from "cryp\\u0074o";\n').length,
+    1,
+    "a \\u escape in the specifier",
+  );
+  // Built by concatenation: a contiguous `from "node:<something>"` in this
+  // file's own source would send unimported-builtin-call to
+  // process.getBuiltinModule() for a module that does not exist.
+  assert.equal(
+    scan(HEADER + 'import { createHmac } from "' + "node:cryp\\x74o" + '";\n').length,
+    1,
+    "an \\x escape in the specifier",
+  );
+  assert.equal(
+    scan(HEADER + 'const c = require("cryp\\u{74}o");\n').length,
+    1,
+    "a \\u{} escape in a require",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'import { createHash } from "cryp\\u0074o";\n'),
+    [],
+    "an escaped specifier with a permitted name is still clean",
+  );
+
   // A call form may carry an options argument after the specifier.
   assert.equal(
     scan(HEADER + 'const { sign } = await import("node:crypto", {});\n').length,
@@ -568,9 +594,20 @@ function _cryptoImportViolations(subject) {
   // takes an options argument, and requiring the `)` to follow immediately
   // would read `import("node:crypto", { with: ... })` as no import at all.
   const OPAQUE_RE =
-    /(?:^|;)[^\S\n]*import\s*[\x22\x27](?:node:)?crypto[\x22\x27]|(?:require|import)\s*\(\s*[\x22\x27](?:node:)?crypto[\x22\x27]/gm;
+    /(?:^|;)[^\S\n]*import\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]|(?:require|import)\s*\(\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]/gm;
 
-  const isCrypto = (spec) => spec === "crypto" || spec === "node:crypto";
+  // The engine decodes string escapes before resolving, so `crypto` loads
+  // the builtin. Comparing the raw source text would let an escape spell the
+  // module past the allowlist, so the specifier is decoded first.
+  const decodeSpec = (s) =>
+    s
+      .replace(/\\u\{([0-9a-fA-F]+)\}/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+      .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+      .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+  const isCrypto = (spec) => {
+    const d = decodeSpec(spec);
+    return d === "crypto" || d === "node:crypto";
+  };
 
   let m;
 
@@ -578,6 +615,7 @@ function _cryptoImportViolations(subject) {
   // grants the whole namespace and names nothing, so it is refused outright.
   OPAQUE_RE.lastIndex = 0;
   while ((m = OPAQUE_RE.exec(subject)) !== null) {
+    if (!isCrypto((m[1] === undefined ? m[2] : m[1]).trim())) continue;
     violations.push({
       line: _lines(subject.slice(0, m.index)).length,
       content:

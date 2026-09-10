@@ -147,20 +147,17 @@ jobs:
         # The committed lockfile describes exactly the root package -- zero
         # dependencies in any scope. `npm ci --dry-run` re-validates the
         # dependency graph against package.json without downloading or
-        # writing anything; the root name/version are compared explicitly
-        # because `npm ci` does not assert them. A drifted lockfile fails
-        # here instead of feeding a stale version into the SBOM below.
+        # writing anything; the fields npm does not assert (root name,
+        # version and engines) are compared by the gate script. A drifted
+        # lockfile fails here instead of feeding a stale version into the
+        # SBOM below.
+        #
+        # The comparison lives in the script rather than inline here, so
+        # this workflow, ci.yml and `npm run gates` enforce one
+        # implementation across all three.
         run: |
           set -euo pipefail
-          node -e "
-            const { readFileSync } = require('node:fs');
-            const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
-            const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
-            const root = (lock.packages || {})[''] || {};
-            const fail = (msg) => { console.error('::error::' + msg); process.exit(1); };
-            if (lock.name !== pkg.name || root.name !== pkg.name) fail('package-lock.json name does not match package.json -- regenerate with: npm install --package-lock-only');
-            if (lock.version !== pkg.version || root.version !== pkg.version) fail('package-lock.json version (' + lock.version + ') does not match package.json (' + pkg.version + ') -- regenerate with: npm install --package-lock-only');
-          "
+          node scripts/check-lockfile-sync.js
           npm ci --dry-run --ignore-scripts --no-audit --no-fund
 
       - name: Suite
