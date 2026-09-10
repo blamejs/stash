@@ -32,13 +32,13 @@ else. Stop and ask.
 
 ## 2. Runtime and non-negotiable constraints
 
-- **Node 24.19.0.** `"engines": { "node": ">=24.19.0" }`, with a `.node-version` / `.nvmrc` of
-  `24.19.0`. Treat this as a floor to build against: no polyfills, no compatibility shims, no
+- **Node 24.21.0.** `"engines": { "node": ">=24.21.0" }`, with a `.node-version` / `.nvmrc` of
+  `24.21.0`. Treat this as a floor to build against: no polyfills, no compatibility shims, no
   `if (nodeVersion < x)` branches for older runtimes. The capabilities the store depends on all
-  arrived at the Node 24 *major* level, not in the `.19` patch: the stable permission model
+  arrived at the Node 24 *major* level, not in the `.21` patch: the stable permission model
   (`--permission`, §2.1), V8 13.6 explicit resource management behind `Symbol.asyncDispose`
   (§7.1), and `require(esm)` of the package's synchronous ESM graph (a CommonJS project can
-  `require` it with no build step). The specific `.19` patch is a conservative
+  `require` it with no build step). The specific `.21` patch is a conservative
   security-currency floor. It keeps consumers on a maintained Node 24 patch rather than an
   early 24.x carrying since-fixed defects; it is not a dependency on anything that first
   shipped in that release. It is a floor, not a ceiling: any newer 24.x, and later majors per
@@ -52,7 +52,7 @@ else. Stop and ask.
 
 ### 2.1 Permission model posture
 
-The Node permission model went stable in 23.5, so on 24.19.0 the flag is `--permission`, not
+The Node permission model went stable in 23.5, so on 24.21.0 the flag is `--permission`, not
 `--experimental-permission`. StashJS should run cleanly under:
 
 ```
@@ -77,6 +77,12 @@ Design implications, all mandatory:
   permission model, so the DiskBackend has to do its own containment check (§9); the sandbox
   won't do it.
 - **Existing file descriptors bypass the model.** Never accept an fd as input; paths only.
+- **OpenSSL STORE loaders are a separate grant, and StashJS never takes it.** Node 24.21.0
+  added `--allow-openssl-store`, which lets `crypto.createPrivateKey()` load a key from a URL.
+  A loader may reach files, devices, tokens, or the network, and its access is not constrained
+  by the `fs.read` or `fs.write` scopes, so the grant opens a path the filesystem allowlist
+  does not cover. The store needs no key (§1), so the flag is never passed and the suite runs
+  with it denied.
 - Don't call `process.permission.has()` to branch behavior. If a grant is wrong, let the
   `ERR_ACCESS_DENIED` surface rather than degrading quietly.
 - `--permission` in 24.x does **not** gate the network, so no document may claim that it does.

@@ -8,7 +8,7 @@ Feature backports are not promised.
 |------------------|---------------|----------------------------|--------------|--------------------|
 | `v0.x` (pre-1.0) | 2026          | superseded by v1.0 (2026-07-23) | 24.18.0 | Zero dependencies, runtime and dev |
 | `v1.x`           | 2026-07-23    | **not serviced**; superseded by v2.0 (2026-08-07), upgrade to `v2.x` | 24.18.0 | Zero dependencies, runtime and dev |
-| `v2.x`           | 2026-08-07    | current major; 24 months after v3.0 ships | 24.19.0 | Zero dependencies, runtime and dev |
+| `v2.x`           | 2026-08-07    | current major; 24 months after v3.0 ships | 24.21.0 (24.19.0 before `v2.2.0`) | Zero dependencies, runtime and dev |
 
 > **`v1.x` is not receiving security patches.** `v1.0` shipped on 2026-07-23
 > stating that a 24-month window would open when its successor shipped. `v2.0`
@@ -37,9 +37,10 @@ Feature backports are not promised.
 ## Node minimum policy
 
 The "Node minimum" column is the lowest Node version the library supports for
-that line. `v0.x` and `v1.x` shipped against a 24.18.0 floor; `v2.x` raises it to
-24.19.0. Either way it is a floor rather than a ceiling: no polyfills, no compat
-shims, no version branches for older runtimes.
+that line. `v0.x` and `v1.x` shipped against a 24.18.0 floor; `v2.x` shipped
+against 24.19.0 and moved to 24.21.0 in `v2.2.0`. Either way it is a floor
+rather than a ceiling: no polyfills, no compat shims, no version branches for
+older runtimes.
 
 The capabilities the library relies on all arrived at the Node 24 major level,
 not in any one patch (see [SPEC.md](SPEC.md) section 2). The patch level is a
@@ -51,6 +52,13 @@ A new major adopts whatever Node major is the active LTS at release. Once on the
 LTS line, the Node minimum is frozen for that major's security-patch window, so
 consumers are not forced onto a newer Node mid-window. Nothing is transpiled, so
 the supported Node version is exactly the version the source runs on.
+
+> **`v2.2.0` moved the `v2.x` minimum from 24.19.0 to 24.21.0, inside the
+> window the paragraph above freezes.** The commitment stands as written and
+> this release did not meet it. If you are on Node 24.19.0 or 24.20.0, `npm`
+> warns and installs, and Yarn 1 or any `engine-strict` setting refuses;
+> upgrading Node is the only step. The reasoning is recorded in
+> [MIGRATING.md](MIGRATING.md#policy) under "Exceptions taken".
 
 ## The v0.x line
 

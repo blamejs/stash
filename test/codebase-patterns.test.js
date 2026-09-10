@@ -33,6 +33,7 @@ import assert from "node:assert/strict";
 
 import { freshScratchDir } from "./_scratch.js";
 import { DIGESTS } from "../src/digest.js";
+import { forbiddenMatchers } from "../scripts/check-forbidden-tokens.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -50,6 +51,11 @@ const SELF = "test/codebase-patterns.test.js";
 // (`skipAssetDirs`): applying them to a product tree would let a new
 // src/public/ or src/vendor/ module ship in the tarball while sitting
 // outside every detector's view.
+// Extensions that hold no code, so a walk reading everything else does not
+// try to scan an image or a lockfile. Kept in step with the same list in
+// scripts/check-forbidden-tokens.js.
+const _NOT_CODE = /\.(?:json|md|txt|map|png|svg|ico|woff2?|lock)$/i;
+
 function _walk(dir, files, opts) {
   files = files || [];
   const base = path.basename(dir);
@@ -70,7 +76,16 @@ function _walk(dir, files, opts) {
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) _walk(full, files, opts);
-    else if (/\.js$/.test(entry.name)) files.push(full);
+    // package.json packs src/ whole, so anything added there ships. Listing
+    // the extensions to READ leaves whatever is not on the list inside the
+    // tarball and outside every detector; `anyCodeFile` inverts that, reading
+    // everything that is not a known non-code type, so a `.mjs`, a `.cjs` or a
+    // file with no extension at all is still scanned.
+    else if (
+      opts && opts.anyCodeFile ? !_NOT_CODE.test(entry.name) : /\.(?:js|mjs|cjs)$/.test(entry.name)
+    ) {
+      files.push(full);
+    }
   }
   return files;
 }
@@ -80,7 +95,7 @@ function _relPath(absPath) {
 }
 
 function _srcFiles() {
-  return _walk(path.join(REPO_ROOT, "src"));
+  return _walk(path.join(REPO_ROOT, "src"), [], { anyCodeFile: true });
 }
 function _testFiles() {
   return _walk(path.join(REPO_ROOT, "test"));
@@ -172,15 +187,277 @@ function _blank(match) {
   return match.replace(/[^\n]/g, " ");
 }
 
-// Strip `//` line comments and `/* */` block comments, keeping string
-// literals (an import specifier is a string literal, and the sandbox scan
-// must still see it). The `[^:]` guard keeps a `://` inside a URL intact.
+// After these a `/` opens a regex, even though the character before it is a
+// word character: `return /re/` is a regex, `count / 2` is division.
+const _REGEX_AFTER_WORD = new Set([
+  "return",
+  "typeof",
+  "instanceof",
+  "in",
+  "of",
+  "new",
+  "delete",
+  "void",
+  "throw",
+  "case",
+  "do",
+  "else",
+  "yield",
+  "await",
+]);
+
+// After these a `{` opens a statement block rather than an object literal.
+const _BLOCK_AFTER_WORD = new Set(["else", "try", "finally", "do"]);
+
+// These take a parenthesized clause whose `)` is followed by a statement
+// block, so a `/` after that block's `}` opens a regex rather than dividing.
+const _CLAUSE_KEYWORDS = new Set(["if", "for", "while", "with", "switch", "catch"]);
+
+// Words that may sit between a statement position and a `function` keyword
+// while it is still a declaration rather than an expression.
+const _DECLARATION_MODIFIERS = new Set(["export", "default", "async"]);
+
+// Index just past the regex literal starting at `i`, or -1 if it does not
+// close on this line (in which case the `/` was division after all).
+function _regexEndsAt(content, i) {
+  let j = i + 1;
+  let inClass = false;
+  while (j < content.length) {
+    const d = content[j];
+    if (d === "\\") {
+      j += 2;
+      continue;
+    }
+    if (d === "\n") return -1;
+    j++;
+    if (d === "[") inClass = true;
+    else if (d === "]") inClass = false;
+    else if (d === "/" && !inClass) return j;
+  }
+  return -1;
+}
+
+// Walk code from `start`, blanking comments and leaving every other byte where
+// it is. Returns the text produced and the index just past the `}` that closed
+// the scan, which is how a template's `${...}` finds its end: the expression is
+// scanned as the code it is, so a brace inside one of its strings, comments or
+// regex literals cannot end it early.
+//
+// Whether a `/` opens a regex is a grammar question, not a character one:
+// `value++ / 2` divides while `if (ok) /re/` does not, and `obj.of / 2`
+// divides while `case /re/` does not. The walk therefore CARRIES the token it
+// last completed rather than looking backwards from the slash. A backward look
+// reads raw text, where a `//` inside a URL string, or a `)` inside a quoted
+// string, is indistinguishable from the real thing.
+//
+// Getting an exotic case wrong costs a FALSE REPORT on valid code, which is
+// visible and fixable. It cannot hide a violation, because strings and
+// templates are tracked exactly, and those are what a marker would hide in.
+function _scanCode(content, start, stopAtCloseBrace) {
+  let out = "";
+  let i = start;
+  let kind = "start"; // start | value | word | closeParen | closeBrace | punct
+  let word = "";
+  let dotted = false;
+  let punct = "";
+  let closeIsStatement = false;
+  // Set by the `function` keyword and cleared by the parameter list it opens,
+  // so that list is classified as a clause and the body after it as a block.
+  let sawFunction = false;
+  // A function DECLARATION is a statement, so a `/` after its body opens a
+  // regex. A function EXPRESSION produces a value, so the same `/` divides.
+  // Which one it is depends on where the keyword appeared.
+  let functionIsDeclaration = false;
+  let modifierRunAtStatement = false;
+  // One entry per open `(` or `{`, recording whether it opened a statement
+  // rather than an expression -- what tells `if (ok) {} /re/` (a block, so a
+  // regex follows) from `const o = {} / 2` (an object, so division).
+  const opens = [];
+
+  const regexMayOpen = () => {
+    if (kind === "start") return true;
+    if (kind === "value") return false;
+    if (kind === "word") return !dotted && _REGEX_AFTER_WORD.has(word);
+    if (kind === "closeParen" || kind === "closeBrace") return closeIsStatement;
+    return true;
+  };
+
+  const atStatementPosition = () => {
+    if (kind === "start") return true;
+    if (kind === "word") return _BLOCK_AFTER_WORD.has(word);
+    if (kind === "closeParen" || kind === "closeBrace") return closeIsStatement;
+    if (kind === "punct") return punct === ";" || punct === "{" || punct === "}";
+    return false;
+  };
+
+  while (i < content.length) {
+    const c = content[i];
+    const next = content[i + 1];
+
+    if (c === "/" && next === "/") {
+      let j = i;
+      while (j < content.length && content[j] !== "\n") j++;
+      out += " ".repeat(j - i);
+      i = j;
+      continue;
+    }
+
+    if (c === "/" && next === "*") {
+      let j = i + 2;
+      while (j < content.length && !(content[j] === "*" && content[j + 1] === "/")) j++;
+      j = Math.min(j + 2, content.length);
+      for (let k = i; k < j; k++) out += content[k] === "\n" ? "\n" : " ";
+      i = j;
+      continue;
+    }
+
+    if (c === '"' || c === "'") {
+      out += c;
+      let j = i + 1;
+      while (j < content.length) {
+        if (content[j] === "\\") {
+          out += content.slice(j, j + 2);
+          j += 2;
+          continue;
+        }
+        out += content[j];
+        if (content[j] === c) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      i = j;
+      kind = "value";
+      continue;
+    }
+
+    if (c === "`") {
+      out += c;
+      let j = i + 1;
+      while (j < content.length) {
+        if (content[j] === "\\") {
+          out += content.slice(j, j + 2);
+          j += 2;
+          continue;
+        }
+        if (content[j] === "`") {
+          out += "`";
+          j++;
+          break;
+        }
+        if (content[j] === "$" && content[j + 1] === "{") {
+          const inner = _scanCode(content, j + 2, true);
+          out += "${" + inner.out;
+          j = inner.end;
+          continue;
+        }
+        out += content[j];
+        j++;
+      }
+      i = j;
+      kind = "value";
+      continue;
+    }
+
+    if (c === "/" && regexMayOpen()) {
+      const end = _regexEndsAt(content, i);
+      if (end !== -1) {
+        out += content.slice(i, end);
+        i = end;
+        kind = "value";
+        continue;
+      }
+    }
+
+    if (/[\w$]/.test(c)) {
+      let j = i;
+      while (j < content.length && /[\w$]/.test(content[j])) j++;
+      const w = content.slice(i, j);
+      out += w;
+      // A property name is not a keyword: `obj.of / 2` divides.
+      dotted = kind === "punct" && punct === ".";
+      // A run of modifiers carries the position it began at, so `export async
+      // function` stays a declaration while `= async function` does not.
+      if (_DECLARATION_MODIFIERS.has(w) && !(kind === "word" && _DECLARATION_MODIFIERS.has(word))) {
+        modifierRunAtStatement = atStatementPosition();
+      }
+      if (w === "function") {
+        // Checked before `kind` moves on, so it reads the token that PRECEDED
+        // the keyword: `const x = function` is an expression, a `function` at
+        // the start of a statement is a declaration.
+        sawFunction = true;
+        // `export function f() {}` and `async function f() {}` are still
+        // declarations, though a word sits between the keyword and the
+        // statement position. What decides it is where the RUN of modifiers
+        // began: `const f = async function () {}` is an expression, because
+        // that run began after an `=`.
+        functionIsDeclaration =
+          atStatementPosition() ||
+          (kind === "word" && _DECLARATION_MODIFIERS.has(word) && modifierRunAtStatement);
+      }
+      word = w;
+      kind = "word";
+      i = j;
+      continue;
+    }
+
+    out += c;
+    i++;
+    if (/\s/.test(c)) continue;
+
+    if (c === "(" || c === "{") {
+      // A `(` opens a statement clause after if/for/while/with/switch/catch,
+      // and a function's parameter list is the same shape: in both, the `{`
+      // that follows the `)` opens a block, so a regex may open after its `}`.
+      const isClause =
+        c === "(" &&
+        ((kind === "word" && !dotted && _CLAUSE_KEYWORDS.has(word)) ||
+          (sawFunction && functionIsDeclaration));
+      const isBlock = c === "{" && atStatementPosition();
+      if (c === "(") sawFunction = false;
+      opens.push({ statement: c === "(" ? isClause : isBlock });
+      kind = "punct";
+      punct = c;
+      continue;
+    }
+
+    if (c === ")" || c === "}") {
+      const open = opens.pop();
+      if (c === "}" && stopAtCloseBrace && open === undefined) return { out, end: i };
+      closeIsStatement = Boolean(open && open.statement);
+      kind = c === ")" ? "closeParen" : "closeBrace";
+      continue;
+    }
+
+    if (c === "]") {
+      kind = "value";
+      continue;
+    }
+
+    if ((c === "+" || c === "-") && content[i - 2] === c) {
+      // `value++` completed a value, so the slash after it divides.
+      kind = "value";
+      continue;
+    }
+
+    kind = "punct";
+    punct = c;
+  }
+
+  return { out, end: i };
+}
+
+// A `/*` inside a string literal is not a comment. Matching comment markers
+// with a regex cannot know that, so a module holding "/*" in one string and
+// "*/" in a later one had everything between them blanked -- and every
+// detector downstream then scanned a file with its middle removed, reporting
+// nothing about the code that was there.
+//
+// Comments are blanked rather than deleted, and their newlines kept, so every
+// line number a detector reports still matches the file on disk.
 function _stripComments(content) {
-  return content
-    .replace(/\/\*[\s\S]*?\*\//g, _blank)
-    .replace(/(^|[^:])\/\/[^\n]*/g, function (m, pre) {
-      return pre + _blank(m.slice(pre.length));
-    });
+  return _scanCode(content, 0, false).out;
 }
 
 // Strip comments AND string literals so a structural scan does not fire on
@@ -206,6 +483,8 @@ const VALID_ALLOW_CLASSES = {
   "guard-shape-reinlined": 1,
   "validator-shape-reinlined": 1,
   "forbidden-crypto-token": 1,
+  "crypto-import-allowlist": 1,
+  "src-module-allowlist": 1,
   "digest-algo-hardcode": 1,
   "prototype-key-confusion": 1,
   "sandbox-widening-import": 1,
@@ -306,7 +585,7 @@ function _scanLines(files, regex, opts) {
 // (1) forbidden-crypto-token -- SPEC.md 1 / 13.1 invariant 1
 // ---------------------------------------------------------------------------
 
-test("forbidden-crypto-token -- no cipher machinery, sqlite, or password surface in src/", () => {
+test("forbidden-crypto-token -- no key machinery, sqlite, or password surface in src/", () => {
   // reason: the store's guarantee is architectural, not behavioural -- there
   // is nowhere in the source for a key to live. A cipher import (even the
   // legacy createCipher/createDecipher names), a node:sqlite index (which
@@ -315,22 +594,706 @@ test("forbidden-crypto-token -- no cipher machinery, sqlite, or password surface
   // scan is RAW source, comments included: a commented-out cipher call is
   // still a hole being sketched. Token list is concatenated so this gate
   // file never matches itself.
-  const tokens = [
-    "createCiph" + "eriv",
-    "createDeciph" + "eriv",
-    "createCiph" + "er\\b",
-    "createDeciph" + "er\\b",
-    "node:sql" + "ite",
-    "pass" + "word",
-  ];
-  const re = new RegExp(tokens.join("|"), "i");
-  let bad = _scanLines(_srcFiles(), re);
+  //
+  // The list covers key INGESTION and DERIVATION, not just the cipher calls
+  // that consume a key. Matching only `createCipheriv` reads the guarantee as
+  // "does not encrypt"; the guarantee is "holds no key", and a key arrives
+  // through `createPrivateKey`, `createSecretKey`, `generateKeyPair`, a
+  // WebCrypto `importKey`, or a KDF long before any cipher names it.
+  // Both matchers, so this detector and the workflow script cannot disagree:
+  // one list is folded for case, the other respects it.
+  const files = _srcFiles();
+  let bad = [];
+  for (const re of forbiddenMatchers()) bad = bad.concat(_scanLines(files, re));
   bad = _filterMarkers(bad, "forbidden-crypto-token");
   _report(
     "SPEC.md 13.1: zero hits for cipher / sqlite / password tokens in src/ (raw, comments included)",
     bad,
   );
 });
+
+// ---------------------------------------------------------------------------
+// (1b) crypto-import-allowlist -- SPEC.md 1 names the three permitted imports
+// ---------------------------------------------------------------------------
+
+// SPEC.md 1: "`node:crypto` is allowed for hashing and random IDs only:
+// `createHash`, `randomBytes`, and `timingSafeEqual`."
+const CRYPTO_ALLOWED = ["createHash", "randomBytes", "timingSafeEqual"];
+// Precomputed because a `"` inside a template-literal interpolation desyncs
+// _stripStrings: its double-quote pass runs before the backtick pass, so the
+// quote pairs with an unrelated one later in the file and every detector that
+// scans stripped source reads garbage from there on.
+const CRYPTO_ALLOWED_TEXT = CRYPTO_ALLOWED.join(", ");
+
+// The builtins src/ is allowed to reach. Naming the permitted modules bounds
+// a problem that denying the forbidden ones cannot: node:tls, node:https and
+// node:http2 all accept private-key material through their secure-context
+// options, node:module hands out a loader, and the next Node release may add
+// another. None of them can be listed in advance, and all of them are refused
+// by not appearing here. A relative specifier is always permitted -- it stays
+// inside src/, which this whole suite already governs.
+const SRC_MODULES = [
+  "node:assert",
+  "node:crypto",
+  "node:events",
+  "node:fs",
+  "node:fs/promises",
+  "node:path",
+  "node:stream",
+  "node:url",
+  "node:util",
+  "node:util/types",
+];
+
+test("crypto-import-allowlist -- src/ imports only the three permitted node:crypto names", () => {
+  // reason: the token denylist above enumerates key machinery, and an
+  // enumeration of someone else's API is never finished -- Node 24.21.0 added
+  // `createPrivateKey` through an OpenSSL STORE loader and every gate stayed
+  // green, which is the same way `createHmac(algo, key)` and the one-shot
+  // `sign(alg, data, privateKey)` sit outside a denylist today. This inverts
+  // it: `node:crypto` may contribute exactly the three names SPEC.md 1 grants,
+  // so a key-bearing export added to Node in any future release is refused on
+  // arrival with no edit here. The denylist stays as the second layer, since
+  // it also reaches commented-out sketches, `node:sqlite` and password
+  // surface, which an import check cannot see.
+  //
+  // A namespace or default import is refused outright: `crypto.createHmac(...)`
+  // behind `import * as crypto` would make the granted set unknowable. Bare
+  // "crypto" resolves to the same builtin, so it is matched too.
+  _report(
+    "SPEC.md 1: src/ imports only createHash / randomBytes / timingSafeEqual from node:crypto",
+    _filterMarkers(_scanImports("crypto"), "crypto-import-allowlist"),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// (1c) src-module-allowlist -- src/ reaches only the modules it is granted
+// ---------------------------------------------------------------------------
+
+test("src-module-allowlist -- src/ imports only the granted builtins", () => {
+  // reason: the no-key guarantee cannot be held by naming forbidden APIs,
+  // because the list of modules that accept key material is not ours and is
+  // not finished -- node:tls, node:https and node:http2 take a private key
+  // through their secure-context options, node:module hands back a loader
+  // that reaches any builtin under any alias, and the next release may add
+  // another. Granting a short list of modules instead bounds it: a module
+  // that is not on the list cannot be imported at all, so one nobody thought
+  // to deny is refused by default. Adding a row here is a deliberate act.
+  _report(
+    "SPEC.md 2: src/ imports only the granted builtins, or a relative path",
+    _filterMarkers(_scanImports("module"), "src-module-allowlist"),
+  );
+});
+
+function _scanImports(kind) {
+  const violations = [];
+  for (const file of _srcFiles()) {
+    const rel = _relPath(file);
+    if (rel === SELF) continue;
+    for (const v of _cryptoImportViolations(_stripComments(_read(file)), rel)) {
+      if (v.kind !== kind) continue;
+      violations.push({ file: rel, line: v.line, content: v.content });
+    }
+  }
+  return violations;
+}
+
+// Resolve a relative specifier against the importing file and return the
+// repo-relative target, so containment is decided on where it LANDS rather
+// than on the fact that it starts with a dot.
+function _resolveRelative(fromRel, spec) {
+  const parts = fromRel.split("/").slice(0, -1);
+  for (const seg of spec.split("/")) {
+    if (seg === "." || seg === "") continue;
+    if (seg === "..") {
+      // Climbing past the repo root lands in its parent, and popping an empty
+      // stack would quietly resolve `../../src/x.js` back to `src/x.js` -- a
+      // file outside the tree reported as one inside it.
+      if (parts.length === 0) return null;
+      parts.pop();
+    } else parts.push(seg);
+  }
+  return parts.join("/");
+}
+
+// Fixture vectors for the scanner above. The detector runs over the real tree,
+// where every module happens to import node:crypto first and with the same
+// layout, so a scanner that only works in that one position passes the live
+// tree while being blind everywhere else. These pin the positions the tree
+// does not currently exercise.
+test("crypto-import-allowlist -- the scanner reads every import position and form", () => {
+  const HEADER =
+    "// SPDX-License-Identifier: Apache-2.0\n// Copyright (c) blamejs contributors\n//\n// A multi-line header, which _stripComments leaves as blank lines.\n\n";
+  const scan = (src, from) => _cryptoImportViolations(_stripComments(src), from);
+  const names = (src) => scan(src).map((v) => v.content);
+
+  // Permitted, in each position a real module might place it.
+  assert.deepEqual(scan(HEADER + 'import { createHash } from "node:crypto";\n'), []);
+  assert.deepEqual(
+    scan(
+      HEADER + 'import { join } from "node:path";\nimport { randomBytes } from "node:crypto";\n',
+    ),
+    [],
+    "a crypto import that is not the first import is still parsed as its own statement",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'import {\n  randomBytes,\n  timingSafeEqual,\n} from "node:crypto";\n'),
+    [],
+    "a multi-line named import",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'import { createHash as h } from "node:crypto";\n'),
+    [],
+    "an alias grants the name that was imported",
+  );
+
+  // Refused: key-bearing names the denylist cannot cover without false hits.
+  assert.equal(names(HEADER + 'import { createHash, sign } from "node:crypto";\n').length, 1);
+  assert.match(names(HEADER + 'import { createHash, sign } from "node:crypto";\n')[0], /'sign'/);
+  assert.equal(names(HEADER + 'import { createHmac } from "node:crypto";\n').length, 1);
+  assert.equal(
+    names(HEADER + 'import { join } from "node:path";\nimport { verify } from "node:crypto";\n')
+      .length,
+    1,
+    "a violation in a non-first import is still found",
+  );
+
+  // Refused: forms that name nothing and grant the whole namespace.
+  for (const form of [
+    'import * as c from "node:crypto";\n',
+    'import c from "node:crypto";\n',
+    'import "node:crypto";\n',
+    'const c = require("node:crypto");\n',
+    'const c = await import("node:crypto");\n',
+  ]) {
+    assert.equal(scan(HEADER + form).length, 1, `opaque form not refused: ${form.trim()}`);
+  }
+
+  // Bare "crypto" resolves to the same builtin.
+  assert.equal(scan(HEADER + 'import { createHmac } from "crypto";\n').length, 1);
+
+  // A line break may fall anywhere a space may. Each of these is one import
+  // statement, and a scanner that stopped at the newline would read it as
+  // absent -- silently permitting the name it was added to refuse.
+  assert.equal(
+    scan(HEADER + 'import { sign } from\n  "node:crypto";\n').length,
+    1,
+    "a newline between from and the specifier",
+  );
+  assert.equal(
+    scan(HEADER + 'import\n  { createHmac }\n  from\n  "node:crypto";\n').length,
+    1,
+    "a newline after the import keyword and around the clause",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'import { randomBytes } from\n  "node:crypto";\n'),
+    [],
+    "the same layout with a permitted name stays clean",
+  );
+  assert.equal(
+    scan(HEADER + 'const c = require(\n  "node:crypto"\n);\n').length,
+    1,
+    "a newline inside require()",
+  );
+
+  // The engine decodes escapes before resolving, so an escaped specifier
+  // reaches the same builtin and is held to the same list.
+  assert.equal(
+    scan(HEADER + 'import { sign } from "cryp\\u0074o";\n').length,
+    1,
+    "a \\u escape in the specifier",
+  );
+  // Built by concatenation: a contiguous `from "node:<something>"` in this
+  // file's own source would send unimported-builtin-call to
+  // process.getBuiltinModule() for a module that does not exist.
+  assert.equal(
+    scan(HEADER + 'import { createHmac } from "' + "node:cryp\\x74o" + '";\n').length,
+    1,
+    "an \\x escape in the specifier",
+  );
+  assert.equal(
+    scan(HEADER + 'const c = require("cryp\\u{74}o");\n').length,
+    1,
+    "a \\u{} escape in a require",
+  );
+  assert.equal(
+    scan(HEADER + 'import { sign } from "cr\\ypto";\n').length,
+    1,
+    "an identity escape, which is simply the letter",
+  );
+  assert.equal(
+    scan(HEADER + 'import { createHash } from "cryp\\u0074o";\n').length,
+    1,
+    "an escaped specifier is refused even where the name would be permitted, since the spelling is what hides the module",
+  );
+
+  // A statement ends at a `}` as well as at a `;` or a line break, so an
+  // import may legally begin right after one.
+  assert.equal(
+    scan(HEADER + 'function f() {} import { sign } from "node:crypto";\n').length,
+    1,
+    "an import following a declaration on the same line",
+  );
+  assert.equal(
+    scan(HEADER + 'function f() {} import "node:tls";\n', "src/digest.js").length,
+    1,
+    "a side-effect import following a declaration on the same line",
+  );
+
+  // A call form may carry an options argument after the specifier.
+  assert.equal(
+    scan(HEADER + 'const { sign } = await import("node:crypto", {});\n').length,
+    1,
+    "a dynamic import with an options argument",
+  );
+  assert.equal(
+    scan(HEADER + 'const c = require("node:crypto", { paths: [] });\n').length,
+    1,
+    "a require with a second argument",
+  );
+
+  // A re-export binds the same names into another module, so it is held to
+  // the same list. A wildcard re-export names nothing and is refused.
+  assert.equal(
+    scan(HEADER + 'export { sign } from "node:crypto";\n').length,
+    1,
+    "a named re-export of a forbidden name",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'export { createHash } from "node:crypto";\n'),
+    [],
+    "a named re-export of a permitted name",
+  );
+  assert.equal(
+    scan(HEADER + 'export * as crypto from "node:crypto";\n').length,
+    1,
+    "a namespace re-export",
+  );
+  assert.equal(scan(HEADER + 'export * from "node:crypto";\n').length, 1, "a wildcard re-export");
+  assert.deepEqual(
+    scan(HEADER + 'export { join } from "node:path";\n'),
+    [],
+    "a re-export of an unrelated module",
+  );
+
+  // Unrelated modules are never attributed to node:crypto.
+  assert.deepEqual(
+    scan(HEADER + 'import { constants } from "node:fs";\nimport { join } from "node:path";\n'),
+    [],
+  );
+
+  // The module allowlist. Each of these accepts key material or hands back a
+  // loader, and each is refused by not being granted rather than by being
+  // named -- which is what covers the one nobody thought of.
+  const modKinds = (src) => scan(src).filter((v) => v.kind === "module");
+  for (const mod of ["node:tls", "node:https", "node:http2", "node:module", "node:vm", "express"]) {
+    assert.equal(
+      modKinds(HEADER + "import x from " + JSON.stringify(mod) + ";\n").length,
+      1,
+      `ungranted module not refused: ${mod}`,
+    );
+  }
+  // A side-effect import names nothing but still loads and runs the module.
+  for (const mod of ["node:tls", "node:module", "express"]) {
+    assert.equal(
+      modKinds(HEADER + "import " + JSON.stringify(mod) + ";\n").length,
+      1,
+      `ungranted side-effect import not refused: ${mod}`,
+    );
+  }
+  assert.deepEqual(modKinds(HEADER + 'import "node:fs";\n'), [], "a granted side-effect import");
+  assert.deepEqual(modKinds(HEADER + 'import "./ref.js";\n'), [], "a relative side-effect import");
+
+  assert.deepEqual(modKinds(HEADER + 'import { join } from "node:path";\n'), []);
+  assert.deepEqual(modKinds(HEADER + 'import { C } from "../constants.js";\n'), []);
+  assert.deepEqual(modKinds(HEADER + 'import { x } from "./ref.js";\n'), []);
+
+  // A relative specifier is judged on where it LANDS. A file outside src/ is
+  // one this suite never scans, so both allowlists would be blind to whatever
+  // it re-exports.
+  const from = (src, f) => scan(src, f).filter((v) => v.kind === "module");
+  assert.equal(
+    from(HEADER + 'export { sign } from "../outside-probe.js";\n', "src/digest.js").length,
+    1,
+    "a re-export from above src/",
+  );
+  assert.equal(
+    from(HEADER + 'import { x } from "../../elsewhere.js";\n', "src/backends/disk.js").length,
+    1,
+    "a specifier climbing past the repo root",
+  );
+  assert.equal(
+    from(HEADER + 'import { x } from "../../src/outside.js";\n', "src/index.js").length,
+    1,
+    "climbing above the root and back down to a same-named directory is still outside",
+  );
+
+  // A comment inside a template's ${...} is still a comment. Leaving it in
+  // place would have a detector read commented-out code as real, which is a
+  // false report rather than a missed one.
+  assert.deepEqual(
+    scan(HEADER + "const x = `${1 /* " + 'import { sign } from "node:crypto"' + " */}`;\n"),
+    [],
+    "a comment inside a template interpolation is stripped, not reported",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const x = `${1 /* } " + 'import { sign } from "node:crypto"' + " */}`;\n"),
+    [],
+    "a brace inside that comment does not end the interpolation early",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'const n = "4" / 2; // ' + 'import { sign } from "node:crypto"' + "\n"),
+    [],
+    "division after a string literal is not a regex, so the trailing comment is stripped",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = `4` / 2; // " + 'import { sign } from "node:crypto"' + "\n"),
+    [],
+    "division after a template literal",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = {} / 2; // " + 'require("node:crypto")' + "\n"),
+    [],
+    "division after a closing brace",
+  );
+
+  assert.deepEqual(
+    scan(HEADER + "function f() { return /'/; } // " + 'require("node:crypto")' + "\n"),
+    [],
+    "a regex after `return`, whose contents include a quote",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = count /* units */ / 2; // " + 'require("node:crypto")' + "\n"),
+    [],
+    "division judged on the token before an intervening comment",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = value++ / 2; // " + 'require("node:crypto")' + "\n"),
+    [],
+    "division after a postfix increment",
+  );
+  assert.deepEqual(
+    scan(HEADER + "if (ok) /'/.test(value); // " + 'require("node:crypto")' + "\n"),
+    [],
+    "a regex opening the body of an if, whose contents include a quote",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = (a + b) / 2; // " + 'require("node:crypto")' + "\n"),
+    [],
+    "division after a parenthesized expression",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'if (value === ")") /\'/.test(value); // ' + 'require("node:crypto")' + "\n"),
+    [],
+    "a parenthesis inside a string does not unbalance the control-clause scan",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = obj.of / 2; // " + 'require("node:crypto")' + "\n"),
+    [],
+    "a keyword used as a property name is a property, not a keyword",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'if (ok) {} /"/.test(value); // ' + 'require("node:crypto")' + "\n"),
+    [],
+    "a regex after a statement block, whose contents include a quote",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = {a: 1} / 2; // " + 'require("node:crypto")' + "\n"),
+    [],
+    "division after an object literal",
+  );
+  // A statement header this scan did not know would classify its braces as an
+  // object, so a regex after them read as division and swallowed the rest --
+  // taking a later import out of view along with it.
+  assert.equal(
+    scan(
+      HEADER +
+        'switch ("x") {} /[/*]/.test("");\n' +
+        'import { sign } from "node:crypto";\n' +
+        'const s = "*/";\n',
+    ).length,
+    1,
+    "an import after a switch block and a regex is still seen",
+  );
+  assert.equal(
+    scan(
+      HEADER +
+        'try {} catch (e) {} /[/*]/.test("");\n' +
+        'import { sign } from "node:crypto";\n' +
+        'const s = "*/";\n',
+    ).length,
+    1,
+    "the same after a catch block",
+  );
+  assert.equal(
+    scan(
+      HEADER +
+        'function f() {} /[/*]/.test("");\n' +
+        'import { sign } from "node:crypto";\n' +
+        'const s = "*/";\n',
+    ).length,
+    1,
+    "the same after a function body",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const x = function () {} / 1 /*\n" + 'import "node:tls";\n' + "*/;\n"),
+    [],
+    "a function EXPRESSION produces a value, so the slash after it divides",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const x = promise.catch(handler) / 1 /*\n" + 'import "node:tls";\n' + "*/;\n"),
+    [],
+    "a property named for a keyword is a call producing a value, not a clause",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const x = obj.switch(a) / 1 /*\n" + 'import "node:tls";\n' + "*/;\n"),
+    [],
+    "the same for a property named switch",
+  );
+  for (const decl of [
+    "export function f() {}",
+    "export default function f() {}",
+    "async function f() {}",
+    "export async function f() {}",
+  ]) {
+    assert.equal(
+      scan(
+        HEADER +
+          decl +
+          ' /[/*]/.test("");\n' +
+          'import { sign } from "node:crypto";\n' +
+          'const s = "*/";\n',
+      ).length,
+      1,
+      `an import after a regex following: ${decl}`,
+    );
+  }
+  for (const expr of ["const f = async function () {}", "const f = function () {}"]) {
+    assert.deepEqual(
+      scan(HEADER + expr + " / 2; // " + 'import { sign } from "node:crypto";' + "\n"),
+      [],
+      `a function expression divides, it does not open a regex: ${expr}`,
+    );
+  }
+  assert.equal(
+    scan(HEADER + 'import { x } from "../outside.js?y/../src/inside.js";\n', "src/index.js").length,
+    1,
+    "a query string splitting the path from the traversal that follows it",
+  );
+  assert.equal(
+    scan(HEADER + 'import { x } from "./ref.js#/../../outside.js";\n', "src/index.js").length,
+    1,
+    "a fragment doing the same",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const x = `${/}/.test(y) /* " + 'require("node:crypto")' + " */}`;\n"),
+    [],
+    "a brace inside a regex does not end the interpolation",
+  );
+
+  // An ESM specifier is a URL, so %2e%2e is `..` by the time it resolves.
+  assert.equal(
+    scan(HEADER + 'import { x } from "./%2e%2e/outside.js";\n', "src/digest.js").length,
+    1,
+    "a percent-encoded traversal",
+  );
+  assert.deepEqual(
+    from(HEADER + 'import { C } from "../constants.js";\n', "src/backends/disk.js"),
+    [],
+    "src/backends reaching its parent inside src/ is fine",
+  );
+  assert.deepEqual(
+    from(HEADER + 'import pkg from "../package.json" with { type: "json" };\n', "src/index.js"),
+    [],
+    "the package manifest is the one granted escape",
+  );
+});
+
+// The one relative specifier that legitimately leaves src/: the package
+// manifest, read for the version string. Anything else outside src/ is a file
+// this suite never scans, so both allowlists would be blind to it.
+const SRC_ESCAPE_ALLOWED = ["package.json"];
+
+function _cryptoImportViolations(subject, fromRel) {
+  const outsideSrc = (spec) => {
+    if (!fromRel) return false;
+    const target = _resolveRelative(fromRel, spec);
+    if (target === null) return true;
+    if (SRC_ESCAPE_ALLOWED.includes(target)) return false;
+    return !target.startsWith("src/");
+  };
+  const violations = [];
+  // The quote class is written \x22\x27 rather than ["'] on purpose: a literal
+  // quote inside a regex LITERAL is invisible to _stripStrings (which strips
+  // strings, not regexes), so it pairs with an unrelated quote later in the
+  // file and corrupts the stripped source every other detector reads.
+  //
+  // Each import is matched as a WHOLE statement -- anchored at the start of a
+  // line or just past a `;`, with a clause that cannot contain `;` -- then the
+  // specifier decides whether it is ours. A clause matched lazily across
+  // arbitrary text instead would swallow the preceding declaration whenever a
+  // crypto import is not the first import in the file, and blame that
+  // declaration's names on node:crypto.
+  // The `m` flag is load-bearing: every module here opens with a licence
+  // header, which _stripComments leaves as blank lines, so an unanchored `^`
+  // would match only the very start of the file and miss the first import in
+  // every one of them -- the position the crypto import actually occupies.
+  //
+  // Only the anchor is newline-free, so `import` must open a statement. Inside
+  // the statement whitespace is \s, since a line break may fall anywhere a
+  // space may -- after `from`, or around a require()'s parentheses -- and a
+  // matcher that stopped at the newline would read such an import as absent.
+  // `export ... from` is matched alongside `import ... from`: a re-export
+  // binds the same names, and a module that re-exported `sign` would hand
+  // every other module a key-bearing call the allowlist never saw.
+  const STATIC_RE =
+    /(?:^|[;}])[^\S\n]*(?:import|export)\b([^;]*?)\bfrom\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]/gm;
+  // The call form ends at the specifier, not at a closing paren: `import()`
+  // takes an options argument, and requiring the `)` to follow immediately
+  // would read `import("node:crypto", { with: ... })` as no import at all.
+  const OPAQUE_RE =
+    /(?:^|[;}])[^\S\n]*import\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]|(?:require|import)\s*\(\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]/gm;
+
+  // The engine decodes string escapes before resolving, so several spellings
+  // reach the same module: t and \x74 for a letter, and the identity
+  // escape \y, which is simply y. Chasing that grammar means reimplementing
+  // it, and any gap in the reimplementation is a way through. A module
+  // specifier in src/ is written literally instead, so a backslash in one is
+  // refused whatever it would decode to, and the comparison below can then
+  // read the source text as written.
+  // An ESM specifier is a URL, so its spelling and its target come apart:
+  // `%2e%2e` is `..` once resolved, a query splits the path from everything
+  // after it (`../outside.js?x/../src/inside.js` loads outside.js), a fragment
+  // does the same, and a backslash escape decodes before the module resolves.
+  // Each lets an import land somewhere other than where it reads. A specifier
+  // in src/ is a plain relative path or a granted module name, so anything
+  // carrying that syntax is refused without asking what it would resolve to.
+  const isEscaped = (spec) => /[\\%?#]/.test(spec);
+  const isCrypto = (spec) => spec === "crypto" || spec === "node:crypto";
+  const ESCAPED_MSG =
+    " -- an escaped or percent-encoded module specifier hides which module is loaded";
+
+  let m;
+
+  // A side-effect import, a require(), or a dynamic import() of the module
+  // grants the whole namespace and names nothing, so it is refused outright.
+  OPAQUE_RE.lastIndex = 0;
+  while ((m = OPAQUE_RE.exec(subject)) !== null) {
+    const spec = (m[1] === undefined ? m[2] : m[1]).trim();
+    const text = m[0].replace(/^;/, "").trim().replace(/\s+/g, " ").slice(0, 160);
+    const line = _lines(subject.slice(0, m.index)).length;
+    if (isEscaped(spec)) {
+      violations.push({ kind: "crypto", line, content: text + ESCAPED_MSG });
+      continue;
+    }
+    // A side-effect import names nothing, but the module still loads and its
+    // top level still runs, so it is held to the module allowlist like any
+    // other. Granted modules are fine here; node:crypto is not, because these
+    // forms hand over the whole namespace.
+    if (spec.startsWith(".") && outsideSrc(spec)) {
+      violations.push({
+        kind: "module",
+        line,
+        content:
+          "imports '" +
+          spec +
+          "' -- a relative specifier must stay under src/, which this suite scans; " +
+          (_resolveRelative(fromRel, spec) ?? "a path above the repository root") +
+          " is outside it",
+      });
+      continue;
+    }
+    if (!spec.startsWith(".") && !SRC_MODULES.includes(spec)) {
+      violations.push({
+        kind: "module",
+        line,
+        content:
+          "imports '" +
+          spec +
+          "' -- src/ may import only " +
+          SRC_MODULES.join(", ") +
+          ", or a relative path",
+      });
+      continue;
+    }
+    if (!isCrypto(spec)) continue;
+    violations.push({
+      kind: "crypto",
+      line,
+      content: text + " -- only a named import of " + CRYPTO_ALLOWED_TEXT + " is permitted",
+    });
+  }
+
+  STATIC_RE.lastIndex = 0;
+  while ((m = STATIC_RE.exec(subject)) !== null) {
+    const spec = m[2].trim();
+    const line = _lines(subject.slice(0, m.index)).length;
+    const clause = m[1];
+    const text = m[0].replace(/^;/, "").trim().replace(/\s+/g, " ").slice(0, 160);
+    if (isEscaped(spec)) {
+      violations.push({ kind: "crypto", line, content: text + ESCAPED_MSG });
+      continue;
+    }
+    // Every non-relative specifier is held to the module allowlist, whatever
+    // it names -- that is what keeps a key-bearing module nobody predicted
+    // from being reachable at all.
+    if (spec.startsWith(".") && outsideSrc(spec)) {
+      violations.push({
+        kind: "module",
+        line,
+        content:
+          "imports '" +
+          spec +
+          "' -- a relative specifier must stay under src/, which this suite scans; " +
+          (_resolveRelative(fromRel, spec) ?? "a path above the repository root") +
+          " is outside it",
+      });
+      continue;
+    }
+    if (!spec.startsWith(".") && !SRC_MODULES.includes(spec)) {
+      violations.push({
+        kind: "module",
+        line,
+        content:
+          "imports '" +
+          spec +
+          "' -- src/ may import only " +
+          SRC_MODULES.join(", ") +
+          ", or a relative path",
+      });
+      continue;
+    }
+    if (!isCrypto(spec)) continue;
+    const named = clause.trim().match(/^\{([\s\S]*)\}$/);
+    if (!named) {
+      violations.push({
+        kind: "crypto",
+        line,
+        content: text + " -- default, namespace or wildcard binding hides which names are used",
+      });
+      continue;
+    }
+    for (const raw2 of named[1].split(",")) {
+      const spec = raw2.trim();
+      if (!spec) continue;
+      // `createHash as h` grants createHash; the imported name is what counts.
+      const imported = spec.split(/\s+as\s+/)[0].trim();
+      if (!CRYPTO_ALLOWED.includes(imported)) {
+        violations.push({
+          kind: "crypto",
+          line,
+          content:
+            "imports '" +
+            imported +
+            "' from node:crypto -- SPEC.md 1 permits only " +
+            CRYPTO_ALLOWED_TEXT,
+        });
+      }
+    }
+  }
+
+  return violations;
+}
 
 // ---------------------------------------------------------------------------
 // (1a) digest-algo-hardcode -- src/digest.js owns the algorithm set

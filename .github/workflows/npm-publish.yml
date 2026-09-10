@@ -71,10 +71,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node 24.19.0 LTS
+      - name: Set up Node 24.21.0 LTS
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.21.0'
 
       - name: Compute version + is_tag flag
         id: version
@@ -147,20 +147,17 @@ jobs:
         # The committed lockfile describes exactly the root package -- zero
         # dependencies in any scope. `npm ci --dry-run` re-validates the
         # dependency graph against package.json without downloading or
-        # writing anything; the root name/version are compared explicitly
-        # because `npm ci` does not assert them. A drifted lockfile fails
-        # here instead of feeding a stale version into the SBOM below.
+        # writing anything; the fields npm does not assert (root name,
+        # version and engines) are compared by the gate script. A drifted
+        # lockfile fails here instead of feeding a stale version into the
+        # SBOM below.
+        #
+        # The comparison lives in the script rather than inline here, so
+        # this workflow, ci.yml and `npm run gates` enforce one
+        # implementation across all three.
         run: |
           set -euo pipefail
-          node -e "
-            const { readFileSync } = require('node:fs');
-            const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
-            const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
-            const root = (lock.packages || {})[''] || {};
-            const fail = (msg) => { console.error('::error::' + msg); process.exit(1); };
-            if (lock.name !== pkg.name || root.name !== pkg.name) fail('package-lock.json name does not match package.json -- regenerate with: npm install --package-lock-only');
-            if (lock.version !== pkg.version || root.version !== pkg.version) fail('package-lock.json version (' + lock.version + ') does not match package.json (' + pkg.version + ') -- regenerate with: npm install --package-lock-only');
-          "
+          node scripts/check-lockfile-sync.js
           npm ci --dry-run --ignore-scripts --no-audit --no-fund
 
       - name: Suite
@@ -172,10 +169,9 @@ jobs:
         run: node scripts/run-sandboxed.js
 
       - name: Forbidden-token invariant (SPEC.md 13.1 invariant 1)
-        run: |
-          set -e
-          if grep -rnE "createCipheriv|createDecipheriv|node:sqlite" src/; then exit 1; fi
-          if grep -rniE "password" src/; then exit 1; fi
+        # The token list lives in the script, so this workflow, ci.yml and the
+        # pattern detector all check the same one.
+        run: node scripts/check-forbidden-tokens.js
 
       - name: Wiki e2e
         run: node examples/wiki/test/e2e.js
@@ -292,10 +288,10 @@ jobs:
           fi
           echo "[tag-verify] built commit == v${VERSION} ($TAG_SHA)"
 
-      - name: Set up Node 24.19.0 LTS + npm registry auth
+      - name: Set up Node 24.21.0 LTS + npm registry auth
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.21.0'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Download publish bundle (tarball + SBOM + CHANGELOG)

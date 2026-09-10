@@ -72,7 +72,7 @@ await stash.drop(ref);                     // gone
 npm install @blamejs/stash
 ```
 
-Requires Node `>= 24.19.0`.
+Requires Node `>= 24.21.0`.
 
 The package is authored in ESM (`import`), but a CommonJS project can consume it
 with `require` on that Node floor, with no build step and no shim. The package
