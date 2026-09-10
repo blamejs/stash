@@ -172,15 +172,236 @@ function _blank(match) {
   return match.replace(/[^\n]/g, " ");
 }
 
-// Strip `//` line comments and `/* */` block comments, keeping string
-// literals (an import specifier is a string literal, and the sandbox scan
-// must still see it). The `[^:]` guard keeps a `://` inside a URL intact.
+// After these a `/` opens a regex, even though the character before it is a
+// word character: `return /re/` is a regex, `count / 2` is division.
+const _REGEX_AFTER_WORD = new Set([
+  "return",
+  "typeof",
+  "instanceof",
+  "in",
+  "of",
+  "new",
+  "delete",
+  "void",
+  "throw",
+  "case",
+  "do",
+  "else",
+  "yield",
+  "await",
+]);
+
+// After these a `{` opens a statement block rather than an object literal.
+const _BLOCK_AFTER_WORD = new Set(["else", "try", "finally", "do"]);
+
+// Index just past the regex literal starting at `i`, or -1 if it does not
+// close on this line (in which case the `/` was division after all).
+function _regexEndsAt(content, i) {
+  let j = i + 1;
+  let inClass = false;
+  while (j < content.length) {
+    const d = content[j];
+    if (d === "\\") {
+      j += 2;
+      continue;
+    }
+    if (d === "\n") return -1;
+    j++;
+    if (d === "[") inClass = true;
+    else if (d === "]") inClass = false;
+    else if (d === "/" && !inClass) return j;
+  }
+  return -1;
+}
+
+// Walk code from `start`, blanking comments and leaving every other byte where
+// it is. Returns the text produced and the index just past the `}` that closed
+// the scan, which is how a template's `${...}` finds its end: the expression is
+// scanned as the code it is, so a brace inside one of its strings, comments or
+// regex literals cannot end it early.
+//
+// Whether a `/` opens a regex is a grammar question, not a character one:
+// `value++ / 2` divides while `if (ok) /re/` does not, and `obj.of / 2`
+// divides while `case /re/` does not. The walk therefore CARRIES the token it
+// last completed rather than looking backwards from the slash. A backward look
+// reads raw text, where a `//` inside a URL string, or a `)` inside a quoted
+// string, is indistinguishable from the real thing.
+//
+// Getting an exotic case wrong costs a FALSE REPORT on valid code, which is
+// visible and fixable. It cannot hide a violation, because strings and
+// templates are tracked exactly, and those are what a marker would hide in.
+function _scanCode(content, start, stopAtCloseBrace) {
+  let out = "";
+  let i = start;
+  let kind = "start"; // start | value | word | closeParen | closeBrace | punct
+  let word = "";
+  let dotted = false;
+  let punct = "";
+  let closeIsStatement = false;
+  // One entry per open `(` or `{`, recording whether it opened a statement
+  // rather than an expression -- what tells `if (ok) {} /re/` (a block, so a
+  // regex follows) from `const o = {} / 2` (an object, so division).
+  const opens = [];
+
+  const regexMayOpen = () => {
+    if (kind === "start") return true;
+    if (kind === "value") return false;
+    if (kind === "word") return !dotted && _REGEX_AFTER_WORD.has(word);
+    if (kind === "closeParen" || kind === "closeBrace") return closeIsStatement;
+    return true;
+  };
+
+  const atStatementPosition = () => {
+    if (kind === "start") return true;
+    if (kind === "word") return _BLOCK_AFTER_WORD.has(word);
+    if (kind === "closeParen" || kind === "closeBrace") return closeIsStatement;
+    if (kind === "punct") return punct === ";" || punct === "{" || punct === "}";
+    return false;
+  };
+
+  while (i < content.length) {
+    const c = content[i];
+    const next = content[i + 1];
+
+    if (c === "/" && next === "/") {
+      let j = i;
+      while (j < content.length && content[j] !== "\n") j++;
+      out += " ".repeat(j - i);
+      i = j;
+      continue;
+    }
+
+    if (c === "/" && next === "*") {
+      let j = i + 2;
+      while (j < content.length && !(content[j] === "*" && content[j + 1] === "/")) j++;
+      j = Math.min(j + 2, content.length);
+      for (let k = i; k < j; k++) out += content[k] === "\n" ? "\n" : " ";
+      i = j;
+      continue;
+    }
+
+    if (c === '"' || c === "'") {
+      out += c;
+      let j = i + 1;
+      while (j < content.length) {
+        if (content[j] === "\\") {
+          out += content.slice(j, j + 2);
+          j += 2;
+          continue;
+        }
+        out += content[j];
+        if (content[j] === c) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      i = j;
+      kind = "value";
+      continue;
+    }
+
+    if (c === "`") {
+      out += c;
+      let j = i + 1;
+      while (j < content.length) {
+        if (content[j] === "\\") {
+          out += content.slice(j, j + 2);
+          j += 2;
+          continue;
+        }
+        if (content[j] === "`") {
+          out += "`";
+          j++;
+          break;
+        }
+        if (content[j] === "$" && content[j + 1] === "{") {
+          const inner = _scanCode(content, j + 2, true);
+          out += "${" + inner.out;
+          j = inner.end;
+          continue;
+        }
+        out += content[j];
+        j++;
+      }
+      i = j;
+      kind = "value";
+      continue;
+    }
+
+    if (c === "/" && regexMayOpen()) {
+      const end = _regexEndsAt(content, i);
+      if (end !== -1) {
+        out += content.slice(i, end);
+        i = end;
+        kind = "value";
+        continue;
+      }
+    }
+
+    if (/[\w$]/.test(c)) {
+      let j = i;
+      while (j < content.length && /[\w$]/.test(content[j])) j++;
+      const w = content.slice(i, j);
+      out += w;
+      // A property name is not a keyword: `obj.of / 2` divides.
+      dotted = kind === "punct" && punct === ".";
+      word = w;
+      kind = "word";
+      i = j;
+      continue;
+    }
+
+    out += c;
+    i++;
+    if (/\s/.test(c)) continue;
+
+    if (c === "(" || c === "{") {
+      const isClause =
+        c === "(" && kind === "word" && ["if", "for", "while", "with"].includes(word);
+      const isBlock = c === "{" && atStatementPosition();
+      opens.push({ statement: c === "(" ? isClause : isBlock });
+      kind = "punct";
+      punct = c;
+      continue;
+    }
+
+    if (c === ")" || c === "}") {
+      const open = opens.pop();
+      if (c === "}" && stopAtCloseBrace && open === undefined) return { out, end: i };
+      closeIsStatement = Boolean(open && open.statement);
+      kind = c === ")" ? "closeParen" : "closeBrace";
+      continue;
+    }
+
+    if (c === "]") {
+      kind = "value";
+      continue;
+    }
+
+    if ((c === "+" || c === "-") && content[i - 2] === c) {
+      // `value++` completed a value, so the slash after it divides.
+      kind = "value";
+      continue;
+    }
+
+    kind = "punct";
+    punct = c;
+  }
+
+  return { out, end: i };
+}
+
+// A `/*` inside a string literal is not a comment. Matching comment markers
+// with a regex cannot know that, so a module holding "/*" in one string and
+// "*/" in a later one had everything between them blanked -- and every
+// detector downstream then scanned a file with its middle removed, reporting
+// nothing about the code that was there.
+//
+// Comments are blanked rather than deleted, and their newlines kept, so every
+// line number a detector reports still matches the file on disk.
 function _stripComments(content) {
-  return content
-    .replace(/\/\*[\s\S]*?\*\//g, _blank)
-    .replace(/(^|[^:])\/\/[^\n]*/g, function (m, pre) {
-      return pre + _blank(m.slice(pre.length));
-    });
+  return _scanCode(content, 0, false).out;
 }
 
 // Strip comments AND string literals so a structural scan does not fire on
@@ -456,12 +677,30 @@ function _scanImports(kind) {
   for (const file of _srcFiles()) {
     const rel = _relPath(file);
     if (rel === SELF) continue;
-    for (const v of _cryptoImportViolations(_stripComments(_read(file)))) {
+    for (const v of _cryptoImportViolations(_stripComments(_read(file)), rel)) {
       if (v.kind !== kind) continue;
       violations.push({ file: rel, line: v.line, content: v.content });
     }
   }
   return violations;
+}
+
+// Resolve a relative specifier against the importing file and return the
+// repo-relative target, so containment is decided on where it LANDS rather
+// than on the fact that it starts with a dot.
+function _resolveRelative(fromRel, spec) {
+  const parts = fromRel.split("/").slice(0, -1);
+  for (const seg of spec.split("/")) {
+    if (seg === "." || seg === "") continue;
+    if (seg === "..") {
+      // Climbing past the repo root lands in its parent, and popping an empty
+      // stack would quietly resolve `../../src/x.js` back to `src/x.js` -- a
+      // file outside the tree reported as one inside it.
+      if (parts.length === 0) return null;
+      parts.pop();
+    } else parts.push(seg);
+  }
+  return parts.join("/");
 }
 
 // Fixture vectors for the scanner above. The detector runs over the real tree,
@@ -472,7 +711,7 @@ function _scanImports(kind) {
 test("crypto-import-allowlist -- the scanner reads every import position and form", () => {
   const HEADER =
     "// SPDX-License-Identifier: Apache-2.0\n// Copyright (c) blamejs contributors\n//\n// A multi-line header, which _stripComments leaves as blank lines.\n\n";
-  const scan = (src) => _cryptoImportViolations(_stripComments(src));
+  const scan = (src, from) => _cryptoImportViolations(_stripComments(src), from);
   const names = (src) => scan(src).map((v) => v.content);
 
   // Permitted, in each position a real module might place it.
@@ -642,9 +881,148 @@ test("crypto-import-allowlist -- the scanner reads every import position and for
   assert.deepEqual(modKinds(HEADER + 'import { join } from "node:path";\n'), []);
   assert.deepEqual(modKinds(HEADER + 'import { C } from "../constants.js";\n'), []);
   assert.deepEqual(modKinds(HEADER + 'import { x } from "./ref.js";\n'), []);
+
+  // A relative specifier is judged on where it LANDS. A file outside src/ is
+  // one this suite never scans, so both allowlists would be blind to whatever
+  // it re-exports.
+  const from = (src, f) => scan(src, f).filter((v) => v.kind === "module");
+  assert.equal(
+    from(HEADER + 'export { sign } from "../outside-probe.js";\n', "src/digest.js").length,
+    1,
+    "a re-export from above src/",
+  );
+  assert.equal(
+    from(HEADER + 'import { x } from "../../elsewhere.js";\n', "src/backends/disk.js").length,
+    1,
+    "a specifier climbing past the repo root",
+  );
+  assert.equal(
+    from(HEADER + 'import { x } from "../../src/outside.js";\n', "src/index.js").length,
+    1,
+    "climbing above the root and back down to a same-named directory is still outside",
+  );
+
+  // A comment inside a template's ${...} is still a comment. Leaving it in
+  // place would have a detector read commented-out code as real, which is a
+  // false report rather than a missed one.
+  assert.deepEqual(
+    scan(HEADER + "const x = `${1 /* " + 'import { sign } from "node:crypto"' + " */}`;\n"),
+    [],
+    "a comment inside a template interpolation is stripped, not reported",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const x = `${1 /* } " + 'import { sign } from "node:crypto"' + " */}`;\n"),
+    [],
+    "a brace inside that comment does not end the interpolation early",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'const n = "4" / 2; // ' + 'import { sign } from "node:crypto"' + "\n"),
+    [],
+    "division after a string literal is not a regex, so the trailing comment is stripped",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = `4` / 2; // " + 'import { sign } from "node:crypto"' + "\n"),
+    [],
+    "division after a template literal",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = {} / 2; // " + 'require("node:crypto")' + "\n"),
+    [],
+    "division after a closing brace",
+  );
+
+  assert.deepEqual(
+    scan(HEADER + "function f() { return /'/; } // " + 'require("node:crypto")' + "\n"),
+    [],
+    "a regex after `return`, whose contents include a quote",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = count /* units */ / 2; // " + 'require("node:crypto")' + "\n"),
+    [],
+    "division judged on the token before an intervening comment",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = value++ / 2; // " + 'require("node:crypto")' + "\n"),
+    [],
+    "division after a postfix increment",
+  );
+  assert.deepEqual(
+    scan(HEADER + "if (ok) /'/.test(value); // " + 'require("node:crypto")' + "\n"),
+    [],
+    "a regex opening the body of an if, whose contents include a quote",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = (a + b) / 2; // " + 'require("node:crypto")' + "\n"),
+    [],
+    "division after a parenthesized expression",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'if (value === ")") /\'/.test(value); // ' + 'require("node:crypto")' + "\n"),
+    [],
+    "a parenthesis inside a string does not unbalance the control-clause scan",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = obj.of / 2; // " + 'require("node:crypto")' + "\n"),
+    [],
+    "a keyword used as a property name is a property, not a keyword",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'if (ok) {} /"/.test(value); // ' + 'require("node:crypto")' + "\n"),
+    [],
+    "a regex after a statement block, whose contents include a quote",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const n = {a: 1} / 2; // " + 'require("node:crypto")' + "\n"),
+    [],
+    "division after an object literal",
+  );
+  assert.equal(
+    scan(HEADER + 'import { x } from "../outside.js?y/../src/inside.js";\n', "src/index.js").length,
+    1,
+    "a query string splitting the path from the traversal that follows it",
+  );
+  assert.equal(
+    scan(HEADER + 'import { x } from "./ref.js#/../../outside.js";\n', "src/index.js").length,
+    1,
+    "a fragment doing the same",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const x = `${/}/.test(y) /* " + 'require("node:crypto")' + " */}`;\n"),
+    [],
+    "a brace inside a regex does not end the interpolation",
+  );
+
+  // An ESM specifier is a URL, so %2e%2e is `..` by the time it resolves.
+  assert.equal(
+    scan(HEADER + 'import { x } from "./%2e%2e/outside.js";\n', "src/digest.js").length,
+    1,
+    "a percent-encoded traversal",
+  );
+  assert.deepEqual(
+    from(HEADER + 'import { C } from "../constants.js";\n', "src/backends/disk.js"),
+    [],
+    "src/backends reaching its parent inside src/ is fine",
+  );
+  assert.deepEqual(
+    from(HEADER + 'import pkg from "../package.json" with { type: "json" };\n', "src/index.js"),
+    [],
+    "the package manifest is the one granted escape",
+  );
 });
 
-function _cryptoImportViolations(subject) {
+// The one relative specifier that legitimately leaves src/: the package
+// manifest, read for the version string. Anything else outside src/ is a file
+// this suite never scans, so both allowlists would be blind to it.
+const SRC_ESCAPE_ALLOWED = ["package.json"];
+
+function _cryptoImportViolations(subject, fromRel) {
+  const outsideSrc = (spec) => {
+    if (!fromRel) return false;
+    const target = _resolveRelative(fromRel, spec);
+    if (target === null) return true;
+    if (SRC_ESCAPE_ALLOWED.includes(target)) return false;
+    return !target.startsWith("src/");
+  };
   const violations = [];
   // The quote class is written \x22\x27 rather than ["'] on purpose: a literal
   // quote inside a regex LITERAL is invisible to _stripStrings (which strips
@@ -684,9 +1062,17 @@ function _cryptoImportViolations(subject) {
   // specifier in src/ is written literally instead, so a backslash in one is
   // refused whatever it would decode to, and the comparison below can then
   // read the source text as written.
-  const isEscaped = (spec) => spec.includes("\\");
+  // An ESM specifier is a URL, so its spelling and its target come apart:
+  // `%2e%2e` is `..` once resolved, a query splits the path from everything
+  // after it (`../outside.js?x/../src/inside.js` loads outside.js), a fragment
+  // does the same, and a backslash escape decodes before the module resolves.
+  // Each lets an import land somewhere other than where it reads. A specifier
+  // in src/ is a plain relative path or a granted module name, so anything
+  // carrying that syntax is refused without asking what it would resolve to.
+  const isEscaped = (spec) => /[\\%?#]/.test(spec);
   const isCrypto = (spec) => spec === "crypto" || spec === "node:crypto";
-  const ESCAPED_MSG = " -- an escaped module specifier hides which module is loaded";
+  const ESCAPED_MSG =
+    " -- an escaped or percent-encoded module specifier hides which module is loaded";
 
   let m;
 
@@ -705,6 +1091,19 @@ function _cryptoImportViolations(subject) {
     // top level still runs, so it is held to the module allowlist like any
     // other. Granted modules are fine here; node:crypto is not, because these
     // forms hand over the whole namespace.
+    if (spec.startsWith(".") && outsideSrc(spec)) {
+      violations.push({
+        kind: "module",
+        line,
+        content:
+          "imports '" +
+          spec +
+          "' -- a relative specifier must stay under src/, which this suite scans; " +
+          (_resolveRelative(fromRel, spec) ?? "a path above the repository root") +
+          " is outside it",
+      });
+      continue;
+    }
     if (!spec.startsWith(".") && !SRC_MODULES.includes(spec)) {
       violations.push({
         kind: "module",
@@ -739,6 +1138,19 @@ function _cryptoImportViolations(subject) {
     // Every non-relative specifier is held to the module allowlist, whatever
     // it names -- that is what keeps a key-bearing module nobody predicted
     // from being reachable at all.
+    if (spec.startsWith(".") && outsideSrc(spec)) {
+      violations.push({
+        kind: "module",
+        line,
+        content:
+          "imports '" +
+          spec +
+          "' -- a relative specifier must stay under src/, which this suite scans; " +
+          (_resolveRelative(fromRel, spec) ?? "a path above the repository root") +
+          " is outside it",
+      });
+      continue;
+    }
     if (!spec.startsWith(".") && !SRC_MODULES.includes(spec)) {
       violations.push({
         kind: "module",
