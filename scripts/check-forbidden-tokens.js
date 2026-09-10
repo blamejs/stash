@@ -57,6 +57,11 @@ export const FORBIDDEN_TOKENS = [
   // which module they reach.
   "getBuiltinModule",
   "createRequire",
+  // src/ is ESM, where `require` is not defined, so a call to it is either a
+  // loader smuggled in through createRequire or a mistake. Refusing the call
+  // shape covers a computed target, which an allowlist reading specifiers
+  // cannot: `require(name)` names no module for it to check.
+  "require\\s*\\(",
   // Computed member access reaches a property without spelling its name, so
   // the tokens above can be assembled at runtime -- `process["getBuiltin" +
   // "Module"]`, or the same through an alias. Both forms are refused: any
@@ -87,16 +92,17 @@ export function scanForbidden(files, read) {
 }
 
 // Everything under src/ ships, since package.json packs the directory whole.
-// Scanning only `.js` would leave a `.mjs` or `.cjs` added later inside the
-// tarball and outside every check here.
-const SCANNED = /\.(?:js|mjs|cjs)$/;
+// Scanning only `.js` would leave a `.mjs`, a `.cjs`, or a file carrying no
+// extension at all inside the tarball and outside every check here. Anything
+// that is not a known non-code type is read.
+const NOT_CODE = /\.(?:json|md|txt|map|png|svg|ico|woff2?|lock)$/i;
 
 function srcFiles(dir) {
   const out = [];
   for (const entry of readdirSync(dir)) {
     const p = join(dir, entry);
     if (statSync(p).isDirectory()) out.push(...srcFiles(p));
-    else if (SCANNED.test(p)) out.push(p);
+    else if (!NOT_CODE.test(p)) out.push(p);
   }
   return out;
 }
