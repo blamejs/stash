@@ -33,7 +33,7 @@ import assert from "node:assert/strict";
 
 import { freshScratchDir } from "./_scratch.js";
 import { DIGESTS } from "../src/digest.js";
-import { FORBIDDEN_TOKENS } from "../scripts/check-forbidden-tokens.js";
+import { forbiddenMatchers } from "../scripts/check-forbidden-tokens.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -548,8 +548,11 @@ test("forbidden-crypto-token -- no key machinery, sqlite, or password surface in
   // "does not encrypt"; the guarantee is "holds no key", and a key arrives
   // through `createPrivateKey`, `createSecretKey`, `generateKeyPair`, a
   // WebCrypto `importKey`, or a KDF long before any cipher names it.
-  const re = new RegExp(FORBIDDEN_TOKENS.join("|"), "i");
-  let bad = _scanLines(_srcFiles(), re);
+  // Both matchers, so this detector and the workflow script cannot disagree:
+  // one list is folded for case, the other respects it.
+  const files = _srcFiles();
+  let bad = [];
+  for (const re of forbiddenMatchers()) bad = bad.concat(_scanLines(files, re));
   bad = _filterMarkers(bad, "forbidden-crypto-token");
   _report(
     "SPEC.md 13.1: zero hits for cipher / sqlite / password tokens in src/ (raw, comments included)",

@@ -62,6 +62,10 @@ export const FORBIDDEN_TOKENS = [
   // shape covers a computed target, which an allowlist reading specifiers
   // cannot: `require(name)` names no module for it to check.
   "require\\s*\\(",
+  // Code built at runtime is invisible to every check here: a scan reads what
+  // the file says, and `eval("im" + "port(...)")` says nothing. The call shape
+  // is matched, not the bare word, because `revalidated` contains one.
+  "\\beval\\s*\\(",
   // Computed member access reaches a property without spelling its name, so
   // the tokens above can be assembled at runtime -- `process["getBuiltin" +
   // "Module"]`, or the same through an alias. Both forms are refused: any
@@ -79,13 +83,30 @@ export const FORBIDDEN_TOKENS = [
   "passphrase",
 ];
 
+// Matched with case respected. The list above is case-insensitive, so that a
+// `PASSWORD` or a `Decrypt` cannot slip past it, but the Function constructor
+// differs from the `function` keyword only by case -- folding them together
+// would report every function in the tree.
+// The constructor is callable without `new`, and its body may arrive in a
+// variable, so the call shape is matched whatever the argument is.
+export const FORBIDDEN_TOKENS_EXACT = ["\\bnew\\s+Function\\b", "\\bFunction\\s*\\("];
+
+export function forbiddenMatchers() {
+  return [
+    new RegExp(FORBIDDEN_TOKENS.join("|"), "i"),
+    new RegExp(FORBIDDEN_TOKENS_EXACT.join("|")),
+  ];
+}
+
 export function scanForbidden(files, read) {
-  const re = new RegExp(FORBIDDEN_TOKENS.join("|"), "i");
+  const matchers = forbiddenMatchers();
   const hits = [];
   for (const file of files) {
     const lines = read(file).split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
-      if (re.test(lines[i])) hits.push({ file, line: i + 1, text: lines[i].trim() });
+      if (matchers.some((re) => re.test(lines[i]))) {
+        hits.push({ file, line: i + 1, text: lines[i].trim() });
+      }
     }
   }
   return hits;
@@ -121,6 +142,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exit(1);
   }
   console.log(
-    `[forbidden-tokens] ok -- ${files.length} file(s), ${FORBIDDEN_TOKENS.length} tokens, zero hits`,
+    `[forbidden-tokens] ok -- ${files.length} file(s), ${FORBIDDEN_TOKENS.length + FORBIDDEN_TOKENS_EXACT.length} tokens, zero hits`,
   );
 }
