@@ -1,6 +1,6 @@
 {
   "name": "@blamejs/stash",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Zero-dependency, ephemeral, crypto-agnostic content store for Node.js. Bytes in, ref out; bytes out once, and they're gone.",
   "keywords": [
     "stash",
@@ -63,6 +63,6 @@
     "prepack": "node scripts/check-pack-against-gitignore.js"
   },
   "engines": {
-    "node": ">=24.19.0"
+    "node": ">=24.21.0"
   }
 }

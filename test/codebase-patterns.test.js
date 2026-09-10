@@ -306,7 +306,7 @@ function _scanLines(files, regex, opts) {
 // (1) forbidden-crypto-token -- SPEC.md 1 / 13.1 invariant 1
 // ---------------------------------------------------------------------------
 
-test("forbidden-crypto-token -- no cipher machinery, sqlite, or password surface in src/", () => {
+test("forbidden-crypto-token -- no key machinery, sqlite, or password surface in src/", () => {
   // reason: the store's guarantee is architectural, not behavioural -- there
   // is nowhere in the source for a key to live. A cipher import (even the
   // legacy createCipher/createDecipher names), a node:sqlite index (which
@@ -315,13 +315,50 @@ test("forbidden-crypto-token -- no cipher machinery, sqlite, or password surface
   // scan is RAW source, comments included: a commented-out cipher call is
   // still a hole being sketched. Token list is concatenated so this gate
   // file never matches itself.
+  //
+  // The list covers key INGESTION and DERIVATION, not just the cipher calls
+  // that consume a key. Matching only `createCipheriv` reads the guarantee as
+  // "does not encrypt"; the guarantee is "holds no key", and a key arrives
+  // through `createPrivateKey`, `createSecretKey`, `generateKeyPair`, a
+  // WebCrypto `importKey`, or a KDF long before any cipher names it.
   const tokens = [
+    // Cipher machinery, and the operations that consume a key directly.
     "createCiph" + "eriv",
     "createDeciph" + "eriv",
     "createCiph" + "er\\b",
     "createDeciph" + "er\\b",
+    "dec" + "rypt",
+    "privateEnc" + "rypt",
+    "publicEnc" + "rypt",
+    // Key material: ingestion, generation, derivation, agreement. A store that
+    // cannot decrypt must also have nowhere to OBTAIN a key -- Node 24.21.0
+    // added `createPrivateKey({ URL })` backed by an OpenSSL STORE loader,
+    // whose reads are not constrained by the fs.read / fs.write permission
+    // scopes, so an ingestion token is not reachable by the fs sandbox alone.
+    "createPriv" + "ateKey",
+    "createPub" + "licKey",
+    "createSec" + "retKey",
+    "generate" + "Key",
+    "import" + "Key",
+    "unwrap" + "Key",
+    "wrap" + "Key",
+    "derive" + "Key",
+    "derive" + "Bits",
+    "createDiffie" + "Hellman",
+    "diffie" + "Hellman",
+    "createE" + "CDH",
+    "createSi" + "gn",
+    "createVer" + "ify",
+    "hk" + "df",
+    "pbk" + "df2",
+    "scr" + "ypt",
+    // Key-bearing surfaces and the flags that widen them.
+    "sub" + "tle",
+    "webcry" + "pto",
+    "openssl-st" + "ore",
     "node:sql" + "ite",
     "pass" + "word",
+    "passph" + "rase",
   ];
   const re = new RegExp(tokens.join("|"), "i");
   let bad = _scanLines(_srcFiles(), re);

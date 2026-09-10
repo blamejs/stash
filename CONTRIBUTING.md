@@ -44,7 +44,7 @@ Use `npm test` rather than a bare `node --test`. The script passes
 that vector silently skips, and on recent Node versions a bare directory
 argument fails outright.
 
-**Requirements:** Node.js 24.19.0 or newer (see `.node-version`). The library
+**Requirements:** Node.js 24.21.0 or newer (see `.node-version`). The library
 targets that floor as a floor, not a ceiling: no polyfills, no compat shims, no
 version branches for older runtimes. Nothing is transpiled, so what ships is
 what runs.

@@ -34,6 +34,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { diffSnapshot, isClean } from "../scripts/check-api-snapshot.js";
+import { checkLockfile } from "../scripts/check-lockfile-sync.js";
 import { WORLD_KEYS, makeWorld } from "../scripts/doc-example-world.js";
 import { loadNotes, render } from "../scripts/regen-changelog.js";
 import {
@@ -68,6 +69,61 @@ function snapshotFixture() {
     sinceByPrimitive: { "stash.push": "1.0.0" },
   };
 }
+
+// ---------------------------------------------------------------------------
+// check-lockfile-sync
+// ---------------------------------------------------------------------------
+
+function lockPair({ pkg = {}, lock = {} } = {}) {
+  const base = { name: "@blamejs/stash", version: "2.2.0", engines: { node: ">=24.21.0" } };
+  return [
+    { ...base, ...pkg },
+    {
+      name: base.name,
+      version: base.version,
+      lockfileVersion: 3,
+      packages: { "": { ...base, ...lock } },
+      ...(lock.__top || {}),
+    },
+  ];
+}
+
+test("lockfile-sync: a matching pair is clean", () => {
+  const [pkg, lock] = lockPair();
+  assert.deepEqual(checkLockfile(pkg, lock), []);
+});
+
+test("lockfile-sync: a raised Node floor that the lockfile did not follow is caught", () => {
+  // The release edit is package.json alone; npm rewrites the lockfile only on
+  // the next install, so the two ship disagreeing unless this fires.
+  const [pkg, lock] = lockPair({
+    pkg: { engines: { node: ">=24.21.0" } },
+    lock: { engines: { node: ">=24.19.0" } },
+  });
+  const problems = checkLockfile(pkg, lock);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /engines\.node/);
+  assert.match(problems[0], />=24\.19\.0/);
+  assert.match(problems[0], />=24\.21\.0/);
+});
+
+test("lockfile-sync: an engines block missing from the lockfile is caught, not skipped", () => {
+  const [pkg, lock] = lockPair({ lock: { engines: undefined } });
+  const problems = checkLockfile(pkg, lock);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /engines\.node/);
+});
+
+test("lockfile-sync: a version bump the lockfile did not follow is still caught", () => {
+  const [pkg, lock] = lockPair({ pkg: { version: "2.2.0" }, lock: { version: "2.1.0" } });
+  assert.ok(checkLockfile(pkg, lock).some((p) => /version/.test(p)));
+});
+
+test("lockfile-sync: a dependency appearing in the lockfile is still caught", () => {
+  const [pkg, lock] = lockPair();
+  lock.packages["node_modules/left-pad"] = { version: "1.3.0" };
+  assert.ok(checkLockfile(pkg, lock).some((p) => /dependency entr/.test(p)));
+});
 
 test("api-snapshot: identical surface and version is clean", () => {
   const diff = diffSnapshot(snapshotFixture(), snapshotFixture(), "1.0.0");

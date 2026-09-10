@@ -174,7 +174,7 @@ sockets regardless, which is the actual guarantee.
    method and nowhere for one to live, so the store cannot decrypt what it holds,
    by construction.
 3. **ESM, plain JavaScript, no build step.** What ships is what runs, on Node
-   24.19.0 as a floor.
+   24.21.0 as a floor.
 4. **Streaming-first.** No method buffers an entire blob; limits are enforced
    mid-stream, and a rejected write cleans up its partial.
 5. **Fail loud.** When full, `push` throws `StashFull`. There is no eviction,

@@ -302,6 +302,36 @@ This release is a minor carrying a consumer-visible change, which the policy in
 [MIGRATING.md](MIGRATING.md#policy) makes a major. The deviation and its
 reasoning are recorded there rather than the policy being rewritten.
 
+## v2.2.0. SHIPPED (2.2.0)
+
+The Node floor moves from 24.19.0 to 24.21.0. It stays a floor rather than a
+ceiling, and nothing the store does depends on a capability that first shipped in
+24.21. The move lands inside the window the LTS calendar freezes a major's Node
+minimum for; that is a commitment this release does not meet, and it is recorded
+in `MIGRATING.md` under "Exceptions taken" rather than left to be discovered. On
+Node 24.19.0 or 24.20.0, `npm` warns and installs while Yarn 1 and any
+`engine-strict` setting refuse.
+
+Node 24.21.0 also added `crypto.createPrivateKey()` backed by an OpenSSL STORE
+loader, reached through a new `--allow-openssl-store` grant. A loader may reach
+files, devices, tokens, or the network, and its access is not bounded by the
+`fs.read` and `fs.write` scopes, so the grant opens a path the filesystem
+allowlist does not cover. The store needs no key, so the flag is never passed and
+the sandboxed suite runs with it denied.
+
+The check enforcing that guarantee matched cipher calls only, which reads it as
+"does not encrypt" when it is "holds no key". A key arrives through
+`createPrivateKey`, `createSecretKey`, a `generateKeyPair`, a WebCrypto
+`importKey`, or a KDF long before any cipher names it, so all of those are now
+refused in `src/` too.
+
+Three drift fixes ride along. The lockfile check compares `engines.node`, which
+it had never read, so a raised floor no longer ships with the two files
+disagreeing. The release container was pinned to an image carrying Node 24.18.0,
+below the floor the package declares. The container reproducing the CI runtime
+locally tracked a rolling tag and drifted away from the pinned CI version in
+either direction.
+
 ## Standing constraints
 
 Every release honors the one rule (no decrypt capability), zero dependencies,

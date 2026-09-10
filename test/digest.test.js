@@ -31,6 +31,45 @@ const PROTO_KEYS = [
   "valueOf",
 ];
 
+// Known-answer vectors for "abc", from FIPS 180-4 (SHA-2) and FIPS 202
+// (SHA-3, SHAKE). Every other digest test round-trips -- push hashes, a read
+// re-hashes with the entry's own algorithm, and the two are compared -- so if
+// a runtime ever changed an algorithm's output BOTH halves would move together
+// and the suite would stay green, while every entry already stored would fail
+// verification with IntegrityError. These pin the runtime to the standards
+// instead of to itself, which is what makes a Node or OpenSSL upgrade a test
+// failure rather than an unreadable store.
+//
+// shake256 is an XOF, so its length is the registry's pinned 64 bytes.
+const KNOWN_ANSWERS = Object.freeze({
+  sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+  sha512:
+    "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+  "sha3-256": "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+  "sha3-512":
+    "b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0",
+  shake256:
+    "483366601360a8771c6863080cc4114d8db44530f8f1e1ee4f94ea37e78b5739d5a15bef186a5386c75744c0527e1faa9f8726e462a12a4feb06bd8801e751e4",
+});
+
+test("every registry algorithm reproduces its published digest for 'abc'", () => {
+  for (const algo of ALGOS) {
+    const expected = KNOWN_ANSWERS[algo];
+    assert.ok(expected, `${algo} is in the registry but has no known-answer vector`);
+    const stored = finalize(digestHash(algo).update(Buffer.from("abc")), algo);
+    assert.equal(
+      stored,
+      `${algo}:${expected}`,
+      `${algo} does not match its published value -- the runtime's digest changed`,
+    );
+  }
+});
+
+test("the known-answer table covers the registry exactly", () => {
+  // A new registry row without a vector would otherwise be silently unpinned.
+  assert.deepEqual(Object.keys(KNOWN_ANSWERS).sort(), [...ALGOS].sort());
+});
+
 test("algoOf names the algorithm of a well-formed stored digest and resolves a hex-less marker", () => {
   for (const algo of ALGOS) {
     const stored = finalize(digestHash(algo).update(Buffer.from("payload")), algo);

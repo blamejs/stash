@@ -16,6 +16,12 @@
 // deliberately -- it binds an HTTP listener, and Node lines newer than 24
 // gate the network under --permission; the invariant here is that the
 // LIBRARY never needs a grant beyond its storage root.
+//
+// The grant list below is the whole list. --allow-openssl-store (Node
+// 24.21.0) is absent and therefore denied: it would let createPrivateKey()
+// load a key from a URL, reaching files, devices, tokens, or the network
+// outside the fs.read and fs.write scopes above. SPEC.md 1 says the store
+// holds no key, so the suite proves it cannot reach one either.
 
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";

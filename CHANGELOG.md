@@ -2,6 +2,58 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 2.2.0 — 2026-09-10
+
+Node 24.21.0 added `crypto.createPrivateKey()` backed by an OpenSSL STORE
+loader, reached through a new `--allow-openssl-store` grant whose access is
+not bounded by the `fs.read` and `fs.write` permission scopes. The store
+holds no key and never asks for that grant, but the check that enforces it
+matched cipher calls only, so a key-ingestion API could be added to the
+source with every gate green. It now matches key ingestion, generation,
+derivation and agreement, and the sandboxed suite records that the grant is
+denied. The floor move is the part that can affect you. It lands inside the
+window the LTS calendar freezes a major's Node minimum for, which is a
+commitment this release does not meet; it is written down in MIGRATING.md
+rather than left to be found. Nothing in the library's surface changed, and a
+process already running on 24.19.0 is unaffected until it reinstalls.
+
+### Changed
+
+- The Node floor moves from 24.19.0 to **24.21.0**, and `.node-version`,
+  `.nvmrc` and the CI runtime move with it. It remains a floor and not a
+  ceiling: any newer 24.x, and later majors per the LTS calendar, are
+  supported. Nothing the store does depends on a capability that first
+  shipped in 24.21. On Node 24.19.0 or 24.20.0, `npm` warns and installs
+  while Yarn 1 and any `engine-strict` setting refuse, so upgrade Node;
+  nothing else changes. The LTS calendar freezes a major's Node minimum for
+  its security-patch window and this move is inside that window, which is
+  recorded in MIGRATING.md under "Exceptions taken".
+- The forbidden-token check that enforces the no-key guarantee covers key
+  ingestion, generation, derivation and agreement, not only the cipher calls
+  that consume a key. `createPrivateKey`, `createSecretKey`,
+  `createPublicKey`, `generateKey*`, WebCrypto `importKey` / `deriveKey` /
+  `deriveBits`, Diffie-Hellman and ECDH, `createSign` / `createVerify`, the
+  `hkdf` / `pbkdf2` / `scrypt` derivations, and `passphrase` are all refused
+  in `src/`, alongside the ciphers already covered.
+- The permission-model posture names OpenSSL STORE loaders. A STORE loader
+  may reach files, devices, tokens, or the network, and its access is not
+  constrained by the filesystem grants, so `--allow-openssl-store` is never
+  passed and the sandboxed suite runs with it denied.
+
+### Fixed
+
+- The lockfile check compares `engines.node` between `package.json` and
+  `package-lock.json`. Raising the Node floor edits `package.json` alone, so
+  the two shipped disagreeing until an unrelated install rewrote the
+  lockfile, and no other gate read the field.
+- The release container builds on the Node the package supports. It was
+  pinned to an image carrying Node 24.18.0, below the floor the package
+  declares.
+- The container that reproduces the CI runtime locally is pinned to an exact
+  Node tag. It tracked the rolling `node:24-alpine` tag, which moves whenever
+  the Node line does and drifted away from the version CI pins, in either
+  direction and without notice.
+
 ## 2.1.0 — 2026-08-22
 
 The default integrity hash changes and nothing else does: same verbs, same
