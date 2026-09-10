@@ -57,11 +57,18 @@ export const FORBIDDEN_TOKENS = [
   // which module they reach.
   "getBuiltinModule",
   "createRequire",
-  // src/ is ESM, where `require` is not defined, so a call to it is either a
-  // loader smuggled in through createRequire or a mistake. Refusing the call
-  // shape covers a computed target, which an allowlist reading specifiers
-  // cannot: `require(name)` names no module for it to check.
-  "require\\s*\\(",
+  // A call to the CommonJS loader, in the spellings that reach it. `require`
+  // is not defined in ESM, but a `.cjs` file added under src/ is CommonJS and
+  // ships with the rest, so it is in scope there. The call shape is refused
+  // whatever its target, which an allowlist reading specifiers cannot do:
+  // `require(name)` names no module for it to check. The word boundary keeps
+  // `_requireSidecarId(...)` and the prose "required" out of it.
+  "\\brequire\\b\\s*\\(",
+  "\\(\\s*require\\s*\\)\\s*\\(",
+  // An identifier may be spelled with escapes -- `requ\\u0069re(...)` calls the
+  // same function -- so a scan reading the name would not see it. src/ writes
+  // its characters directly and holds no escape of this form.
+  "\\\\u",
   // Code built at runtime is invisible to every check here: a scan reads what
   // the file says, and `eval("im" + "port(...)")` says nothing. The call shape
   // is matched, not the bare word, because `revalidated` contains one.

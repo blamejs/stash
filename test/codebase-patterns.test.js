@@ -198,6 +198,10 @@ const _REGEX_AFTER_WORD = new Set([
 // After these a `{` opens a statement block rather than an object literal.
 const _BLOCK_AFTER_WORD = new Set(["else", "try", "finally", "do"]);
 
+// These take a parenthesized clause whose `)` is followed by a statement
+// block, so a `/` after that block's `}` opens a regex rather than dividing.
+const _CLAUSE_KEYWORDS = new Set(["if", "for", "while", "with", "switch", "catch"]);
+
 // Index just past the regex literal starting at `i`, or -1 if it does not
 // close on this line (in which case the `/` was division after all).
 function _regexEndsAt(content, i) {
@@ -242,6 +246,13 @@ function _scanCode(content, start, stopAtCloseBrace) {
   let dotted = false;
   let punct = "";
   let closeIsStatement = false;
+  // Set by the `function` keyword and cleared by the parameter list it opens,
+  // so that list is classified as a clause and the body after it as a block.
+  let sawFunction = false;
+  // A function DECLARATION is a statement, so a `/` after its body opens a
+  // regex. A function EXPRESSION produces a value, so the same `/` divides.
+  // Which one it is depends on where the keyword appeared.
+  let functionIsDeclaration = false;
   // One entry per open `(` or `{`, recording whether it opened a statement
   // rather than an expression -- what tells `if (ok) {} /re/` (a block, so a
   // regex follows) from `const o = {} / 2` (an object, so division).
@@ -350,6 +361,13 @@ function _scanCode(content, start, stopAtCloseBrace) {
       out += w;
       // A property name is not a keyword: `obj.of / 2` divides.
       dotted = kind === "punct" && punct === ".";
+      if (w === "function") {
+        // Checked before `kind` moves on, so it reads the token that PRECEDED
+        // the keyword: `const x = function` is an expression, a `function` at
+        // the start of a statement is a declaration.
+        sawFunction = true;
+        functionIsDeclaration = atStatementPosition();
+      }
       word = w;
       kind = "word";
       i = j;
@@ -361,9 +379,15 @@ function _scanCode(content, start, stopAtCloseBrace) {
     if (/\s/.test(c)) continue;
 
     if (c === "(" || c === "{") {
+      // A `(` opens a statement clause after if/for/while/with/switch/catch,
+      // and a function's parameter list is the same shape: in both, the `{`
+      // that follows the `)` opens a block, so a regex may open after its `}`.
       const isClause =
-        c === "(" && kind === "word" && ["if", "for", "while", "with"].includes(word);
+        c === "(" &&
+        ((kind === "word" && !dotted && _CLAUSE_KEYWORDS.has(word)) ||
+          (sawFunction && functionIsDeclaration));
       const isBlock = c === "{" && atStatementPosition();
+      if (c === "(") sawFunction = false;
       opens.push({ statement: c === "(" ? isClause : isBlock });
       kind = "punct";
       punct = c;
@@ -949,6 +973,54 @@ test("crypto-import-allowlist -- the scanner reads every import position and for
     scan(HEADER + "const n = {a: 1} / 2; // " + 'require("node:crypto")' + "\n"),
     [],
     "division after an object literal",
+  );
+  // A statement header this scan did not know would classify its braces as an
+  // object, so a regex after them read as division and swallowed the rest --
+  // taking a later import out of view along with it.
+  assert.equal(
+    scan(
+      HEADER +
+        'switch ("x") {} /[/*]/.test("");\n' +
+        'import { sign } from "node:crypto";\n' +
+        'const s = "*/";\n',
+    ).length,
+    1,
+    "an import after a switch block and a regex is still seen",
+  );
+  assert.equal(
+    scan(
+      HEADER +
+        'try {} catch (e) {} /[/*]/.test("");\n' +
+        'import { sign } from "node:crypto";\n' +
+        'const s = "*/";\n',
+    ).length,
+    1,
+    "the same after a catch block",
+  );
+  assert.equal(
+    scan(
+      HEADER +
+        'function f() {} /[/*]/.test("");\n' +
+        'import { sign } from "node:crypto";\n' +
+        'const s = "*/";\n',
+    ).length,
+    1,
+    "the same after a function body",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const x = function () {} / 1 /*\n" + 'import "node:tls";\n' + "*/;\n"),
+    [],
+    "a function EXPRESSION produces a value, so the slash after it divides",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const x = promise.catch(handler) / 1 /*\n" + 'import "node:tls";\n' + "*/;\n"),
+    [],
+    "a property named for a keyword is a call producing a value, not a clause",
+  );
+  assert.deepEqual(
+    scan(HEADER + "const x = obj.switch(a) / 1 /*\n" + 'import "node:tls";\n' + "*/;\n"),
+    [],
+    "the same for a property named switch",
   );
   assert.equal(
     scan(HEADER + 'import { x } from "../outside.js?y/../src/inside.js";\n', "src/index.js").length,
