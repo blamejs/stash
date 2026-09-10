@@ -814,6 +814,19 @@ test("crypto-import-allowlist -- the scanner reads every import position and for
     "an escaped specifier is refused even where the name would be permitted, since the spelling is what hides the module",
   );
 
+  // A statement ends at a `}` as well as at a `;` or a line break, so an
+  // import may legally begin right after one.
+  assert.equal(
+    scan(HEADER + 'function f() {} import { sign } from "node:crypto";\n').length,
+    1,
+    "an import following a declaration on the same line",
+  );
+  assert.equal(
+    scan(HEADER + 'function f() {} import "node:tls";\n', "src/digest.js").length,
+    1,
+    "a side-effect import following a declaration on the same line",
+  );
+
   // A call form may carry an options argument after the specifier.
   assert.equal(
     scan(HEADER + 'const { sign } = await import("node:crypto", {});\n').length,
@@ -1048,12 +1061,12 @@ function _cryptoImportViolations(subject, fromRel) {
   // binds the same names, and a module that re-exported `sign` would hand
   // every other module a key-bearing call the allowlist never saw.
   const STATIC_RE =
-    /(?:^|;)[^\S\n]*(?:import|export)\b([^;]*?)\bfrom\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]/gm;
+    /(?:^|[;}])[^\S\n]*(?:import|export)\b([^;]*?)\bfrom\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]/gm;
   // The call form ends at the specifier, not at a closing paren: `import()`
   // takes an options argument, and requiring the `)` to follow immediately
   // would read `import("node:crypto", { with: ... })` as no import at all.
   const OPAQUE_RE =
-    /(?:^|;)[^\S\n]*import\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]|(?:require|import)\s*\(\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]/gm;
+    /(?:^|[;}])[^\S\n]*import\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]|(?:require|import)\s*\(\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]/gm;
 
   // The engine decodes string escapes before resolving, so several spellings
   // reach the same module: t and \x74 for a letter, and the identity
