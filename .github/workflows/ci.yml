@@ -104,8 +104,8 @@ jobs:
           if grep -rnE "createPrivateKey|createPublicKey|createSecretKey|createHmac|generateKey|importKey|wrapKey|deriveKey|deriveBits" src/; then exit 1; fi
           if grep -rnE "createDiffieHellman|diffieHellman|createECDH|createSign|createVerify" src/; then exit 1; fi
           if grep -rniE "decrypt|privateEncrypt|publicEncrypt|hkdf|pbkdf2|scrypt|subtle|webcrypto|openssl-store" src/; then exit 1; fi
-          # Loads a builtin by a computed name, past any import allowlist.
-          if grep -rnE "getBuiltinModule" src/; then exit 1; fi
+          # Load a module by a computed name, past any import allowlist.
+          if grep -rnE "getBuiltinModule|createRequire" src/; then exit 1; fi
 
       - name: Wiki e2e
         run: node examples/wiki/test/e2e.js

@@ -355,9 +355,12 @@ test("forbidden-crypto-token -- no key machinery, sqlite, or password surface in
     "pbk" + "df2",
     "scr" + "ypt",
     // Key-bearing surfaces and the flags that widen them.
-    // Loads a builtin by a computed name, so no import allowlist can see
-    // which module it reaches. src/ has no use for it.
+    // Both load a module by a computed name, so no import allowlist can see
+    // which one they reach: getBuiltinModule takes the name directly, and
+    // createRequire hands back a loader that can be called under any alias.
+    // src/ is ESM and has no use for either.
     "getBuilt" + "inModule",
+    "createReq" + "uire",
     "sub" + "tle",
     "webcry" + "pto",
     "openssl-st" + "ore",
