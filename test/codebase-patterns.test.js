@@ -355,6 +355,9 @@ test("forbidden-crypto-token -- no key machinery, sqlite, or password surface in
     "pbk" + "df2",
     "scr" + "ypt",
     // Key-bearing surfaces and the flags that widen them.
+    // Loads a builtin by a computed name, so no import allowlist can see
+    // which module it reaches. src/ has no use for it.
+    "getBuilt" + "inModule",
     "sub" + "tle",
     "webcry" + "pto",
     "openssl-st" + "ore",
@@ -514,10 +517,15 @@ test("crypto-import-allowlist -- the scanner reads every import position and for
     1,
     "a \\u{} escape in a require",
   );
-  assert.deepEqual(
-    scan(HEADER + 'import { createHash } from "cryp\\u0074o";\n'),
-    [],
-    "an escaped specifier with a permitted name is still clean",
+  assert.equal(
+    scan(HEADER + 'import { sign } from "cr\\ypto";\n').length,
+    1,
+    "an identity escape, which is simply the letter",
+  );
+  assert.equal(
+    scan(HEADER + 'import { createHash } from "cryp\\u0074o";\n').length,
+    1,
+    "an escaped specifier is refused even where the name would be permitted, since the spelling is what hides the module",
   );
 
   // A call form may carry an options argument after the specifier.
@@ -596,18 +604,16 @@ function _cryptoImportViolations(subject) {
   const OPAQUE_RE =
     /(?:^|;)[^\S\n]*import\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]|(?:require|import)\s*\(\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]/gm;
 
-  // The engine decodes string escapes before resolving, so `crypto` loads
-  // the builtin. Comparing the raw source text would let an escape spell the
-  // module past the allowlist, so the specifier is decoded first.
-  const decodeSpec = (s) =>
-    s
-      .replace(/\\u\{([0-9a-fA-F]+)\}/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
-      .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-      .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
-  const isCrypto = (spec) => {
-    const d = decodeSpec(spec);
-    return d === "crypto" || d === "node:crypto";
-  };
+  // The engine decodes string escapes before resolving, so several spellings
+  // reach the same module: t and \x74 for a letter, and the identity
+  // escape \y, which is simply y. Chasing that grammar means reimplementing
+  // it, and any gap in the reimplementation is a way through. A module
+  // specifier in src/ is written literally instead, so a backslash in one is
+  // refused whatever it would decode to, and the comparison below can then
+  // read the source text as written.
+  const isEscaped = (spec) => spec.includes("\\");
+  const isCrypto = (spec) => spec === "crypto" || spec === "node:crypto";
+  const ESCAPED_MSG = " -- an escaped module specifier hides which module is loaded";
 
   let m;
 
@@ -615,23 +621,28 @@ function _cryptoImportViolations(subject) {
   // grants the whole namespace and names nothing, so it is refused outright.
   OPAQUE_RE.lastIndex = 0;
   while ((m = OPAQUE_RE.exec(subject)) !== null) {
-    if (!isCrypto((m[1] === undefined ? m[2] : m[1]).trim())) continue;
+    const spec = (m[1] === undefined ? m[2] : m[1]).trim();
+    if (!isEscaped(spec) && !isCrypto(spec)) continue;
+    const text = m[0].replace(/^;/, "").trim().replace(/\s+/g, " ").slice(0, 160);
     violations.push({
       line: _lines(subject.slice(0, m.index)).length,
-      content:
-        m[0].replace(/^;/, "").trim().replace(/\s+/g, " ").slice(0, 160) +
-        " -- only a named import of " +
-        CRYPTO_ALLOWED_TEXT +
-        " is permitted",
+      content: isEscaped(spec)
+        ? text + ESCAPED_MSG
+        : text + " -- only a named import of " + CRYPTO_ALLOWED_TEXT + " is permitted",
     });
   }
 
   STATIC_RE.lastIndex = 0;
   while ((m = STATIC_RE.exec(subject)) !== null) {
-    if (!isCrypto(m[2].trim())) continue;
+    const spec = m[2].trim();
+    if (!isEscaped(spec) && !isCrypto(spec)) continue;
     const line = _lines(subject.slice(0, m.index)).length;
     const clause = m[1];
     const text = m[0].replace(/^;/, "").trim().replace(/\s+/g, " ").slice(0, 160);
+    if (isEscaped(spec)) {
+      violations.push({ line, content: text + ESCAPED_MSG });
+      continue;
+    }
     const named = clause.trim().match(/^\{([\s\S]*)\}$/);
     if (!named) {
       violations.push({
