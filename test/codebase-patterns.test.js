@@ -494,6 +494,18 @@ test("crypto-import-allowlist -- the scanner reads every import position and for
     "a newline inside require()",
   );
 
+  // A call form may carry an options argument after the specifier.
+  assert.equal(
+    scan(HEADER + 'const { sign } = await import("node:crypto", {});\n').length,
+    1,
+    "a dynamic import with an options argument",
+  );
+  assert.equal(
+    scan(HEADER + 'const c = require("node:crypto", { paths: [] });\n').length,
+    1,
+    "a require with a second argument",
+  );
+
   // A re-export binds the same names into another module, so it is held to
   // the same list. A wildcard re-export names nothing and is refused.
   assert.equal(
@@ -552,8 +564,11 @@ function _cryptoImportViolations(subject) {
   // every other module a key-bearing call the allowlist never saw.
   const STATIC_RE =
     /(?:^|;)[^\S\n]*(?:import|export)\b([^;]*?)\bfrom\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]/gm;
+  // The call form ends at the specifier, not at a closing paren: `import()`
+  // takes an options argument, and requiring the `)` to follow immediately
+  // would read `import("node:crypto", { with: ... })` as no import at all.
   const OPAQUE_RE =
-    /(?:^|;)[^\S\n]*import\s*[\x22\x27](?:node:)?crypto[\x22\x27]|(?:require|import)\s*\(\s*[\x22\x27](?:node:)?crypto[\x22\x27]\s*\)/gm;
+    /(?:^|;)[^\S\n]*import\s*[\x22\x27](?:node:)?crypto[\x22\x27]|(?:require|import)\s*\(\s*[\x22\x27](?:node:)?crypto[\x22\x27]/gm;
 
   const isCrypto = (spec) => spec === "crypto" || spec === "node:crypto";
 
