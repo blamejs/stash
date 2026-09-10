@@ -28,13 +28,23 @@ process already running on 24.19.0 is unaffected until it reinstalls.
   nothing else changes. The LTS calendar freezes a major's Node minimum for
   its security-patch window and this move is inside that window, which is
   recorded in MIGRATING.md under "Exceptions taken".
-- The forbidden-token check that enforces the no-key guarantee covers key
-  ingestion, generation, derivation and agreement, not only the cipher calls
-  that consume a key. `createPrivateKey`, `createSecretKey`,
-  `createPublicKey`, `generateKey*`, WebCrypto `importKey` / `deriveKey` /
-  `deriveBits`, Diffie-Hellman and ECDH, `createSign` / `createVerify`, the
-  `hkdf` / `pbkdf2` / `scrypt` derivations, and `passphrase` are all refused
-  in `src/`, alongside the ciphers already covered.
+- The no-key guarantee is enforced by an allowlist. `SPEC.md` section 1
+  grants the source exactly three names from `node:crypto` -- `createHash`,
+  `randomBytes` and `timingSafeEqual` -- and that is now checked directly, so
+  any other export is refused whether or not anyone predicted it. A default
+  or namespace import is refused for the same reason, since it hides which
+  names are reached. Enumerating the forbidden calls instead is what left
+  `createPrivateKey` uncovered, and it left `createHmac` and the one-shot
+  `sign` and `verify` uncovered too.
+- The forbidden-token check that backs it covers key ingestion, generation,
+  derivation and agreement, not only the cipher calls that consume a key.
+  `createPrivateKey`, `createSecretKey`, `createPublicKey`, `createHmac`,
+  `generateKey*`, WebCrypto `importKey` / `deriveKey` / `deriveBits`,
+  Diffie-Hellman and ECDH, `createSign` / `createVerify`, the `hkdf` /
+  `pbkdf2` / `scrypt` derivations, and `passphrase` are all refused in
+  `src/`, alongside the ciphers already covered. It reaches what an import
+  check cannot: a commented-out sketch, a `node:sqlite` index, a password
+  surface.
 - The permission-model posture names OpenSSL STORE loaders. A STORE loader
   may reach files, devices, tokens, or the network, and its access is not
   constrained by the filesystem grants, so `--allow-openssl-store` is never

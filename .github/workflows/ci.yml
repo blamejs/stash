@@ -104,7 +104,7 @@ jobs:
           # Key ingestion and derivation, not only the ciphers that consume a
           # key. Node 24.21.0 added createPrivateKey({ URL }) through an
           # OpenSSL STORE loader, which reads outside the fs permission scopes.
-          if grep -rnE "createPrivateKey|createPublicKey|createSecretKey|generateKey|importKey|wrapKey|deriveKey|deriveBits" src/; then exit 1; fi
+          if grep -rnE "createPrivateKey|createPublicKey|createSecretKey|createHmac|generateKey|importKey|wrapKey|deriveKey|deriveBits" src/; then exit 1; fi
           if grep -rnE "createDiffieHellman|diffieHellman|createECDH|createSign|createVerify" src/; then exit 1; fi
           if grep -rniE "decrypt|privateEncrypt|publicEncrypt|hkdf|pbkdf2|scrypt|subtle|webcrypto|openssl-store" src/; then exit 1; fi
 

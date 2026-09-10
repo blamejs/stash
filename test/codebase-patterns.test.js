@@ -206,6 +206,7 @@ const VALID_ALLOW_CLASSES = {
   "guard-shape-reinlined": 1,
   "validator-shape-reinlined": 1,
   "forbidden-crypto-token": 1,
+  "crypto-import-allowlist": 1,
   "digest-algo-hardcode": 1,
   "prototype-key-confusion": 1,
   "sandbox-widening-import": 1,
@@ -335,6 +336,7 @@ test("forbidden-crypto-token -- no key machinery, sqlite, or password surface in
     // added `createPrivateKey({ URL })` backed by an OpenSSL STORE loader,
     // whose reads are not constrained by the fs.read / fs.write permission
     // scopes, so an ingestion token is not reachable by the fs sandbox alone.
+    "createH" + "mac",
     "createPriv" + "ateKey",
     "createPub" + "licKey",
     "createSec" + "retKey",
@@ -368,6 +370,243 @@ test("forbidden-crypto-token -- no key machinery, sqlite, or password surface in
     bad,
   );
 });
+
+// ---------------------------------------------------------------------------
+// (1b) crypto-import-allowlist -- SPEC.md 1 names the three permitted imports
+// ---------------------------------------------------------------------------
+
+// SPEC.md 1: "`node:crypto` is allowed for hashing and random IDs only:
+// `createHash`, `randomBytes`, and `timingSafeEqual`."
+const CRYPTO_ALLOWED = ["createHash", "randomBytes", "timingSafeEqual"];
+// Precomputed because a `"` inside a template-literal interpolation desyncs
+// _stripStrings: its double-quote pass runs before the backtick pass, so the
+// quote pairs with an unrelated one later in the file and every detector that
+// scans stripped source reads garbage from there on.
+const CRYPTO_ALLOWED_TEXT = CRYPTO_ALLOWED.join(", ");
+
+test("crypto-import-allowlist -- src/ imports only the three permitted node:crypto names", () => {
+  // reason: the token denylist above enumerates key machinery, and an
+  // enumeration of someone else's API is never finished -- Node 24.21.0 added
+  // `createPrivateKey` through an OpenSSL STORE loader and every gate stayed
+  // green, which is the same way `createHmac(algo, key)` and the one-shot
+  // `sign(alg, data, privateKey)` sit outside a denylist today. This inverts
+  // it: `node:crypto` may contribute exactly the three names SPEC.md 1 grants,
+  // so a key-bearing export added to Node in any future release is refused on
+  // arrival with no edit here. The denylist stays as the second layer, since
+  // it also reaches commented-out sketches, `node:sqlite` and password
+  // surface, which an import check cannot see.
+  //
+  // A namespace or default import is refused outright: `crypto.createHmac(...)`
+  // behind `import * as crypto` would make the granted set unknowable. Bare
+  // "crypto" resolves to the same builtin, so it is matched too.
+  const violations = [];
+  for (const file of _srcFiles()) {
+    const rel = _relPath(file);
+    if (rel === SELF) continue;
+    for (const v of _cryptoImportViolations(_stripComments(_read(file)))) {
+      violations.push({ file: rel, line: v.line, content: v.content });
+    }
+  }
+
+  _report(
+    "SPEC.md 1: src/ imports only createHash / randomBytes / timingSafeEqual from node:crypto",
+    _filterMarkers(violations, "crypto-import-allowlist"),
+  );
+});
+
+// Fixture vectors for the scanner above. The detector runs over the real tree,
+// where every module happens to import node:crypto first and with the same
+// layout, so a scanner that only works in that one position passes the live
+// tree while being blind everywhere else. These pin the positions the tree
+// does not currently exercise.
+test("crypto-import-allowlist -- the scanner reads every import position and form", () => {
+  const HEADER =
+    "// SPDX-License-Identifier: Apache-2.0\n// Copyright (c) blamejs contributors\n//\n// A multi-line header, which _stripComments leaves as blank lines.\n\n";
+  const scan = (src) => _cryptoImportViolations(_stripComments(src));
+  const names = (src) => scan(src).map((v) => v.content);
+
+  // Permitted, in each position a real module might place it.
+  assert.deepEqual(scan(HEADER + 'import { createHash } from "node:crypto";\n'), []);
+  assert.deepEqual(
+    scan(
+      HEADER + 'import { join } from "node:path";\nimport { randomBytes } from "node:crypto";\n',
+    ),
+    [],
+    "a crypto import that is not the first import is still parsed as its own statement",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'import {\n  randomBytes,\n  timingSafeEqual,\n} from "node:crypto";\n'),
+    [],
+    "a multi-line named import",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'import { createHash as h } from "node:crypto";\n'),
+    [],
+    "an alias grants the name that was imported",
+  );
+
+  // Refused: key-bearing names the denylist cannot cover without false hits.
+  assert.equal(names(HEADER + 'import { createHash, sign } from "node:crypto";\n').length, 1);
+  assert.match(names(HEADER + 'import { createHash, sign } from "node:crypto";\n')[0], /'sign'/);
+  assert.equal(names(HEADER + 'import { createHmac } from "node:crypto";\n').length, 1);
+  assert.equal(
+    names(HEADER + 'import { join } from "node:path";\nimport { verify } from "node:crypto";\n')
+      .length,
+    1,
+    "a violation in a non-first import is still found",
+  );
+
+  // Refused: forms that name nothing and grant the whole namespace.
+  for (const form of [
+    'import * as c from "node:crypto";\n',
+    'import c from "node:crypto";\n',
+    'import "node:crypto";\n',
+    'const c = require("node:crypto");\n',
+    'const c = await import("node:crypto");\n',
+  ]) {
+    assert.equal(scan(HEADER + form).length, 1, `opaque form not refused: ${form.trim()}`);
+  }
+
+  // Bare "crypto" resolves to the same builtin.
+  assert.equal(scan(HEADER + 'import { createHmac } from "crypto";\n').length, 1);
+
+  // A line break may fall anywhere a space may. Each of these is one import
+  // statement, and a scanner that stopped at the newline would read it as
+  // absent -- silently permitting the name it was added to refuse.
+  assert.equal(
+    scan(HEADER + 'import { sign } from\n  "node:crypto";\n').length,
+    1,
+    "a newline between from and the specifier",
+  );
+  assert.equal(
+    scan(HEADER + 'import\n  { createHmac }\n  from\n  "node:crypto";\n').length,
+    1,
+    "a newline after the import keyword and around the clause",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'import { randomBytes } from\n  "node:crypto";\n'),
+    [],
+    "the same layout with a permitted name stays clean",
+  );
+  assert.equal(
+    scan(HEADER + 'const c = require(\n  "node:crypto"\n);\n').length,
+    1,
+    "a newline inside require()",
+  );
+
+  // A re-export binds the same names into another module, so it is held to
+  // the same list. A wildcard re-export names nothing and is refused.
+  assert.equal(
+    scan(HEADER + 'export { sign } from "node:crypto";\n').length,
+    1,
+    "a named re-export of a forbidden name",
+  );
+  assert.deepEqual(
+    scan(HEADER + 'export { createHash } from "node:crypto";\n'),
+    [],
+    "a named re-export of a permitted name",
+  );
+  assert.equal(
+    scan(HEADER + 'export * as crypto from "node:crypto";\n').length,
+    1,
+    "a namespace re-export",
+  );
+  assert.equal(scan(HEADER + 'export * from "node:crypto";\n').length, 1, "a wildcard re-export");
+  assert.deepEqual(
+    scan(HEADER + 'export { join } from "node:path";\n'),
+    [],
+    "a re-export of an unrelated module",
+  );
+
+  // Unrelated modules are never attributed to node:crypto.
+  assert.deepEqual(
+    scan(HEADER + 'import { constants } from "node:fs";\nimport { join } from "node:path";\n'),
+    [],
+  );
+});
+
+function _cryptoImportViolations(subject) {
+  const violations = [];
+  // The quote class is written \x22\x27 rather than ["'] on purpose: a literal
+  // quote inside a regex LITERAL is invisible to _stripStrings (which strips
+  // strings, not regexes), so it pairs with an unrelated quote later in the
+  // file and corrupts the stripped source every other detector reads.
+  //
+  // Each import is matched as a WHOLE statement -- anchored at the start of a
+  // line or just past a `;`, with a clause that cannot contain `;` -- then the
+  // specifier decides whether it is ours. A clause matched lazily across
+  // arbitrary text instead would swallow the preceding declaration whenever a
+  // crypto import is not the first import in the file, and blame that
+  // declaration's names on node:crypto.
+  // The `m` flag is load-bearing: every module here opens with a licence
+  // header, which _stripComments leaves as blank lines, so an unanchored `^`
+  // would match only the very start of the file and miss the first import in
+  // every one of them -- the position the crypto import actually occupies.
+  //
+  // Only the anchor is newline-free, so `import` must open a statement. Inside
+  // the statement whitespace is \s, since a line break may fall anywhere a
+  // space may -- after `from`, or around a require()'s parentheses -- and a
+  // matcher that stopped at the newline would read such an import as absent.
+  // `export ... from` is matched alongside `import ... from`: a re-export
+  // binds the same names, and a module that re-exported `sign` would hand
+  // every other module a key-bearing call the allowlist never saw.
+  const STATIC_RE =
+    /(?:^|;)[^\S\n]*(?:import|export)\b([^;]*?)\bfrom\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]/gm;
+  const OPAQUE_RE =
+    /(?:^|;)[^\S\n]*import\s*[\x22\x27](?:node:)?crypto[\x22\x27]|(?:require|import)\s*\(\s*[\x22\x27](?:node:)?crypto[\x22\x27]\s*\)/gm;
+
+  const isCrypto = (spec) => spec === "crypto" || spec === "node:crypto";
+
+  let m;
+
+  // A side-effect import, a require(), or a dynamic import() of the module
+  // grants the whole namespace and names nothing, so it is refused outright.
+  OPAQUE_RE.lastIndex = 0;
+  while ((m = OPAQUE_RE.exec(subject)) !== null) {
+    violations.push({
+      line: _lines(subject.slice(0, m.index)).length,
+      content:
+        m[0].replace(/^;/, "").trim().replace(/\s+/g, " ").slice(0, 160) +
+        " -- only a named import of " +
+        CRYPTO_ALLOWED_TEXT +
+        " is permitted",
+    });
+  }
+
+  STATIC_RE.lastIndex = 0;
+  while ((m = STATIC_RE.exec(subject)) !== null) {
+    if (!isCrypto(m[2].trim())) continue;
+    const line = _lines(subject.slice(0, m.index)).length;
+    const clause = m[1];
+    const text = m[0].replace(/^;/, "").trim().replace(/\s+/g, " ").slice(0, 160);
+    const named = clause.trim().match(/^\{([\s\S]*)\}$/);
+    if (!named) {
+      violations.push({
+        line,
+        content: text + " -- default, namespace or wildcard binding hides which names are used",
+      });
+      continue;
+    }
+    for (const raw2 of named[1].split(",")) {
+      const spec = raw2.trim();
+      if (!spec) continue;
+      // `createHash as h` grants createHash; the imported name is what counts.
+      const imported = spec.split(/\s+as\s+/)[0].trim();
+      if (!CRYPTO_ALLOWED.includes(imported)) {
+        violations.push({
+          line,
+          content:
+            "imports '" +
+            imported +
+            "' from node:crypto -- SPEC.md 1 permits only " +
+            CRYPTO_ALLOWED_TEXT,
+        });
+      }
+    }
+  }
+
+  return violations;
+}
 
 // ---------------------------------------------------------------------------
 // (1a) digest-algo-hardcode -- src/digest.js owns the algorithm set
