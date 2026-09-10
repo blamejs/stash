@@ -33,6 +33,7 @@ import assert from "node:assert/strict";
 
 import { freshScratchDir } from "./_scratch.js";
 import { DIGESTS } from "../src/digest.js";
+import { FORBIDDEN_TOKENS } from "../scripts/check-forbidden-tokens.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -544,53 +545,7 @@ test("forbidden-crypto-token -- no key machinery, sqlite, or password surface in
   // "does not encrypt"; the guarantee is "holds no key", and a key arrives
   // through `createPrivateKey`, `createSecretKey`, `generateKeyPair`, a
   // WebCrypto `importKey`, or a KDF long before any cipher names it.
-  const tokens = [
-    // Cipher machinery, and the operations that consume a key directly.
-    "createCiph" + "eriv",
-    "createDeciph" + "eriv",
-    "createCiph" + "er\\b",
-    "createDeciph" + "er\\b",
-    "dec" + "rypt",
-    "privateEnc" + "rypt",
-    "publicEnc" + "rypt",
-    // Key material: ingestion, generation, derivation, agreement. A store that
-    // cannot decrypt must also have nowhere to OBTAIN a key -- Node 24.21.0
-    // added `createPrivateKey({ URL })` backed by an OpenSSL STORE loader,
-    // whose reads are not constrained by the fs.read / fs.write permission
-    // scopes, so an ingestion token is not reachable by the fs sandbox alone.
-    "createH" + "mac",
-    "createPriv" + "ateKey",
-    "createPub" + "licKey",
-    "createSec" + "retKey",
-    "generate" + "Key",
-    "import" + "Key",
-    "unwrap" + "Key",
-    "wrap" + "Key",
-    "derive" + "Key",
-    "derive" + "Bits",
-    "createDiffie" + "Hellman",
-    "diffie" + "Hellman",
-    "createE" + "CDH",
-    "createSi" + "gn",
-    "createVer" + "ify",
-    "hk" + "df",
-    "pbk" + "df2",
-    "scr" + "ypt",
-    // Key-bearing surfaces and the flags that widen them.
-    // Both load a module by a computed name, so no import allowlist can see
-    // which one they reach: getBuiltinModule takes the name directly, and
-    // createRequire hands back a loader that can be called under any alias.
-    // src/ is ESM and has no use for either.
-    "getBuilt" + "inModule",
-    "createReq" + "uire",
-    "sub" + "tle",
-    "webcry" + "pto",
-    "openssl-st" + "ore",
-    "node:sql" + "ite",
-    "pass" + "word",
-    "passph" + "rase",
-  ];
-  const re = new RegExp(tokens.join("|"), "i");
+  const re = new RegExp(FORBIDDEN_TOKENS.join("|"), "i");
   let bad = _scanLines(_srcFiles(), re);
   bad = _filterMarkers(bad, "forbidden-crypto-token");
   _report(

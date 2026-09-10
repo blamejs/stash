@@ -169,10 +169,9 @@ jobs:
         run: node scripts/run-sandboxed.js
 
       - name: Forbidden-token invariant (SPEC.md 13.1 invariant 1)
-        run: |
-          set -e
-          if grep -rnE "createCipheriv|createDecipheriv|node:sqlite" src/; then exit 1; fi
-          if grep -rniE "password" src/; then exit 1; fi
+        # The token list lives in the script, so this workflow, ci.yml and the
+        # pattern detector all check the same one.
+        run: node scripts/check-forbidden-tokens.js
 
       - name: Wiki e2e
         run: node examples/wiki/test/e2e.js
