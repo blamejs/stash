@@ -28,14 +28,17 @@ process already running on 24.19.0 is unaffected until it reinstalls.
   nothing else changes. The LTS calendar freezes a major's Node minimum for
   its security-patch window and this move is inside that window, which is
   recorded in MIGRATING.md under "Exceptions taken".
-- The no-key guarantee is enforced by an allowlist. `SPEC.md` section 1
-  grants the source exactly three names from `node:crypto` -- `createHash`,
-  `randomBytes` and `timingSafeEqual` -- and that is now checked directly, so
-  any other export is refused whether or not anyone predicted it. A default
-  or namespace import is refused for the same reason, since it hides which
-  names are reached. Enumerating the forbidden calls instead is what left
-  `createPrivateKey` uncovered, and it left `createHmac` and the one-shot
-  `sign` and `verify` uncovered too.
+- The no-key guarantee is enforced by two allowlists rather than a list of
+  forbidden calls. `src/` may import only the builtins it is granted, so a
+  module that accepts key material is refused by not appearing on the list:
+  `node:tls`, `node:https` and `node:http2` take a private key through their
+  secure-context options, and `node:module` hands back a loader that reaches
+  any builtin under any alias. From `node:crypto` it may import only the
+  three names `SPEC.md` section 1 grants -- `createHash`, `randomBytes` and
+  `timingSafeEqual`. A default, namespace or wildcard binding is refused
+  because it hides which names are reached, a re-export is held to the same
+  list, and a specifier carrying a backslash is refused whatever it would
+  decode to, since escapes are resolved before the module is.
 - The forbidden-token check that backs it covers key ingestion, generation,
   derivation and agreement, not only the cipher calls that consume a key.
   `createPrivateKey`, `createSecretKey`, `createPublicKey`, `createHmac`,

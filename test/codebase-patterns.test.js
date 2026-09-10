@@ -207,6 +207,7 @@ const VALID_ALLOW_CLASSES = {
   "validator-shape-reinlined": 1,
   "forbidden-crypto-token": 1,
   "crypto-import-allowlist": 1,
+  "src-module-allowlist": 1,
   "digest-algo-hardcode": 1,
   "prototype-key-confusion": 1,
   "sandbox-widening-import": 1,
@@ -390,6 +391,26 @@ const CRYPTO_ALLOWED = ["createHash", "randomBytes", "timingSafeEqual"];
 // scans stripped source reads garbage from there on.
 const CRYPTO_ALLOWED_TEXT = CRYPTO_ALLOWED.join(", ");
 
+// The builtins src/ is allowed to reach. Naming the permitted modules bounds
+// a problem that denying the forbidden ones cannot: node:tls, node:https and
+// node:http2 all accept private-key material through their secure-context
+// options, node:module hands out a loader, and the next Node release may add
+// another. None of them can be listed in advance, and all of them are refused
+// by not appearing here. A relative specifier is always permitted -- it stays
+// inside src/, which this whole suite already governs.
+const SRC_MODULES = [
+  "node:assert",
+  "node:crypto",
+  "node:events",
+  "node:fs",
+  "node:fs/promises",
+  "node:path",
+  "node:stream",
+  "node:url",
+  "node:util",
+  "node:util/types",
+];
+
 test("crypto-import-allowlist -- src/ imports only the three permitted node:crypto names", () => {
   // reason: the token denylist above enumerates key machinery, and an
   // enumeration of someone else's API is never finished -- Node 24.21.0 added
@@ -405,20 +426,43 @@ test("crypto-import-allowlist -- src/ imports only the three permitted node:cryp
   // A namespace or default import is refused outright: `crypto.createHmac(...)`
   // behind `import * as crypto` would make the granted set unknowable. Bare
   // "crypto" resolves to the same builtin, so it is matched too.
+  _report(
+    "SPEC.md 1: src/ imports only createHash / randomBytes / timingSafeEqual from node:crypto",
+    _filterMarkers(_scanImports("crypto"), "crypto-import-allowlist"),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// (1c) src-module-allowlist -- src/ reaches only the modules it is granted
+// ---------------------------------------------------------------------------
+
+test("src-module-allowlist -- src/ imports only the granted builtins", () => {
+  // reason: the no-key guarantee cannot be held by naming forbidden APIs,
+  // because the list of modules that accept key material is not ours and is
+  // not finished -- node:tls, node:https and node:http2 take a private key
+  // through their secure-context options, node:module hands back a loader
+  // that reaches any builtin under any alias, and the next release may add
+  // another. Granting a short list of modules instead bounds it: a module
+  // that is not on the list cannot be imported at all, so one nobody thought
+  // to deny is refused by default. Adding a row here is a deliberate act.
+  _report(
+    "SPEC.md 2: src/ imports only the granted builtins, or a relative path",
+    _filterMarkers(_scanImports("module"), "src-module-allowlist"),
+  );
+});
+
+function _scanImports(kind) {
   const violations = [];
   for (const file of _srcFiles()) {
     const rel = _relPath(file);
     if (rel === SELF) continue;
     for (const v of _cryptoImportViolations(_stripComments(_read(file)))) {
+      if (v.kind !== kind) continue;
       violations.push({ file: rel, line: v.line, content: v.content });
     }
   }
-
-  _report(
-    "SPEC.md 1: src/ imports only createHash / randomBytes / timingSafeEqual from node:crypto",
-    _filterMarkers(violations, "crypto-import-allowlist"),
-  );
-});
+  return violations;
+}
 
 // Fixture vectors for the scanner above. The detector runs over the real tree,
 // where every module happens to import node:crypto first and with the same
@@ -572,6 +616,32 @@ test("crypto-import-allowlist -- the scanner reads every import position and for
     scan(HEADER + 'import { constants } from "node:fs";\nimport { join } from "node:path";\n'),
     [],
   );
+
+  // The module allowlist. Each of these accepts key material or hands back a
+  // loader, and each is refused by not being granted rather than by being
+  // named -- which is what covers the one nobody thought of.
+  const modKinds = (src) => scan(src).filter((v) => v.kind === "module");
+  for (const mod of ["node:tls", "node:https", "node:http2", "node:module", "node:vm", "express"]) {
+    assert.equal(
+      modKinds(HEADER + "import x from " + JSON.stringify(mod) + ";\n").length,
+      1,
+      `ungranted module not refused: ${mod}`,
+    );
+  }
+  // A side-effect import names nothing but still loads and runs the module.
+  for (const mod of ["node:tls", "node:module", "express"]) {
+    assert.equal(
+      modKinds(HEADER + "import " + JSON.stringify(mod) + ";\n").length,
+      1,
+      `ungranted side-effect import not refused: ${mod}`,
+    );
+  }
+  assert.deepEqual(modKinds(HEADER + 'import "node:fs";\n'), [], "a granted side-effect import");
+  assert.deepEqual(modKinds(HEADER + 'import "./ref.js";\n'), [], "a relative side-effect import");
+
+  assert.deepEqual(modKinds(HEADER + 'import { join } from "node:path";\n'), []);
+  assert.deepEqual(modKinds(HEADER + 'import { C } from "../constants.js";\n'), []);
+  assert.deepEqual(modKinds(HEADER + 'import { x } from "./ref.js";\n'), []);
 });
 
 function _cryptoImportViolations(subject) {
@@ -625,30 +695,68 @@ function _cryptoImportViolations(subject) {
   OPAQUE_RE.lastIndex = 0;
   while ((m = OPAQUE_RE.exec(subject)) !== null) {
     const spec = (m[1] === undefined ? m[2] : m[1]).trim();
-    if (!isEscaped(spec) && !isCrypto(spec)) continue;
     const text = m[0].replace(/^;/, "").trim().replace(/\s+/g, " ").slice(0, 160);
+    const line = _lines(subject.slice(0, m.index)).length;
+    if (isEscaped(spec)) {
+      violations.push({ kind: "crypto", line, content: text + ESCAPED_MSG });
+      continue;
+    }
+    // A side-effect import names nothing, but the module still loads and its
+    // top level still runs, so it is held to the module allowlist like any
+    // other. Granted modules are fine here; node:crypto is not, because these
+    // forms hand over the whole namespace.
+    if (!spec.startsWith(".") && !SRC_MODULES.includes(spec)) {
+      violations.push({
+        kind: "module",
+        line,
+        content:
+          "imports '" +
+          spec +
+          "' -- src/ may import only " +
+          SRC_MODULES.join(", ") +
+          ", or a relative path",
+      });
+      continue;
+    }
+    if (!isCrypto(spec)) continue;
     violations.push({
-      line: _lines(subject.slice(0, m.index)).length,
-      content: isEscaped(spec)
-        ? text + ESCAPED_MSG
-        : text + " -- only a named import of " + CRYPTO_ALLOWED_TEXT + " is permitted",
+      kind: "crypto",
+      line,
+      content: text + " -- only a named import of " + CRYPTO_ALLOWED_TEXT + " is permitted",
     });
   }
 
   STATIC_RE.lastIndex = 0;
   while ((m = STATIC_RE.exec(subject)) !== null) {
     const spec = m[2].trim();
-    if (!isEscaped(spec) && !isCrypto(spec)) continue;
     const line = _lines(subject.slice(0, m.index)).length;
     const clause = m[1];
     const text = m[0].replace(/^;/, "").trim().replace(/\s+/g, " ").slice(0, 160);
     if (isEscaped(spec)) {
-      violations.push({ line, content: text + ESCAPED_MSG });
+      violations.push({ kind: "crypto", line, content: text + ESCAPED_MSG });
       continue;
     }
+    // Every non-relative specifier is held to the module allowlist, whatever
+    // it names -- that is what keeps a key-bearing module nobody predicted
+    // from being reachable at all.
+    if (!spec.startsWith(".") && !SRC_MODULES.includes(spec)) {
+      violations.push({
+        kind: "module",
+        line,
+        content:
+          "imports '" +
+          spec +
+          "' -- src/ may import only " +
+          SRC_MODULES.join(", ") +
+          ", or a relative path",
+      });
+      continue;
+    }
+    if (!isCrypto(spec)) continue;
     const named = clause.trim().match(/^\{([\s\S]*)\}$/);
     if (!named) {
       violations.push({
+        kind: "crypto",
         line,
         content: text + " -- default, namespace or wildcard binding hides which names are used",
       });
@@ -661,6 +769,7 @@ function _cryptoImportViolations(subject) {
       const imported = spec.split(/\s+as\s+/)[0].trim();
       if (!CRYPTO_ALLOWED.includes(imported)) {
         violations.push({
+          kind: "crypto",
           line,
           content:
             "imports '" +
