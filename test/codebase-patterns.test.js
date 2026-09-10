@@ -51,6 +51,11 @@ const SELF = "test/codebase-patterns.test.js";
 // (`skipAssetDirs`): applying them to a product tree would let a new
 // src/public/ or src/vendor/ module ship in the tarball while sitting
 // outside every detector's view.
+// Extensions that hold no code, so a walk reading everything else does not
+// try to scan an image or a lockfile. Kept in step with the same list in
+// scripts/check-forbidden-tokens.js.
+const _NOT_CODE = /\.(?:json|md|txt|map|png|svg|ico|woff2?|lock)$/i;
+
 function _walk(dir, files, opts) {
   files = files || [];
   const base = path.basename(dir);
@@ -71,10 +76,16 @@ function _walk(dir, files, opts) {
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) _walk(full, files, opts);
-    // package.json packs src/ whole, so a .mjs or .cjs added there ships. A
-    // walk that took .js alone would leave it inside the tarball and outside
-    // every detector that reads this list.
-    else if (/\.(?:js|mjs|cjs)$/.test(entry.name)) files.push(full);
+    // package.json packs src/ whole, so anything added there ships. Listing
+    // the extensions to READ leaves whatever is not on the list inside the
+    // tarball and outside every detector; `anyCodeFile` inverts that, reading
+    // everything that is not a known non-code type, so a `.mjs`, a `.cjs` or a
+    // file with no extension at all is still scanned.
+    else if (
+      opts && opts.anyCodeFile ? !_NOT_CODE.test(entry.name) : /\.(?:js|mjs|cjs)$/.test(entry.name)
+    ) {
+      files.push(full);
+    }
   }
   return files;
 }
@@ -84,7 +95,7 @@ function _relPath(absPath) {
 }
 
 function _srcFiles() {
-  return _walk(path.join(REPO_ROOT, "src"));
+  return _walk(path.join(REPO_ROOT, "src"), [], { anyCodeFile: true });
 }
 function _testFiles() {
   return _walk(path.join(REPO_ROOT, "test"));
@@ -202,6 +213,10 @@ const _BLOCK_AFTER_WORD = new Set(["else", "try", "finally", "do"]);
 // block, so a `/` after that block's `}` opens a regex rather than dividing.
 const _CLAUSE_KEYWORDS = new Set(["if", "for", "while", "with", "switch", "catch"]);
 
+// Words that may sit between a statement position and a `function` keyword
+// while it is still a declaration rather than an expression.
+const _DECLARATION_MODIFIERS = new Set(["export", "default", "async"]);
+
 // Index just past the regex literal starting at `i`, or -1 if it does not
 // close on this line (in which case the `/` was division after all).
 function _regexEndsAt(content, i) {
@@ -253,6 +268,7 @@ function _scanCode(content, start, stopAtCloseBrace) {
   // regex. A function EXPRESSION produces a value, so the same `/` divides.
   // Which one it is depends on where the keyword appeared.
   let functionIsDeclaration = false;
+  let modifierRunAtStatement = false;
   // One entry per open `(` or `{`, recording whether it opened a statement
   // rather than an expression -- what tells `if (ok) {} /re/` (a block, so a
   // regex follows) from `const o = {} / 2` (an object, so division).
@@ -361,12 +377,24 @@ function _scanCode(content, start, stopAtCloseBrace) {
       out += w;
       // A property name is not a keyword: `obj.of / 2` divides.
       dotted = kind === "punct" && punct === ".";
+      // A run of modifiers carries the position it began at, so `export async
+      // function` stays a declaration while `= async function` does not.
+      if (_DECLARATION_MODIFIERS.has(w) && !(kind === "word" && _DECLARATION_MODIFIERS.has(word))) {
+        modifierRunAtStatement = atStatementPosition();
+      }
       if (w === "function") {
         // Checked before `kind` moves on, so it reads the token that PRECEDED
         // the keyword: `const x = function` is an expression, a `function` at
         // the start of a statement is a declaration.
         sawFunction = true;
-        functionIsDeclaration = atStatementPosition();
+        // `export function f() {}` and `async function f() {}` are still
+        // declarations, though a word sits between the keyword and the
+        // statement position. What decides it is where the RUN of modifiers
+        // began: `const f = async function () {}` is an expression, because
+        // that run began after an `=`.
+        functionIsDeclaration =
+          atStatementPosition() ||
+          (kind === "word" && _DECLARATION_MODIFIERS.has(word) && modifierRunAtStatement);
       }
       word = w;
       kind = "word";
@@ -1022,6 +1050,31 @@ test("crypto-import-allowlist -- the scanner reads every import position and for
     [],
     "the same for a property named switch",
   );
+  for (const decl of [
+    "export function f() {}",
+    "export default function f() {}",
+    "async function f() {}",
+    "export async function f() {}",
+  ]) {
+    assert.equal(
+      scan(
+        HEADER +
+          decl +
+          ' /[/*]/.test("");\n' +
+          'import { sign } from "node:crypto";\n' +
+          'const s = "*/";\n',
+      ).length,
+      1,
+      `an import after a regex following: ${decl}`,
+    );
+  }
+  for (const expr of ["const f = async function () {}", "const f = function () {}"]) {
+    assert.deepEqual(
+      scan(HEADER + expr + " / 2; // " + 'import { sign } from "node:crypto";' + "\n"),
+      [],
+      `a function expression divides, it does not open a regex: ${expr}`,
+    );
+  }
   assert.equal(
     scan(HEADER + 'import { x } from "../outside.js?y/../src/inside.js";\n', "src/index.js").length,
     1,
