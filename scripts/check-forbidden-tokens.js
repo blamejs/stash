@@ -54,10 +54,17 @@ export const FORBIDDEN_TOKENS = [
   "pbkdf2",
   "scrypt",
   // Loaders that take a module name as a value, so no import allowlist can see
-  // which module they reach. `process[` covers computed access to the first.
+  // which module they reach.
   "getBuiltinModule",
   "createRequire",
+  // Computed member access reaches a property without spelling its name, so
+  // the tokens above can be assembled at runtime -- `process["getBuiltin" +
+  // "Module"]`, or the same through an alias. Both forms are refused: any
+  // bracket access on `process`, and any bracket access whose key is built by
+  // concatenation. src/ names the properties it reads.
   "process\\[",
+  "\\[\\s*[\"'][^\"']*[\"']\\s*\\+",
+  "\\+\\s*[\"'][^\"']*[\"']\\s*\\]",
   // Key-bearing surfaces and the flags that widen them.
   "subtle",
   "webcrypto",
@@ -79,12 +86,17 @@ export function scanForbidden(files, read) {
   return hits;
 }
 
+// Everything under src/ ships, since package.json packs the directory whole.
+// Scanning only `.js` would leave a `.mjs` or `.cjs` added later inside the
+// tarball and outside every check here.
+const SCANNED = /\.(?:js|mjs|cjs)$/;
+
 function srcFiles(dir) {
   const out = [];
   for (const entry of readdirSync(dir)) {
     const p = join(dir, entry);
     if (statSync(p).isDirectory()) out.push(...srcFiles(p));
-    else if (p.endsWith(".js")) out.push(p);
+    else if (SCANNED.test(p)) out.push(p);
   }
   return out;
 }
