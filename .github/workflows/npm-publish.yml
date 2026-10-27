@@ -15,11 +15,9 @@
 # for a version the registry does not serve.
 #
 # Supply-chain posture:
-#   - npm authenticates through trusted publishing: the registry exchanges
-#     this job's GitHub OIDC token for a short-lived publish credential, so no
-#     npm token is stored in the repository. The trusted publisher on
-#     npmjs.com names repository blamejs/stash, workflow npm-publish.yml and
-#     environment npm-publish.
+#   - npm authenticates with the NPM_TOKEN secret of the npm-publish
+#     environment. The token must be allowed to publish directly: npm
+#     refuses tokens that bypass 2FA for direct publishing.
 #   - npm publish --provenance attaches a SLSA provenance attestation
 #     tying the published tarball to this workflow run + commit + tag.
 #   - Version match: package.json "version" MUST equal the pushed tag
@@ -267,7 +265,7 @@ jobs:
     environment: npm-publish
     permissions:
       contents: write    # gh release create + asset attach
-      id-token: write    # OIDC token for npm trusted publishing and --provenance
+      id-token: write    # OIDC token for npm --provenance
     timeout-minutes: 15
     steps:
       - name: Verify the built commit is the version's tagged commit
@@ -336,6 +334,21 @@ jobs:
           fi
           echo "[subject-verify] tarball + SBOM match the validated hashes"
 
+      - name: Verify NPM_TOKEN is reachable
+        # Fail loud + early if the NPM_TOKEN secret isn't visible to this
+        # workflow run. The publish step otherwise produces an opaque
+        # ENEEDAUTH after ~60s of npm registry churn.
+        env:
+          NPM_TOKEN_REACHABLE: ${{ secrets.NPM_TOKEN != '' }}
+        run: |
+          if [ "$NPM_TOKEN_REACHABLE" != "true" ]; then
+            echo "::error::NPM_TOKEN secret is empty in this workflow run."
+            echo "::error::Confirm a secret named NPM_TOKEN exists in the npm-publish environment"
+            echo "::error::and that the environment's deployment-branch policy includes this tag."
+            exit 1
+          fi
+          echo "NPM_TOKEN secret is reachable."
+
       - name: Release-digest sidecar (SHA-256)
         # Conventional checksum operators expect on a release page; verify
         # with `sha256sum -c`. Written in `<sha>  <filename>` format.
@@ -392,8 +405,7 @@ jobs:
         # job packed and hashed. Provenance is generated against this
         # workflow run's context. The leading `./` is load-bearing --
         # without it npm 10+ mis-classifies a relative path containing `/`
-        # as a git spec. No token is passed: npm authenticates with this
-        # job's OIDC token through the package's trusted publisher.
+        # as a git spec.
         #
         # A rerun after a publish that succeeded but a later step that
         # failed finds the version already on the registry. The step then
@@ -403,6 +415,7 @@ jobs:
         # unpublished version, fail the job.
         env:
           VERSION: ${{ needs.validate.outputs.version }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           TARBALL=$(find dist -maxdepth 1 -name '*.tgz' | head -1)

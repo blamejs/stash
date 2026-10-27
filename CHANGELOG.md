@@ -2,6 +2,22 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 2.2.3 — 2026-10-27
+
+`v2.2.1` and `v2.2.2` were tagged but never published to npm, because the
+registry refused the publish credential. This release carries the same
+library code as both and publishes it. If you install from npm, upgrade from
+`v2.2.0` to `v2.2.3`; the `v2.2.1` notes and the `Upgrading to 2.2.1` section
+of MIGRATING.md apply unchanged.
+
+### Changed
+
+- The package is published with an npm token held in the publish environment,
+  not with trusted publishing as the `v2.2.2` notes describe. Provenance is
+  attached as before; check it on the package's npm page or with `npm audit
+  signatures`. The publish order and the rerun check that `v2.2.2` introduced
+  are unchanged.
+
 ## 2.2.2 — 2026-10-27
 
 `v2.2.1` was tagged and has a GitHub release, but it was never published to
