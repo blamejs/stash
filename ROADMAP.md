@@ -332,6 +332,20 @@ below the floor the package declares. The container reproducing the CI runtime
 locally tracked a rolling tag and drifted away from the pinned CI version in
 either direction.
 
+## v2.2.1. SHIPPED (2.2.1)
+
+The Node floor moves from 24.21.0 to 24.22.1, the current security release of the
+Node 24 line. It stays a floor rather than a ceiling, and nothing the store does
+depends on a capability that first shipped in 24.22. Like the `v2.2.0` move, it
+lands inside the window the LTS calendar freezes, and it is recorded in
+`MIGRATING.md` under "Exceptions taken".
+
+Node 24.22.0 added two crypto APIs that take key material: `createMac(algorithm,
+key)` and `parsePKCS12(bundle)`, which returns the private keys a PKCS#12 bundle
+carries. The import allowlist already refused both, because neither is one of the
+three `node:crypto` names `src/` may import. The forbidden-token check now names
+them too, so a commented-out sketch that names either one is refused as well.
+
 ## Standing constraints
 
 Every release honors the one rule (no decrypt capability), zero dependencies,

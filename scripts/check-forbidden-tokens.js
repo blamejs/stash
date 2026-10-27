@@ -34,11 +34,15 @@ export const FORBIDDEN_TOKENS = [
   // cannot decrypt must also have nowhere to OBTAIN a key -- Node 24.21.0
   // added `createPrivateKey({ URL })` backed by an OpenSSL STORE loader, whose
   // reads are not constrained by the fs.read / fs.write permission scopes, so
-  // an ingestion token is not reachable by the fs sandbox alone.
+  // an ingestion token is not reachable by the fs sandbox alone. Node 24.22.0
+  // added `createMac(algorithm, key)` and `parsePKCS12(bundle)`, which returns
+  // the private keys a PKCS#12 bundle carries.
   "createPrivateKey",
   "createPublicKey",
   "createSecretKey",
   "createHmac",
+  "createMac",
+  "parsePKCS12",
   "generateKey",
   "importKey",
   "unwrapKey",

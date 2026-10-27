@@ -55,7 +55,7 @@ jobs:
     # image-index digest (the runner has no single platform to select), so a
     # list digest fails the whole job at startup before any step runs. GitHub
     # hosted runners are amd64, so the amd64 child manifest is the one to pin.
-    container: node:24.21.0-alpine@sha256:333f6b3eca25980d5682c26207665b93c9417786b21760b2764d5821d9704c8a
+    container: node:24.22.1-alpine@sha256:1200d815de24f8dcca745fbf7651d166034a35adbcad8860a8538ffff44f1420
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

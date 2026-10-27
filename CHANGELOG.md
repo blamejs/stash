@@ -2,6 +2,38 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 2.2.1 — 2026-10-27
+
+Node 24.22.1 is the current security release of the Node 24 line, and the
+package now requires it. Nothing in the library's surface changed: same
+verbs, same options, same error codes, same on-disk layout. A process already
+running on an older 24.x is unaffected until it reinstalls. The floor move
+can affect you at install time. On Node 24.21.0 or 24.22.0, `npm` warns and
+installs while Yarn 1 and any `engine-strict` setting refuse, so upgrade
+Node. The move lands inside the window the LTS calendar freezes a major's
+Node minimum for, and it ships as a patch; both are recorded in MIGRATING.md
+under "Exceptions taken".
+
+### Changed
+
+- The Node floor moves from 24.21.0 to **24.22.1**, and `.node-version`,
+  `.nvmrc`, the CI runtime, the fuzzing and publish workflows, the release
+  container and the local CI-runtime container move with it. It remains a
+  floor and not a ceiling: any newer 24.x, and later majors per the LTS
+  calendar, are supported. Nothing the store does depends on a capability
+  that first shipped in 24.22. On Node 24.21.0 or 24.22.0, upgrade Node;
+  nothing else changes.
+
+### Fixed
+
+- The forbidden-token check refuses `createMac` and `parsePKCS12` in `src/`.
+  Node 24.22.0 added both: `createMac(algorithm, key)` takes a key directly,
+  and `parsePKCS12(bundle)` returns the private keys a PKCS#12 bundle
+  carries. The import allowlist already refused importing either one, since
+  neither is among the three `node:crypto` names `src/` may import, but the
+  token check is the layer that also reads comments, and it did not name
+  them.
+
 ## 2.2.0 — 2026-09-10
 
 Node 24.21.0 added `crypto.createPrivateKey()` backed by an OpenSSL STORE

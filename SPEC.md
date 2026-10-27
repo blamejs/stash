@@ -32,16 +32,16 @@ else. Stop and ask.
 
 ## 2. Runtime and non-negotiable constraints
 
-- **Node 24.21.0.** `"engines": { "node": ">=24.21.0" }`, with a `.node-version` / `.nvmrc` of
-  `24.21.0`. Treat this as a floor to build against: no polyfills, no compatibility shims, no
+- **Node 24.22.1.** `"engines": { "node": ">=24.22.1" }`, with a `.node-version` / `.nvmrc` of
+  `24.22.1`. Treat this as a floor to build against: no polyfills, no compatibility shims, no
   `if (nodeVersion < x)` branches for older runtimes. The capabilities the store depends on all
-  arrived at the Node 24 *major* level, not in the `.21` patch: the stable permission model
+  arrived at the Node 24 *major* level, not in the `.22.1` patch: the stable permission model
   (`--permission`, §2.1), V8 13.6 explicit resource management behind `Symbol.asyncDispose`
   (§7.1), and `require(esm)` of the package's synchronous ESM graph (a CommonJS project can
-  `require` it with no build step). The specific `.21` patch is a conservative
-  security-currency floor. It keeps consumers on a maintained Node 24 patch rather than an
-  early 24.x carrying since-fixed defects; it is not a dependency on anything that first
-  shipped in that release. It is a floor, not a ceiling: any newer 24.x, and later majors per
+  `require` it with no build step). The specific `.22.1` patch is a conservative
+  security-currency floor. 24.22.1 is a security release of the Node 24 line, and the floor
+  keeps consumers on it rather than on an earlier 24.x carrying since-fixed defects; it is not
+  a dependency on anything that first shipped in that release. It is a floor, not a ceiling: any newer 24.x, and later majors per
   the [LTS calendar](LTS-CALENDAR.md), are supported.
 - **Zero dependencies**, runtime and dev. Node builtins only; tests use `node:test` and
   `node:assert`. If something can't be done without adding a package, stop and ask.
@@ -52,7 +52,7 @@ else. Stop and ask.
 
 ### 2.1 Permission model posture
 
-The Node permission model went stable in 23.5, so on 24.21.0 the flag is `--permission`, not
+The Node permission model went stable in 23.5, so on 24.22.1 the flag is `--permission`, not
 `--experimental-permission`. StashJS should run cleanly under:
 
 ```
