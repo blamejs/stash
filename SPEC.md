@@ -77,6 +77,11 @@ Design implications, all mandatory:
   permission model, so the DiskBackend has to do its own containment check (§9); the sandbox
   won't do it.
 - **Existing file descriptors bypass the model.** Never accept an fd as input; paths only.
+- **Operations on an open descriptor are refused.** The model cannot tie `fsync`, `fdatasync`,
+  `fchmod` or `fchown` to a path grant, so it throws `ERR_ACCESS_DENIED` for them; since Node
+  24.22.0 that includes `FileHandle.sync()` and `.datasync()`. The DiskBackend opens every file
+  it writes with `O_DSYNC`, so each write reaches stable storage before it returns, and sets
+  modes at open.
 - **OpenSSL STORE loaders are a separate grant, and StashJS never takes it.** Node 24.21.0
   added `--allow-openssl-store`, which lets `crypto.createPrivateKey()` load a key from a URL.
   A loader may reach files, devices, tokens, or the network, and its access is not constrained

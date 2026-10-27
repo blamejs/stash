@@ -65,8 +65,9 @@ Two backends ship, per the spec's "no cloud backends" rule. **MemoryBackend** is
 Map-backed with no persistence and no pretense; it exists so tests and consumers
 can exercise the full contract without a filesystem. **DiskBackend** uses sidecar
 metadata files rather than a central index, so there is no index to corrupt and
-no lock contention, and it is crash-safe by construction. It writes through
-tmp-fsync-rename so a reader never sees a partial blob, enforces realpath
+no lock contention, and it is crash-safe by construction. It writes to a tmp file
+opened with `O_DSYNC` and renames it into place, so a reader never sees a partial
+blob. It enforces realpath
 containment that refuses planted symlinks, validates sidecars under a strict size
 bound, and uses `0700` and `0600` modes throughout.
 

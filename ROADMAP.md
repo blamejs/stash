@@ -346,6 +346,15 @@ carries. The import allowlist already refused both, because neither is one of th
 three `node:crypto` names `src/` may import. The forbidden-token check now names
 them too, so a commented-out sketch that names either one is refused as well.
 
+Node 24.22.0 also made the permission model refuse `FileHandle.sync()` and
+`.datasync()`. The disk backend called `sync()` after every blob, sidecar,
+tombstone and read debit, so on Node 24.22.0 and later every disk write under
+`--permission` failed with `ERR_ACCESS_DENIED`, `v2.2.0` included. The backend
+now opens those files with `O_DSYNC`, a path operation the write grant covers,
+and issues blob writes in 1 MiB units. Measured on Linux, per-chunk `O_DSYNC`
+at 64 KiB wrote about 33 MiB/s, while 1 MiB units wrote about 370 MiB/s, close
+to the `sha3-512` hash rate the push already runs at.
+
 ## Standing constraints
 
 Every release honors the one rule (no decrypt capability), zero dependencies,

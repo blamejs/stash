@@ -118,6 +118,11 @@ dependency loaded in it, so a compromised dependency cannot escape to the wider
 filesystem. Code sharing the process can still read the stash root, so run the
 store in its own process to isolate it from other in-process code.
 
+Use `v2.2.1` or later under `--permission`. On Node 24.22.0 and later the
+permission model refuses `FileHandle.sync()`, and the disk backend in `v2.2.0`
+and earlier calls it on every write, so every disk push fails with
+`ERR_ACCESS_DENIED`.
+
 ### Let the store own its directory
 
 The disk backend creates its layout `0700` and `0600` and enforces realpath

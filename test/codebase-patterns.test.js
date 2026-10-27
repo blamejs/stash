@@ -489,6 +489,7 @@ const VALID_ALLOW_CLASSES = {
   "prototype-key-confusion": 1,
   "sandbox-widening-import": 1,
   "permission-probe-branch": 1,
+  "descriptor-op-under-permission": 1,
   "error-event-emit": 1,
   "emit-outside-policy": 1,
   "capability-in-error-message": 1,
@@ -1421,6 +1422,23 @@ test("permission-probe-branch -- src/ never probes process.permission", () => {
   let bad = _scanLines(_srcFiles(), re, { prepare: _stripComments });
   bad = _filterMarkers(bad, "permission-probe-branch");
   _report("SPEC.md 2.1: no process.permission capability probe in src/", bad);
+});
+
+test("descriptor-op-under-permission -- src/ never calls an fd operation the sandbox refuses", () => {
+  // reason: an operation on an already-open descriptor cannot be tied to an
+  // --allow-fs-read / --allow-fs-write grant, so the permission model refuses
+  // it with ERR_ACCESS_DENIED whatever the grants are. Since Node 24.22.0 that
+  // includes FileHandle.sync() and .datasync() alongside fs.fsync /
+  // fs.fdatasync / fchmod / fchown, and every disk write that used one failed
+  // under --permission. Durability comes from opening with O_DSYNC, a path
+  // operation the grant covers; a mode is set at open, never by fchmod.
+  const re = /\.(?:sync|datasync|chmod|chown)\s*\(|\b(?:fsync|fdatasync|fchmod|fchown)(?:Sync)?\b/;
+  let bad = _scanLines(_srcFiles(), re, { prepare: _stripComments });
+  bad = _filterMarkers(bad, "descriptor-op-under-permission");
+  _report(
+    "SPEC.md 2.1: no descriptor-based fs operation the permission model refuses in src/",
+    bad,
+  );
 });
 
 // ---------------------------------------------------------------------------

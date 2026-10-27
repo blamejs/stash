@@ -204,7 +204,8 @@ leaves every existing store byte-identical.
 
 The disk backend (`@blamejs/stash/backends/disk`) keeps one blob and one JSON
 sidecar per entry, so there is no central index to corrupt. It writes atomically
-through tmp-fsync-rename, uses `0700` and `0600` modes, enforces realpath
+to a tmp file opened with `O_DSYNC` and then renames it into place, uses `0700`
+and `0600` modes, enforces realpath
 containment that refuses planted symlinks instead of following them, and
 validates sidecars under a strict size bound. Corruption is a typed
 `IntegrityError`, never silently bad bytes and never a silent skip.
