@@ -6,12 +6,20 @@
 #   1. Validates (version/tag match + the full ci.yml gate battery + SBOM)
 #   2. Packs the tarball (the exact bytes that will be published)
 #   3. Extracts release notes from the CHANGELOG.md entry for this version
-#   4. Creates the GitHub release ATOMICALLY with the asset bundle:
+#   4. Publishes to npm with --provenance attached.
+#   5. Creates the GitHub release ATOMICALLY with the asset bundle:
 #        - blamejs-stash-X.Y.Z.tgz  (+ .sha256 sidecar)
 #        - sbom.cdx.json
-#   5. Publishes to npm with --provenance attached.
+#
+# npm runs before the release, so a refused publish leaves no GitHub release
+# for a version the registry does not serve.
 #
 # Supply-chain posture:
+#   - npm authenticates through trusted publishing: the registry exchanges
+#     this job's GitHub OIDC token for a short-lived publish credential, so no
+#     npm token is stored in the repository. The trusted publisher on
+#     npmjs.com names repository blamejs/stash, workflow npm-publish.yml and
+#     environment npm-publish.
 #   - npm publish --provenance attaches a SLSA provenance attestation
 #     tying the published tarball to this workflow run + commit + tag.
 #   - Version match: package.json "version" MUST equal the pushed tag
@@ -259,7 +267,7 @@ jobs:
     environment: npm-publish
     permissions:
       contents: write    # gh release create + asset attach
-      id-token: write    # OIDC token for npm --provenance
+      id-token: write    # OIDC token for npm trusted publishing and --provenance
     timeout-minutes: 15
     steps:
       - name: Verify the built commit is the version's tagged commit
@@ -328,21 +336,6 @@ jobs:
           fi
           echo "[subject-verify] tarball + SBOM match the validated hashes"
 
-      - name: Verify NPM_TOKEN is reachable
-        # Fail loud + early if the NPM_TOKEN secret isn't visible to this
-        # workflow run. The publish step otherwise produces an opaque
-        # ENEEDAUTH after ~60s of npm registry churn.
-        env:
-          NPM_TOKEN_REACHABLE: ${{ secrets.NPM_TOKEN != '' }}
-        run: |
-          if [ "$NPM_TOKEN_REACHABLE" != "true" ]; then
-            echo "::error::NPM_TOKEN secret is empty in this workflow run."
-            echo "::error::Confirm a secret named NPM_TOKEN exists in the npm-publish environment"
-            echo "::error::and that the environment's deployment-branch policy includes this tag."
-            exit 1
-          fi
-          echo "NPM_TOKEN secret is reachable."
-
       - name: Release-digest sidecar (SHA-256)
         # Conventional checksum operators expect on a release page; verify
         # with `sha256sum -c`. Written in `<sha>  <filename>` format.
@@ -394,6 +387,47 @@ jobs:
           fi
           echo "[release-notes] extracted ${BYTE_COUNT} bytes for v${VERSION}"
 
+      - name: Publish to npm (with provenance)
+        # `npm publish <tarball>` publishes the EXACT bytes the validate
+        # job packed and hashed. Provenance is generated against this
+        # workflow run's context. The leading `./` is load-bearing --
+        # without it npm 10+ mis-classifies a relative path containing `/`
+        # as a git spec. No token is passed: npm authenticates with this
+        # job's OIDC token through the package's trusted publisher.
+        #
+        # A rerun after a publish that succeeded but a later step that
+        # failed finds the version already on the registry. The step then
+        # compares the registry's dist.integrity with the validated tarball:
+        # identical bytes skip the publish and let the release step run;
+        # different bytes, or a registry answer other than E404 for an
+        # unpublished version, fail the job.
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          TARBALL=$(find dist -maxdepth 1 -name '*.tgz' | head -1)
+          LOCAL="sha512-$(openssl dgst -sha512 -binary "$TARBALL" | base64 -w0)"
+          set +e
+          VIEW=$(npm view "@blamejs/stash@${VERSION}" dist.integrity --json 2>/dev/null)
+          VIEW_STATUS=$?
+          set -e
+          if [ "$VIEW_STATUS" -eq 0 ]; then
+            SERVED=$(printf '%s' "$VIEW" | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>process.stdout.write(String(JSON.parse(s))))')
+            if [ "$SERVED" = "$LOCAL" ]; then
+              echo "[npm-publish] @blamejs/stash@${VERSION} is already on the registry with these exact bytes; skipping publish"
+              exit 0
+            fi
+            echo "::error::@blamejs/stash@${VERSION} is on the registry with different bytes ($SERVED, validated tarball is $LOCAL)."
+            exit 1
+          fi
+          if ! printf '%s' "$VIEW" | grep -q '"code": "E404"'; then
+            echo "::error::Could not determine whether @blamejs/stash@${VERSION} is already published:"
+            printf '%s\n' "$VIEW"
+            exit 1
+          fi
+          echo "Publishing: $TARBALL"
+          npm publish "./${TARBALL}" --provenance --access public
+
       - name: Create release with ALL assets atomically
         # The workflow is authoritative for release creation. We refuse to
         # overwrite an existing release -- if one exists for this tag,
@@ -422,20 +456,6 @@ jobs:
             --title "$TAG" \
             --notes-file release-notes.md
           echo "[release-create] release $TAG created with full asset bundle"
-
-      - name: Publish to npm (with provenance)
-        # `npm publish <tarball>` publishes the EXACT bytes the validate
-        # job packed and hashed. Provenance is generated against this
-        # workflow run's context. The leading `./` is load-bearing --
-        # without it npm 10+ mis-classifies a relative path containing `/`
-        # as a git spec.
-        run: |
-          set -euo pipefail
-          TARBALL=$(find dist -maxdepth 1 -name '*.tgz' | head -1)
-          echo "Publishing: $TARBALL"
-          npm publish "./${TARBALL}" --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   summary:
     name: Build summary

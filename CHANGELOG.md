@@ -2,6 +2,26 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 2.2.2 — 2026-10-27
+
+`v2.2.1` was tagged and has a GitHub release, but it was never published to
+npm, because the registry refused the publish credential. This release
+carries the same library code as `v2.2.1` and publishes it. If you install
+from npm, upgrade from `v2.2.0` to `v2.2.2`; the `v2.2.1` notes and the
+`Upgrading to 2.2.1` section of MIGRATING.md apply unchanged.
+
+### Changed
+
+- The package is published with npm trusted publishing. The registry
+  exchanges the publish job's GitHub OIDC token for a short-lived credential,
+  so no npm token is stored in the repository. Provenance is attached as
+  before; check it on the package's npm page or with `npm audit signatures`.
+- The publish workflow publishes to npm before it creates the GitHub release,
+  so a refused publish no longer leaves a GitHub release for a version the
+  registry does not serve. A rerun after a successful publish compares the
+  registry's `dist.integrity` with the validated tarball and, when they
+  match, skips the publish and creates the release.
+
 ## 2.2.1 — 2026-10-27
 
 Node 24.22.0 made the permission model refuse `FileHandle.sync()`. The disk
