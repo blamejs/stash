@@ -54,6 +54,10 @@ const MAX_TOMBSTONE_BYTES = C.BYTES.KIB;
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 
+// A blob write is issued in units of this size. Each write is synchronous (O_DSYNC below),
+// so a source that yields small chunks would otherwise pay one device flush per chunk.
+const WRITE_STAGE_BYTES = C.BYTES.MIB;
+
 // Bound on remove()'s in-process exactly-once witness (#reaped). Far above any real
 // concurrent-reap window, so an evicted id's re-remove reads ENOENT.
 const REAP_MEMO = 4096;
@@ -64,9 +68,20 @@ const REAP_MEMO = 4096;
 // for a writerless FIFO parks an O_RDONLY open FOREVER before fstat can reject it. Both
 // are inert on regular files and 0 on Windows, which has no unprivileged FIFO.
 const READ_FLAGS = FS.O_RDONLY | (FS.O_NOFOLLOW || 0) | (FS.O_NONBLOCK || 0);
+// Every write reaches stable storage before it returns. O_DSYNC is set at open, a path
+// operation the permission model checks against the write grant; FileHandle.sync() acts
+// on a descriptor, which the permission model refuses outright (Node 24.22.0 and later).
+// Windows maps O_DSYNC to write-through. A platform without it fails loudly at import
+// rather than writing without durability.
+const DSYNC = FS.O_DSYNC;
+if (!Number.isInteger(DSYNC) || DSYNC === 0) {
+  throw new Error("DiskBackend requires O_DSYNC, which this platform does not provide");
+}
+// A tmp file: create, refuse an existing name, write-only, synchronous writes.
+const CREATE_FLAGS = FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | DSYNC;
 // Plus O_RDWR for the in-place sidecar rewrite, and deliberately NO O_CREAT: consumeRead
 // debits an EXISTING sidecar and must never recreate one a drop removed (SPEC 4.2).
-const WRITE_FLAGS = FS.O_RDWR | (FS.O_NOFOLLOW || 0) | (FS.O_NONBLOCK || 0);
+const WRITE_FLAGS = FS.O_RDWR | (FS.O_NOFOLLOW || 0) | (FS.O_NONBLOCK || 0) | DSYNC;
 
 // Windows lacks O_NOFOLLOW (0 above), so a post-open lstat cross-checks the name instead.
 // The descriptor is already bound, so that lstat can only REJECT, never redirect a read.
@@ -167,7 +182,7 @@ export async function verifyDescriptorAgainstName(openedStat, path, damaged) {
  * `blobs/<id>` + `meta/<id>.json`, plus the claims and tombstones directories
  * the pop cycle and replication use; directories are mode 0700, files 0600, and
  * there is no central index to corrupt (a listing is a readdir plus sidecar
- * reads). Writes stream to a `.tmp`, fsync, then rename, so a reader never sees
+ * reads). Writes stream to a `.tmp` opened with `O_DSYNC`, then rename, so a reader never sees
  * a partial blob and a crash leaves an invisible orphan, never a half-entry.
  * The constructor does no I/O; the layout appears on first use.
  *
@@ -272,16 +287,15 @@ export class DiskBackend {
     return fh;
   }
 
-  // Write bytes to <name>.tmp, fsync, rename into place. ANY failure after the handle
+  // Write bytes to <name>.tmp synchronously, rename into place. ANY failure after the handle
   // opens removes the tmp before rethrowing: a rejected write leaves no partial behind.
   async #writeAtomic(dir, name, bytes) {
     const tmpPath = join(dir, name + ".tmp");
     const finalPath = join(dir, name);
-    const fh = await open(tmpPath, "wx", FILE_MODE);
+    const fh = await open(tmpPath, CREATE_FLAGS, FILE_MODE);
     try {
       try {
         await _writeAll(fh, bytes, 0);
-        await fh.sync();
       } finally {
         await fh.close();
       }
@@ -293,8 +307,9 @@ export class DiskBackend {
     return finalPath;
   }
 
-  // Streams to blobs/<id>.tmp computing size and digest as chunks pass, fsyncs, renames
-  // into place, THEN writes the sidecar, so a crash leaves either nothing or an invisible
+  // Streams to blobs/<id>.tmp computing size and digest as chunks pass, copying them into a
+  // fixed staging buffer that is written synchronously each time it fills, renames into
+  // place, THEN writes the sidecar, so a crash leaves either nothing or an invisible
   // blob orphan, never a served half-entry; any rejection removes the tmp. Containment is
   // re-asserted immediately before the sidecar write, because the blob stream runs as long
   // as its source chooses and a check taken before it would vouch for meta/ across that
@@ -310,16 +325,32 @@ export class DiskBackend {
     const blobPath = join(blobDir, id);
     const hash = digestHash(algo);
     let size = 0;
-    const fh = await open(tmpPath, "wx", FILE_MODE);
+    const fh = await open(tmpPath, CREATE_FLAGS, FILE_MODE);
     try {
       try {
+        // The chunk is copied, not held: a source may reuse its buffer once it yields.
+        const stage = Buffer.alloc(WRITE_STAGE_BYTES);
+        let staged = 0;
         for await (const chunk of source) {
           const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           hash.update(buf);
-          await _writeAll(fh, buf, size);
-          size += buf.length;
+          let off = 0;
+          while (off < buf.length) {
+            const n = Math.min(buf.length - off, stage.length - staged);
+            buf.copy(stage, staged, off, off + n);
+            staged += n;
+            off += n;
+            if (staged === stage.length) {
+              await _writeAll(fh, stage, size);
+              size += staged;
+              staged = 0;
+            }
+          }
         }
-        await fh.sync();
+        if (staged > 0) {
+          await _writeAll(fh, stage.subarray(0, staged), size);
+          size += staged;
+        }
       } finally {
         await fh.close();
       }
@@ -849,11 +880,10 @@ export class DiskBackend {
     // The policy layer hands an exact { id, destroyedAt, cause }, so serialize it whole.
     const bytes = Buffer.from(JSON.stringify(tombstone), "utf8");
     const tmpPath = join(dir, _sidecarName(id) + "." + randomBytes(8).toString("hex") + ".tmp");
-    const fh = await open(tmpPath, "wx", FILE_MODE);
+    const fh = await open(tmpPath, CREATE_FLAGS, FILE_MODE);
     try {
       try {
         await _writeAll(fh, bytes, 0);
-        await fh.sync();
       } finally {
         await fh.close();
       }
@@ -1100,7 +1130,6 @@ export class DiskBackend {
       // fail-closed and loud, never silently bad. spend() owns the readsLeft arithmetic.
       await fh.truncate(0);
       await _writeAll(fh, bytes, 0);
-      await fh.sync();
       return next.readsLeft;
     } finally {
       await fh.close();

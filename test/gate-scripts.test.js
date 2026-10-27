@@ -35,6 +35,7 @@ import assert from "node:assert/strict";
 
 import { diffSnapshot, isClean } from "../scripts/check-api-snapshot.js";
 import { checkLockfile } from "../scripts/check-lockfile-sync.js";
+import { scanForbidden } from "../scripts/check-forbidden-tokens.js";
 import { WORLD_KEYS, makeWorld } from "../scripts/doc-example-world.js";
 import { loadNotes, render } from "../scripts/regen-changelog.js";
 import {
@@ -123,6 +124,38 @@ test("lockfile-sync: a dependency appearing in the lockfile is still caught", ()
   const [pkg, lock] = lockPair();
   lock.packages["node_modules/left-pad"] = { version: "1.3.0" };
   assert.ok(checkLockfile(pkg, lock).some((p) => /dependency entr/.test(p)));
+});
+
+// ---------------------------------------------------------------------------
+// check-forbidden-tokens -- key machinery is refused in src/
+// ---------------------------------------------------------------------------
+
+function forbiddenHits(lines) {
+  return scanForbidden(["fixture.js"], () => lines.join("\n"));
+}
+
+test("forbidden-tokens: the key-taking crypto APIs added in Node 24.22.0 are refused", () => {
+  // createMac(algorithm, key) takes a key directly, and parsePKCS12(bundle)
+  // returns the private keys a PKCS#12 bundle carries. Neither call needs the
+  // word "passphrase" to reach key material.
+  const lines = [
+    "const mac = crypto.createMac(algorithm, key);",
+    "const { key } = crypto.parsePKCS12(bundle);",
+    "// const keys = parsePKCS12(pfx);",
+  ];
+  assert.deepEqual(
+    forbiddenHits(lines).map((h) => h.line),
+    [1, 2, 3],
+  );
+});
+
+test("forbidden-tokens: the granted node:crypto calls are not refused", () => {
+  const lines = [
+    'const h = createHash("sha3-512");',
+    "const ref = randomBytes(32);",
+    "const same = timingSafeEqual(a, b);",
+  ];
+  assert.deepEqual(forbiddenHits(lines), []);
 });
 
 test("api-snapshot: identical surface and version is clean", () => {

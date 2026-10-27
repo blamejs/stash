@@ -29,6 +29,7 @@ import {
 import { open } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 
 import {
   Stash,
@@ -492,6 +493,70 @@ suite("disk: layout and atomicity", () => {
     const entry = await reopened.show(ref);
     assert.equal(entry.meta.kind, "note");
     assert.equal((await drain(await reopened.apply(ref))).toString("utf8"), "durable bytes");
+  });
+
+  // A blob is written in 1 MiB units. These lengths sit on each side of a unit, and the
+  // chunkings cover small chunks, odd chunks, and one chunk spanning several units.
+  const MIB = 1024 * 1024;
+  const STAGE_LENGTHS = [0, 1, MIB - 1, MIB, MIB + 1, 2 * MIB + 3];
+  function patterned(length) {
+    const buf = Buffer.alloc(length);
+    for (let i = 0; i < length; i++) buf[i] = (i * 31 + 7) & 0xff;
+    return buf;
+  }
+  function chunked(buf, size) {
+    const out = [];
+    for (let off = 0; off < buf.length; off += size) out.push(buf.subarray(off, off + size));
+    return out;
+  }
+
+  for (const length of STAGE_LENGTHS) {
+    for (const size of [4093, 65536, 3 * MIB]) {
+      test(`a ${length}-byte blob in ${size}-byte chunks lands byte-exact`, async () => {
+        const root = freshRoot();
+        const backend = new DiskBackend({ root });
+        const id = generate();
+        const bytes = patterned(length);
+        const stored = await backend.write(id, chunked(bytes, size), makeStoredEntry(id, bytes));
+        assert.equal(stored.size, length);
+        assert.equal(stored.digest, "sha256:" + createHash("sha256").update(bytes).digest("hex"));
+        assert.deepEqual(readFileSync(join(root, "blobs", id)), bytes);
+        assert.deepEqual(await drain(await backend.read(id)), bytes);
+      });
+    }
+  }
+
+  test("a source that reuses its buffer after each yield stores what it yielded", async () => {
+    // The backend copies a chunk before the next one is pulled; holding the reference
+    // would store the buffer's last contents in place of every earlier chunk.
+    const root = freshRoot();
+    const backend = new DiskBackend({ root });
+    const id = generate();
+    const rounds = 40;
+    const shared = Buffer.alloc(64 * 1024);
+    const expected = [];
+    async function* reusing() {
+      for (let r = 0; r < rounds; r++) {
+        shared.fill(r + 1);
+        expected.push(Buffer.from(shared));
+        yield shared;
+      }
+    }
+    const want = Buffer.concat(
+      Array.from({ length: rounds }, (_, r) => Buffer.alloc(64 * 1024, r + 1)),
+    );
+    const stored = await backend.write(id, reusing(), makeStoredEntry(id, want));
+    assert.equal(Buffer.concat(expected).equals(want), true);
+    assert.equal(stored.size, want.length);
+    assert.deepEqual(readFileSync(join(root, "blobs", id)), want);
+  });
+
+  test("a multi-unit push in small chunks round-trips through the store", async () => {
+    const { stash } = freshStash();
+    const bytes = patterned(2 * MIB + 3);
+    const ref = await stash.push(Readable.from(chunked(bytes, 4093)));
+    assert.equal((await stash.show(ref)).size, bytes.length);
+    assert.deepEqual(await drain(await stash.apply(ref)), bytes);
   });
 
   test("expiry policy binds across backend instances over the same root", async () => {

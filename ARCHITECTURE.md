@@ -65,8 +65,9 @@ Two backends ship, per the spec's "no cloud backends" rule. **MemoryBackend** is
 Map-backed with no persistence and no pretense; it exists so tests and consumers
 can exercise the full contract without a filesystem. **DiskBackend** uses sidecar
 metadata files rather than a central index, so there is no index to corrupt and
-no lock contention, and it is crash-safe by construction. It writes through
-tmp-fsync-rename so a reader never sees a partial blob, enforces realpath
+no lock contention, and it is crash-safe by construction. It writes to a tmp file
+opened with `O_DSYNC` and renames it into place, so a reader never sees a partial
+blob. It enforces realpath
 containment that refuses planted symlinks, validates sidecars under a strict size
 bound, and uses `0700` and `0600` modes throughout.
 
@@ -174,7 +175,7 @@ sockets regardless, which is the actual guarantee.
    method and nowhere for one to live, so the store cannot decrypt what it holds,
    by construction.
 3. **ESM, plain JavaScript, no build step.** What ships is what runs, on Node
-   24.21.0 as a floor.
+   24.22.1 as a floor.
 4. **Streaming-first.** No method buffers an entire blob; limits are enforced
    mid-stream, and a rejected write cleans up its partial.
 5. **Fail loud.** When full, `push` throws `StashFull`. There is no eviction,

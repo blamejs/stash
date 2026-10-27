@@ -23,7 +23,22 @@ met it, it is named here rather than left for you to discover.
 |---------|------------------|-----|
 | `v2.0.0` | No deprecation minor preceded it. | Both changes are error-reporting corrections on paths that were already wrong. One reported a verb the caller never invoked; the other left a documented contract unenforced. A deprecation minor would have had to warn on a code path most callers never reach, and the recipe below is two mechanical edits. See [Upgrading to 2.0](#upgrading-to-20). |
 | `v2.2.0` | The `v2.x` Node minimum moved mid-window, from 24.19.0 to 24.21.0. | [LTS-CALENDAR.md](LTS-CALENDAR.md#node-minimum-policy) freezes a major's Node minimum for its security-patch window, and this release moved it inside that window. It ships by maintainer decision, on the grounds that nothing in the library's own surface changed: same verbs, same options, same error codes, same on-disk layout, and Node itself never reads `engines`, so an application already running on 24.19.0 keeps working until it reinstalls. The cost falls at install time and is real: `npm` warns and proceeds, while Yarn 1 and any `engine-strict` setting refuse. See [Upgrading to 2.2](#upgrading-to-22). |
+| `v2.2.1` | The `v2.x` Node minimum moved mid-window a second time, from 24.21.0 to 24.22.1, in a patch release. | The same commitment as the `v2.2.0` row, not met for the same reason: 24.22.1 is a security release of the Node 24 line, and nothing in the library's own surface changed. A floor move that changes install-time behavior ships here as a patch by maintainer decision, so a version range such as `~2.2.0` picks it up without opting in. See [Upgrading to 2.2.1](#upgrading-to-221). |
 | `v2.1.0` | A consumer-visible change shipped as a minor rather than a major. | The default `digest` changed from `sha256` to `sha3-512`, so entries written by `v2.1` carry a different digest string from entries written by `v2.0`. Under the commitment above that is a major. It ships as a minor by maintainer decision, on the grounds that the store was built for mixed algorithms: stored digests are self-describing, existing entries keep verifying under the algorithm they were written with, replication reconciles on byte identity rather than the digest string, and no signature, option, error code, or on-disk layout changed. Anything comparing digest strings across versions is affected. See [Upgrading to 2.1](#upgrading-to-21). |
+
+## Upgrading to 2.2.1
+
+The Node floor moved from 24.21.0 to 24.22.1. Nothing else changed: same verbs,
+same options, same error codes, same on-disk layout. There is no migration step
+and no data to convert.
+
+**If you are already on Node 24.22.1 or newer, there is nothing to do.**
+
+If you are on 24.21.0 or 24.22.0, upgrade Node. Until you do, each package
+manager behaves as the table under [Upgrading to 2.2](#upgrading-to-22) shows:
+`npm` and `pnpm` warn and install by default, while Yarn 1 and any
+`engine-strict` setting refuse. A process already running on 24.21.0 is
+unaffected until it reinstalls, because Node does not read `engines` at runtime.
 
 ## Upgrading to 2.2
 

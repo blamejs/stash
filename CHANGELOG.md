@@ -2,6 +2,53 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 2.2.1 — 2026-10-27
+
+Node 24.22.0 made the permission model refuse `FileHandle.sync()`. The disk
+backend called it after every blob, sidecar, tombstone and read debit, so
+with `v2.2.0` on Node 24.22.0 or later every disk write under `--permission`
+failed with `ERR_ACCESS_DENIED`. The backend now opens those files with
+`O_DSYNC`, which the write grant covers, so each write still reaches stable
+storage before it returns. If you run the disk backend under `--permission`,
+upgrade. The package now requires Node 24.22.1, the current security release
+of the Node 24 line. On Node 24.21.0 or 24.22.0, `npm` warns and installs
+while Yarn 1 and any `engine-strict` setting refuse, so upgrade Node. The
+move lands inside the window the LTS calendar freezes a major's Node minimum
+for, and it ships as a patch; both are recorded in MIGRATING.md under
+"Exceptions taken". No verb, option, error code or on-disk layout changed.
+
+### Changed
+
+- The Node floor moves from 24.21.0 to **24.22.1**, and `.node-version`,
+  `.nvmrc`, the CI runtime, the fuzzing and publish workflows, the release
+  container and the local CI-runtime container move with it. It remains a
+  floor and not a ceiling: any newer 24.x, and later majors per the LTS
+  calendar, are supported. Nothing the store does depends on a capability
+  that first shipped in 24.22. On Node 24.21.0 or 24.22.0, upgrade Node;
+  nothing else changes.
+- The disk backend writes a blob in 1 MiB units. Each write is synchronous,
+  and a source that yields small chunks would otherwise wait on one device
+  flush per chunk: on Linux, 64 KiB synchronous writes measured about 33
+  MiB/s and 1 MiB writes about 370 MiB/s. Each chunk is copied into the unit
+  before the next is read, so a source that reuses its buffer after yielding
+  stores what it yielded.
+
+### Fixed
+
+- The disk backend no longer calls `FileHandle.sync()`, which the permission
+  model refuses on Node 24.22.0 and later. Every file it writes (blob,
+  sidecar, tombstone, and the in-place read debit) is opened with `O_DSYNC`
+  instead, so a write is durable when it returns. A pattern check refuses any
+  descriptor-based `sync`, `datasync`, `fsync`, `fdatasync`, `fchmod` or
+  `fchown` call in `src/`.
+- The forbidden-token check refuses `createMac` and `parsePKCS12` in `src/`.
+  Node 24.22.0 added both: `createMac(algorithm, key)` takes a key directly,
+  and `parsePKCS12(bundle)` returns the private keys a PKCS#12 bundle
+  carries. The import allowlist already refused importing either one, since
+  neither is among the three `node:crypto` names `src/` may import, but the
+  token check is the layer that also reads comments, and it did not name
+  them.
+
 ## 2.2.0 — 2026-09-10
 
 Node 24.21.0 added `crypto.createPrivateKey()` backed by an OpenSSL STORE

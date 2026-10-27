@@ -19,7 +19,7 @@
  *   Two implementations ship. The memory backend is Map-backed, for tests and
  *   process-lifetime stashes. The disk backend is sidecar-file storage: one
  *   blob and one JSON sidecar per entry, no central index to corrupt, atomic
- *   tmp-fsync-rename writes, 0700/0600 modes, and realpath containment that
+ *   tmp-write-rename writes opened with O_DSYNC, 0700/0600 modes, and realpath containment that
  *   refuses a planted symlink instead of following it.
  *
  * @card

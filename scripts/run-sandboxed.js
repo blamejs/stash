@@ -17,8 +17,8 @@
 // gate the network under --permission; the invariant here is that the
 // LIBRARY never needs a grant beyond its storage root.
 //
-// The grant list below is the whole list. --allow-openssl-store (Node
-// 24.21.0) is absent and therefore denied: it would let createPrivateKey()
+// The grant list below is the whole list. --allow-openssl-store (added in
+// Node 24.21.0) is absent and therefore denied: it would let createPrivateKey()
 // load a key from a URL, reaching files, devices, tokens, or the network
 // outside the fs.read and fs.write scopes above. SPEC.md 1 says the store
 // holds no key, so the suite proves it cannot reach one either.
