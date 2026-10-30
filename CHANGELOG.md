@@ -2,6 +2,41 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 2.2.4 — 2026-10-30
+
+`engines.node` is now `>=24.22.1 <25 || >=26.12.1`. Node 24.22.1 and 26.12.1
+fix CVE-2026-111497, an out-of-bounds write in the Brotli decoder Node
+bundles. The previous range, `>=24.22.1`, also admitted Node 25 and every
+Node 26 release before 26.12.1, none of which carry the fix. The Node 24
+minimum is unchanged. On Node 25, or on Node 26 before 26.12.1, `npm` warns
+and installs while Yarn 1 and any `engine-strict` setting refuse, so upgrade
+Node. The narrowing lands inside the window the LTS calendar freezes a
+major's Node minimum for, and it ships as a patch; both are recorded in
+MIGRATING.md under "Exceptions taken". No verb, option, error code or on-disk
+layout changed.
+
+### Added
+
+- `scripts/check-node-pins.js` checks every Node version pinned in the
+  repository against `engines.node`: `.node-version`, `.nvmrc`, the CI,
+  fuzzing, publish and release-container workflows, and
+  `docker-compose.test.yml`. It also requires `examples/wiki/package.json` to
+  declare the same range. It runs in `npm run gates` and `npm run smoke`. In
+  CI, `--image` also runs the docs-site base image with `--version` and
+  checks the result, since that image is pinned by digest.
+
+### Changed
+
+- `engines.node` is `>=24.22.1 <25 || >=26.12.1`, in `package.json` and in
+  `examples/wiki/package.json`.
+
+### Security
+
+- The docs-site container (`examples/wiki/Dockerfile`) pins a base image that
+  runs Node 26.12.1. The previous pin ran Node 26.5.0, and a build of the
+  Dockerfile with no build-args used it. If you deploy the docs site from
+  that Dockerfile, rebuild it.
+
 ## 2.2.3 — 2026-10-27
 
 `v2.2.1` and `v2.2.2` were tagged but never published to npm, because the

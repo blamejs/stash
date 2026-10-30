@@ -32,7 +32,7 @@ else. Stop and ask.
 
 ## 2. Runtime and non-negotiable constraints
 
-- **Node 24.22.1.** `"engines": { "node": ">=24.22.1" }`, with a `.node-version` / `.nvmrc` of
+- **Node 24.22.1.** `"engines": { "node": ">=24.22.1 <25 || >=26.12.1" }`, with a `.node-version` / `.nvmrc` of
   `24.22.1`. Treat this as a floor to build against: no polyfills, no compatibility shims, no
   `if (nodeVersion < x)` branches for older runtimes. The capabilities the store depends on all
   arrived at the Node 24 *major* level, not in the `.22.1` patch: the stable permission model
@@ -42,7 +42,9 @@ else. Stop and ask.
   security-currency floor. 24.22.1 is a security release of the Node 24 line, and the floor
   keeps consumers on it rather than on an earlier 24.x carrying since-fixed defects; it is not
   a dependency on anything that first shipped in that release. It is a floor, not a ceiling: any newer 24.x, and later majors per
-  the [LTS calendar](LTS-CALENDAR.md), are supported.
+  the [LTS calendar](LTS-CALENDAR.md), are supported. On a later release line the floor is that
+  line's release carrying the same security fixes: 26.12.1 on Node 26. Node 25 has no such
+  release and is excluded.
 - **Zero dependencies**, runtime and dev. Node builtins only; tests use `node:test` and
   `node:assert`. If something can't be done without adding a package, stop and ask.
 - **ESM only.** `"type": "module"`, plain JavaScript. No TypeScript, no build step, no

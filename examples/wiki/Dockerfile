@@ -17,9 +17,14 @@
 # and supply-chain provenance. release-container.yml resolves the rolling
 # `:latest` tag to a FRESH digest at build time and passes it via the
 # BASE_RUNTIME build-arg (so the scanned image == the published one and
-# always carries current CVE patches); a plain local `docker build` uses
-# the pinned default below. Dependabot's docker updater bumps the pin.
-ARG BASE_RUNTIME=cgr.dev/chainguard/node:latest@sha256:0836196ff6d65a19e1dc68abaa84d4eddc2cd69d9daacbbed750d4b2fb0c2dbb
+# always carries current CVE patches). A `docker build` with no build-args,
+# including a deploy platform building from this file, uses the pinned
+# default below, and the Node it runs is whatever that digest carries.
+# Dependabot does not update a digest in an ARG default, so the pin moves
+# only when edited here. CI runs `node scripts/check-node-pins.js --image`,
+# which fails when the pinned image's Node does not satisfy `engines.node`.
+# To move it: docker buildx imagetools inspect cgr.dev/chainguard/node:latest
+ARG BASE_RUNTIME=cgr.dev/chainguard/node:latest@sha256:6cb70d6b2a324e491263949ea9f58938ed19031ef478e0bdb0b1810f96f8b400
 
 FROM ${BASE_RUNTIME} AS runtime
 

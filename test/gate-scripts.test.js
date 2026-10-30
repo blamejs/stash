@@ -35,6 +35,14 @@ import assert from "node:assert/strict";
 
 import { diffSnapshot, isClean } from "../scripts/check-api-snapshot.js";
 import { checkLockfile } from "../scripts/check-lockfile-sync.js";
+import {
+  SOURCES,
+  checkPins,
+  findPins,
+  parseRange,
+  satisfies,
+  wikiBaseImage,
+} from "../scripts/check-node-pins.js";
 import { scanForbidden } from "../scripts/check-forbidden-tokens.js";
 import { WORLD_KEYS, makeWorld } from "../scripts/doc-example-world.js";
 import { loadNotes, render } from "../scripts/regen-changelog.js";
@@ -124,6 +132,77 @@ test("lockfile-sync: a dependency appearing in the lockfile is still caught", ()
   const [pkg, lock] = lockPair();
   lock.packages["node_modules/left-pad"] = { version: "1.3.0" };
   assert.ok(checkLockfile(pkg, lock).some((p) => /dependency entr/.test(p)));
+});
+
+// ---------------------------------------------------------------------------
+// check-node-pins: every pinned Node runtime satisfies engines.node
+// ---------------------------------------------------------------------------
+
+const ENGINES = ">=24.22.1 <25 || >=26.12.1";
+
+test("node-pins: the per-line range admits patched releases and refuses the rest", () => {
+  for (const v of ["24.22.1", "v24.23.0", "26.12.1", "26.13.0", "27.0.0"]) {
+    assert.equal(satisfies(v, ENGINES), true, v);
+  }
+  // 26.5.0 satisfies a bare `>=24.22.1` floor while lacking the 26.12.1 fix.
+  for (const v of ["24.22.0", "25.0.0", "25.9.9", "26.5.0", "26.12.0"]) {
+    assert.equal(satisfies(v, ENGINES), false, v);
+  }
+  assert.equal(satisfies("26.5.0", ">=24.22.1"), true);
+});
+
+test("node-pins: a range the gate cannot read throws instead of passing", () => {
+  for (const range of ["", "^24.22.1", "~24", ">=24.x", ">25", "<=25", "24", undefined]) {
+    assert.throws(() => parseRange(range), TypeError, String(range));
+  }
+});
+
+test("node-pins: the pattern for every tracked file still finds its pin", () => {
+  // A pattern that matches nothing makes the gate report "no pin found";
+  // this pins each pattern to the line shape it is meant to read.
+  const samples = {
+    ".node-version": "24.22.1\n",
+    ".nvmrc": "24.22.1\r\n",
+    ".github/workflows/ci.yml": '        node: ["24.22.1"]\n',
+    ".github/workflows/fuzz.yml": '          node-version: "24.22.1"\n',
+    ".github/workflows/npm-publish.yml": "          node-version: '24.22.1'\n",
+    ".github/workflows/release-container.yml":
+      "    container: node:24.22.1-alpine@sha256:" + "0".repeat(64) + "\n",
+    "docker-compose.test.yml": "    image: node:24.22.1-alpine\n",
+  };
+  assert.deepEqual(Object.keys(samples).sort(), SOURCES.map((s) => s.file).sort());
+  for (const { file, pattern } of SOURCES) {
+    assert.deepEqual(findPins(samples[file], pattern), ["24.22.1"], file);
+  }
+});
+
+test("node-pins: a pin left behind a raised floor, a lost pin and a drifted wiki range fail", () => {
+  const clean = { engines: ENGINES, wikiEngines: ENGINES };
+  assert.deepEqual(checkPins({ ...clean, sources: [{ file: "a", versions: ["24.22.1"] }] }), []);
+
+  const behind = checkPins({ ...clean, sources: [{ file: ".nvmrc", versions: ["24.21.0"] }] });
+  assert.equal(behind.length, 1);
+  assert.match(behind[0], /\.nvmrc: Node 24\.21\.0 does not satisfy/);
+
+  const image = checkPins({ ...clean, sources: [{ file: "image", versions: ["v26.5.0"] }] });
+  assert.equal(image.length, 1);
+  assert.match(image[0], /v26\.5\.0/);
+
+  const lost = checkPins({ ...clean, sources: [{ file: "ci.yml", versions: [] }] });
+  assert.deepEqual(lost, ["ci.yml: no Node version pin found"]);
+
+  const drift = checkPins({ engines: ENGINES, wikiEngines: ">=24.22.1", sources: [] });
+  assert.equal(drift.length, 1);
+  assert.match(drift[0], /examples\/wiki\/package\.json engines\.node/);
+});
+
+test("node-pins: the wiki base image must be digest-pinned", () => {
+  const digest = "a".repeat(64);
+  assert.equal(
+    wikiBaseImage(`# x\nARG BASE_RUNTIME=cgr.dev/chainguard/node:latest@sha256:${digest}\r\n`),
+    `cgr.dev/chainguard/node:latest@sha256:${digest}`,
+  );
+  assert.throws(() => wikiBaseImage("ARG BASE_RUNTIME=cgr.dev/chainguard/node:latest\n"), TypeError);
 });
 
 // ---------------------------------------------------------------------------

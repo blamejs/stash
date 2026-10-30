@@ -8,7 +8,7 @@ Feature backports are not promised.
 |------------------|---------------|----------------------------|--------------|--------------------|
 | `v0.x` (pre-1.0) | 2026          | superseded by v1.0 (2026-07-23) | 24.18.0 | Zero dependencies, runtime and dev |
 | `v1.x`           | 2026-07-23    | **not serviced**; superseded by v2.0 (2026-08-07), upgrade to `v2.x` | 24.18.0 | Zero dependencies, runtime and dev |
-| `v2.x`           | 2026-08-07    | current major; 24 months after v3.0 ships | 24.22.1 (24.21.0 before `v2.2.1`, 24.19.0 before `v2.2.0`) | Zero dependencies, runtime and dev |
+| `v2.x`           | 2026-08-07    | current major; 24 months after v3.0 ships | 24.22.1 on 24.x, 26.12.1 on 26.x, 25.x excluded (since `v2.2.4`; 24.22.1 and later before it, 24.21.0 before `v2.2.1`, 24.19.0 before `v2.2.0`) | Zero dependencies, runtime and dev |
 
 > **`v1.x` is not receiving security patches.** `v1.0` shipped on 2026-07-23
 > stating that a 24-month window would open when its successor shipped. `v2.0`
@@ -65,6 +65,13 @@ the supported Node version is exactly the version the source runs on.
 > window.** If you are on any Node from 24.21.0 through 24.22.0, the same
 > install-time behavior applies and upgrading Node is the only step. This move
 > is also recorded under "Exceptions taken".
+>
+> **`v2.2.4` narrowed the range on later release lines.** 24.22.1 is unchanged
+> as the Node 24 minimum. On Node 26 the minimum is now 26.12.1, the release
+> carrying the same security fixes as 24.22.1, and Node 25 is excluded. If you
+> are on Node 25 or on Node 26 before 26.12.1, the same install-time behavior
+> applies and upgrading Node is the only step. This move is also recorded under
+> "Exceptions taken".
 
 ## The v0.x line
 

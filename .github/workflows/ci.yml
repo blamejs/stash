@@ -82,6 +82,12 @@ jobs:
           node scripts/check-lockfile-sync.js
           npm ci --dry-run --ignore-scripts --no-audit --no-fund
 
+      - name: Node pins (every pinned runtime, wiki base image included, satisfies engines)
+        # The wiki base image is pinned by digest, so its Node version is read
+        # by running it. A deploy that builds the Dockerfile with no build-args
+        # runs that exact image.
+        run: node scripts/check-node-pins.js --image
+
       - name: Suite
         # --expose-gc: the guard-reclamation-on-GC vector forces a collection to prove a
         # dropped Stash's stale claim guard is reaped.
