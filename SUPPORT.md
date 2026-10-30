@@ -20,8 +20,9 @@ A tight report gets a fast answer. Please include:
 
 - The version you are on. `npm ls @blamejs/stash` prints it; if you are testing
   against `main`, give the `<sha>` instead.
-- Your Node.js version (`node -v`). The library targets Node 24.22.1 and newer,
-  and runs on the shipped runtime with no build step.
+- Your Node.js version (`node -v`). The library targets Node 24.22.1 or a later
+  24.x, or Node 26.12.1 or later, and runs on the shipped runtime with no build
+  step.
 - A **minimal reproducer**, ideally a short script against the `MemoryBackend`,
   which needs no filesystem setup. If the behavior is specific to the disk
   backend or to the permission model, say so and include the flags you launched

@@ -72,7 +72,9 @@ await stash.drop(ref);                     // gone
 npm install @blamejs/stash
 ```
 
-Requires Node `>= 24.22.1`.
+Requires Node 24.22.1 or a later 24.x, or Node 26.12.1 or later
+(`engines.node` is `>=24.22.1 <25 || >=26.12.1`). Node 25 and Node 26 before
+26.12.1 are outside the range.
 
 The package is authored in ESM (`import`), but a CommonJS project can consume it
 with `require` on that Node floor, with no build step and no shim. The package

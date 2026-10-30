@@ -355,6 +355,15 @@ and issues blob writes in 1 MiB units. Measured on Linux, per-chunk `O_DSYNC`
 at 64 KiB wrote about 33 MiB/s, while 1 MiB units wrote about 370 MiB/s, close
 to the `sha3-512` hash rate the push already runs at.
 
+## v2.2.4. SHIPPED (2.2.4)
+
+`engines.node` is now `>=24.22.1 <25 || >=26.12.1`. The previous `>=24.22.1`
+admitted Node 26 releases before 26.12.1, which lack the security fixes 24.22.1
+carries. The docs-site container's base image moves from Node 26.5.0 to
+26.12.1. A new gate, `scripts/check-node-pins.js`, checks every Node runtime
+pinned in the tree against `engines.node`; in CI it also runs the docs-site base
+image to read its Node version.
+
 ## Standing constraints
 
 Every release honors the one rule (no decrypt capability), zero dependencies,
