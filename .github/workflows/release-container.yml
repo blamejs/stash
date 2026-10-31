@@ -57,14 +57,17 @@ jobs:
     # hosted runners are amd64, so the amd64 child manifest is the one to pin.
     container: node:24.22.1-alpine@sha256:1200d815de24f8dcca745fbf7651d166034a35adbcad8860a8538ffff44f1420
     steps:
+      # git must be on PATH before checkout. Without it, actions/checkout
+      # downloads a tarball with no .git directory, and the pack gate's
+      # `git ls-files` fails with "not a git repository".
+      - name: Install git
+        run: apk add --no-cache git
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Mark the checkout safe for git (container runs as a different uid)
-        run: |
-          apk add --no-cache git >/dev/null
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Run the full smoke pipeline (zero dependencies, plain node)
         run: npm run smoke
       - name: Run the wiki e2e (the site this image serves)

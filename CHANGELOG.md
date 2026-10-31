@@ -2,6 +2,22 @@
 
 All notable changes to `@blamejs/stash` are documented here, newest first.
 
+## 2.2.5 — 2026-10-30
+
+No release from `v2.2.0` through `v2.2.4` published
+`ghcr.io/blamejs/stash-wiki`, because the release-container workflow failed
+before the build. This release publishes the image again, on the Node 26.12.1
+base `v2.2.4` pinned. The library code is identical to `v2.2.4`, so an npm
+install does not need to move to `v2.2.5`. If you deploy the docs site with
+`examples/wiki/docker-compose.prod.yml`, it now pulls `stash-wiki:2.2.5`.
+
+### Fixed
+
+- The release-container workflow installs git before it checks out the
+  repository. The suite job runs in `node:24.22.1-alpine`, which has no git,
+  so the checkout had no `.git` directory and the pack gate's `git ls-files`
+  failed. The build, scan and publish jobs never ran.
+
 ## 2.2.4 — 2026-10-30
 
 `engines.node` is now `>=24.22.1 <25 || >=26.12.1`. Node 24.22.1 and 26.12.1
