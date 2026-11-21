@@ -32,19 +32,16 @@ else. Stop and ask.
 
 ## 2. Runtime and non-negotiable constraints
 
-- **Node 24.22.1.** `"engines": { "node": ">=24.22.1 <25 || >=26.12.1" }`, with a `.node-version` / `.nvmrc` of
-  `24.22.1`. Treat this as a floor to build against: no polyfills, no compatibility shims, no
+- **Node 26.13.1.** `"engines": { "node": ">=26.13.1" }`, with a `.node-version` / `.nvmrc` of
+  `26.13.1`. Treat this as a floor to build against: no polyfills, no compatibility shims, no
   `if (nodeVersion < x)` branches for older runtimes. The capabilities the store depends on all
-  arrived at the Node 24 *major* level, not in the `.22.1` patch: the stable permission model
+  arrived at the Node 24 *major* level, not in a later patch: the stable permission model
   (`--permission`, §2.1), V8 13.6 explicit resource management behind `Symbol.asyncDispose`
   (§7.1), and `require(esm)` of the package's synchronous ESM graph (a CommonJS project can
-  `require` it with no build step). The specific `.22.1` patch is a conservative
-  security-currency floor. 24.22.1 is a security release of the Node 24 line, and the floor
-  keeps consumers on it rather than on an earlier 24.x carrying since-fixed defects; it is not
-  a dependency on anything that first shipped in that release. It is a floor, not a ceiling: any newer 24.x, and later majors per
-  the [LTS calendar](LTS-CALENDAR.md), are supported. On a later release line the floor is that
-  line's release carrying the same security fixes: 26.12.1 on Node 26. Node 25 has no such
-  release and is excluded.
+  `require` it with no build step). The specific 26.13.1 release is the supported floor; the
+  library does not depend on anything that first shipped in it. It is a floor, not a ceiling:
+  any newer 26.x, and later majors per the [LTS calendar](LTS-CALENDAR.md), are supported.
+  Node 24 and Node 25 are not supported.
 - **Zero dependencies**, runtime and dev. Node builtins only; tests use `node:test` and
   `node:assert`. If something can't be done without adding a package, stop and ask.
 - **ESM only.** `"type": "module"`, plain JavaScript. No TypeScript, no build step, no
@@ -54,7 +51,7 @@ else. Stop and ask.
 
 ### 2.1 Permission model posture
 
-The Node permission model went stable in 23.5, so on 24.22.1 the flag is `--permission`, not
+The Node permission model went stable in 23.5, so on 26.13.1 the flag is `--permission`, not
 `--experimental-permission`. StashJS should run cleanly under:
 
 ```
@@ -581,6 +578,13 @@ holds the bytes.
 }
 ```
 
+`remove(id)` on a claimed id MUST destroy the entry. A later `commit(id)` by the claim holder
+MUST then either resolve, deleting whatever the backend still holds for the claim, or throw
+`RefNotFound`. A drop or clear that lands inside a live claim does not fail the read: the
+destroyer writes the grave and emits the one lifecycle event, and the claim's terminal step
+only commits, without a second event, grave, debit, or restore. Expiry never reaps an entry a
+live in-process claim holds; the claim resolves it.
+
 ### 9.1 The interface is a stable contract
 
 This method set is a public extension point, not an internal detail. Any object implementing it
@@ -607,8 +611,10 @@ backends in one run yields two distinguishable suites rather than two identical 
 
 It imports no test runner; the caller wires their own (`node:test` or otherwise). A third-party
 backend therefore proves interchangeability by running the identical cases, not by reading prose.
-The bundled conformance core covers round-trip fidelity across every source type, identity,
-expiry, limits, claim atomicity, read budgets, and tombstone first-write-wins; the fault-injection
+The bundled conformance core covers round-trip fidelity across every source type and for a
+payload over 4 MiB, identity, expiry, limits, `stats()` byte accounting and the `maxTotal` bound
+it feeds, claim atomicity, read budgets, the `verify()` and `reconcilable()` reports, tombstone
+first-write-wins, and grave pruning past `tombstoneTtl` through `removeTombstone`; the fault-injection
 cases (planted corruption, crash recovery) that need to reach into a backend's storage remain in
 the in-tree suite, since the portable contract exposes no storage-injection hook.
 

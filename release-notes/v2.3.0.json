@@ -1,0 +1,19 @@
+{
+  "version": "2.3.0",
+  "date": "2026-11-20",
+  "headline": "Node 26.13.1 is the new minimum, a read whose entry is dropped or expires mid-drain completes with one event, and the disk backend's maxTotal counts partial writes.",
+  "summary": "`engines.node` is now `>=26.13.1`, so Node 24 and Node 26 releases before 26.13.1 are out of range. Moving the floor inside the `v2.x` window is recorded in MIGRATING.md under \"Exceptions taken\". No verb, option, error class or error code changed. If you run on Node 24, upgrade Node before you upgrade to `v2.3`; see MIGRATING.md, \"Upgrading to 2.3\". If you publish a third-party backend, run `runBackendConformance` again: it now covers large payloads, byte accounting, `verify()`, `reconcilable()` and grave pruning, so a backend that passed before can fail.",
+  "sections": {
+    "Changed": [
+      "The supported Node range is `>=26.13.1`. CI, the fuzz and publish workflows, the release container and the docs-site image run Node 26.13.1.",
+      "`runBackendConformance` adds five cases: a payload over 4 MiB checked by position, length and digest; `stats().bytes` accounting and the `maxTotal` bound it feeds; `verify()` and `reconcilable()` over every live entry; grave removal by `prune()` past `tombstoneTtl`; and `remove()` returning false after a claim commits.",
+      "SPEC.md 9 states that `remove(id)` on a claimed id must destroy the entry, and that a later `commit(id)` for that claim must resolve or throw `RefNotFound`."
+    ],
+    "Fixed": [
+      "A `pop` or budgeted `apply` that drained every byte with a matching digest rejected with `ENOREF` when expiry reaped the entry during the read (through `has`, `show`, `prune`, the sweep timer or a capacity check). Expiry now leaves an entry alone while an in-process claim holds it, and the read completes with one lifecycle event (#84).",
+      "A `drop()` or `clear()` inside a live `pop` or budgeted `apply` claim failed the read with `ENOREF` on the memory backend, while on the disk backend the read completed and both `'dropped'` and `'popped'` were emitted for one entry. Both backends now complete the read, the destroyer writes the one grave and emits the one event, and the disk backend removes the claimed bytes when the read ends instead of after `claimTimeout` (#86).",
+      "The disk backend's `stats().bytes` skipped `*.tmp` files, so partial files left by an interrupted write never counted against `maxTotal` and a store could hold several times its ceiling. Temporary files in `meta/`, `blobs/` and `claims/` now count until `verify({ repair: true })` removes them (#87).",
+      "`runBackendConformance` certified backends that truncated large values, reported `bytes: 0`, returned a hollow `verify()` report, listed nothing from `listReconcilable()`, or reported a grave removed without removing it (#85)."
+    ]
+  }
+}

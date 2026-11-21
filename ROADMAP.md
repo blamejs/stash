@@ -364,6 +364,19 @@ carries. The docs-site container's base image moves from Node 26.5.0 to
 pinned in the tree against `engines.node`; in CI it also runs the docs-site base
 image to read its Node version.
 
+## v2.3.0. SHIPPED (2.3.0)
+
+`engines.node` is now `>=26.13.1`, and Node 24 is out of range. The floor moves
+inside the `v2.x` window in a minor release; the deviation is recorded in
+`MIGRATING.md` under "Exceptions taken".
+
+A `pop` or budgeted `apply` whose entry is dropped, cleared or reaped by expiry
+during the read now completes on both backends with exactly one lifecycle event.
+Expiry leaves an entry alone while an in-process claim holds it. The disk
+backend counts `*.tmp` files in `stats().bytes`, so `maxTotal` bounds partial
+writes. `runBackendConformance` gains cases for large payloads, byte
+accounting, `verify()`, `reconcilable()` and grave pruning.
+
 ## Standing constraints
 
 Every release honors the one rule (no decrypt capability), zero dependencies,

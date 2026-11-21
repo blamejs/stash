@@ -24,7 +24,7 @@
 # only when edited here. CI runs `node scripts/check-node-pins.js --image`,
 # which fails when the pinned image's Node does not satisfy `engines.node`.
 # To move it: docker buildx imagetools inspect cgr.dev/chainguard/node:latest
-ARG BASE_RUNTIME=cgr.dev/chainguard/node:latest@sha256:6cb70d6b2a324e491263949ea9f58938ed19031ef478e0bdb0b1810f96f8b400
+ARG BASE_RUNTIME=cgr.dev/chainguard/node:latest@sha256:3fb5318a58807dec0f2ece547efbe8d62c67b7b2fd91a16795b98651d6385dbe
 
 FROM ${BASE_RUNTIME} AS runtime
 

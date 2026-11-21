@@ -8,7 +8,7 @@ Feature backports are not promised.
 |------------------|---------------|----------------------------|--------------|--------------------|
 | `v0.x` (pre-1.0) | 2026          | superseded by v1.0 (2026-07-23) | 24.18.0 | Zero dependencies, runtime and dev |
 | `v1.x`           | 2026-07-23    | **not serviced**; superseded by v2.0 (2026-08-07), upgrade to `v2.x` | 24.18.0 | Zero dependencies, runtime and dev |
-| `v2.x`           | 2026-08-07    | current major; 24 months after v3.0 ships | 24.22.1 on 24.x, 26.12.1 on 26.x, 25.x excluded (since `v2.2.4`; 24.22.1 and later before it, 24.21.0 before `v2.2.1`, 24.19.0 before `v2.2.0`) | Zero dependencies, runtime and dev |
+| `v2.x`           | 2026-08-07    | current major; 24 months after v3.0 ships | 26.13.1 (since `v2.3.0`; 24.22.1 on 24.x and 26.12.1 on 26.x before it, from `v2.2.4`; 24.22.1 and later before `v2.2.4`, 24.21.0 before `v2.2.1`, 24.19.0 before `v2.2.0`) | Zero dependencies, runtime and dev |
 
 > **`v1.x` is not receiving security patches.** `v1.0` shipped on 2026-07-23
 > stating that a 24-month window would open when its successor shipped. `v2.0`
@@ -38,16 +38,14 @@ Feature backports are not promised.
 
 The "Node minimum" column is the lowest Node version the library supports for
 that line. `v0.x` and `v1.x` shipped against a 24.18.0 floor; `v2.x` shipped
-against 24.19.0, moved to 24.21.0 in `v2.2.0`, and moved to 24.22.1 in
-`v2.2.1`. Either way it is a floor
+against 24.19.0, moved to 24.21.0 in `v2.2.0`, moved to 24.22.1 in
+`v2.2.1`, and moved to 26.13.1 in `v2.3.0`. Either way it is a floor
 rather than a ceiling: no polyfills, no compat shims, no version branches for
 older runtimes.
 
 The capabilities the library relies on all arrived at the Node 24 major level,
-not in any one patch (see [SPEC.md](SPEC.md) section 2). The patch level is a
-conservative security-currency floor, a maintained Node 24 patch rather than an
-earlier 24.x carrying since-fixed defects, so a consumer on any newer 24.x patch
-is fully supported.
+not in any one patch (see [SPEC.md](SPEC.md) section 2). A consumer on any
+release at or above the floor is fully supported.
 
 A new major adopts whatever Node major is the active LTS at release. Once on the
 LTS line, the Node minimum is frozen for that major's security-patch window, so
@@ -72,6 +70,11 @@ the supported Node version is exactly the version the source runs on.
 > are on Node 25 or on Node 26 before 26.12.1, the same install-time behavior
 > applies and upgrading Node is the only step. This move is also recorded under
 > "Exceptions taken".
+>
+> **`v2.3.0` moved the minimum to Node 26.13.1, inside the same window.** Node 24
+> and Node 25 are no longer supported. If you are on Node 24, Node 25, or Node 26
+> before 26.13.1, the same install-time behavior applies and upgrading Node is
+> the only step. This move is also recorded under "Exceptions taken".
 
 ## The v0.x line
 

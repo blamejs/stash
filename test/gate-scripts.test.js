@@ -28,7 +28,7 @@
 //     does; the rest -- the module shape, the imports refused, the world
 //     injected -- needs no child and always runs.
 
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -138,15 +138,32 @@ test("lockfile-sync: a dependency appearing in the lockfile is still caught", ()
 // check-node-pins: every pinned Node runtime satisfies engines.node
 // ---------------------------------------------------------------------------
 
-const ENGINES = ">=24.22.1 <25 || >=26.12.1";
+const ENGINES = ">=26.13.1";
+const PER_LINE = ">=24.22.1 <25 || >=26.12.1";
 
-test("node-pins: the per-line range admits patched releases and refuses the rest", () => {
-  for (const v of ["24.22.1", "v24.23.0", "26.12.1", "26.13.0", "27.0.0"]) {
+test("node-pins: the fixtures use the range package.json and the wiki declare", () => {
+  const read = (rel) => JSON.parse(readFileSync(new URL(rel, import.meta.url), "utf8"));
+  assert.equal(read("../package.json").engines.node, ENGINES);
+  assert.equal(read("../examples/wiki/package.json").engines.node, ENGINES);
+  assert.equal(read("../package-lock.json").packages[""].engines.node, ENGINES);
+});
+
+test("node-pins: the floor admits 26.13.1 and later and refuses the rest", () => {
+  for (const v of ["26.13.1", "v26.14.0", "27.0.0"]) {
     assert.equal(satisfies(v, ENGINES), true, v);
+  }
+  for (const v of ["24.22.1", "v24.23.0", "25.9.9", "26.12.1", "26.13.0"]) {
+    assert.equal(satisfies(v, ENGINES), false, v);
+  }
+});
+
+test("node-pins: a per-line range admits patched releases and refuses the rest", () => {
+  for (const v of ["24.22.1", "v24.23.0", "26.12.1", "26.13.0", "27.0.0"]) {
+    assert.equal(satisfies(v, PER_LINE), true, v);
   }
   // 26.5.0 satisfies a bare `>=24.22.1` floor while lacking the 26.12.1 fix.
   for (const v of ["24.22.0", "25.0.0", "25.9.9", "26.5.0", "26.12.0"]) {
-    assert.equal(satisfies(v, ENGINES), false, v);
+    assert.equal(satisfies(v, PER_LINE), false, v);
   }
   assert.equal(satisfies("26.5.0", ">=24.22.1"), true);
 });
@@ -161,37 +178,37 @@ test("node-pins: the pattern for every tracked file still finds its pin", () => 
   // A pattern that matches nothing makes the gate report "no pin found";
   // this pins each pattern to the line shape it is meant to read.
   const samples = {
-    ".node-version": "24.22.1\n",
-    ".nvmrc": "24.22.1\r\n",
-    ".github/workflows/ci.yml": '        node: ["24.22.1"]\n',
-    ".github/workflows/fuzz.yml": '          node-version: "24.22.1"\n',
-    ".github/workflows/npm-publish.yml": "          node-version: '24.22.1'\n",
+    ".node-version": "26.13.1\n",
+    ".nvmrc": "26.13.1\r\n",
+    ".github/workflows/ci.yml": '        node: ["26.13.1"]\n',
+    ".github/workflows/fuzz.yml": '          node-version: "26.13.1"\n',
+    ".github/workflows/npm-publish.yml": "          node-version: '26.13.1'\n",
     ".github/workflows/release-container.yml":
-      "    container: node:24.22.1-alpine@sha256:" + "0".repeat(64) + "\n",
-    "docker-compose.test.yml": "    image: node:24.22.1-alpine\n",
+      "    container: node:26.13.1-alpine@sha256:" + "0".repeat(64) + "\n",
+    "docker-compose.test.yml": "    image: node:26.13.1-alpine\n",
   };
   assert.deepEqual(Object.keys(samples).sort(), SOURCES.map((s) => s.file).sort());
   for (const { file, pattern } of SOURCES) {
-    assert.deepEqual(findPins(samples[file], pattern), ["24.22.1"], file);
+    assert.deepEqual(findPins(samples[file], pattern), ["26.13.1"], file);
   }
 });
 
 test("node-pins: a pin left behind a raised floor, a lost pin and a drifted wiki range fail", () => {
   const clean = { engines: ENGINES, wikiEngines: ENGINES };
-  assert.deepEqual(checkPins({ ...clean, sources: [{ file: "a", versions: ["24.22.1"] }] }), []);
+  assert.deepEqual(checkPins({ ...clean, sources: [{ file: "a", versions: ["26.13.1"] }] }), []);
 
-  const behind = checkPins({ ...clean, sources: [{ file: ".nvmrc", versions: ["24.21.0"] }] });
+  const behind = checkPins({ ...clean, sources: [{ file: ".nvmrc", versions: ["24.22.1"] }] });
   assert.equal(behind.length, 1);
-  assert.match(behind[0], /\.nvmrc: Node 24\.21\.0 does not satisfy/);
+  assert.match(behind[0], /\.nvmrc: Node 24\.22\.1 does not satisfy/);
 
-  const image = checkPins({ ...clean, sources: [{ file: "image", versions: ["v26.5.0"] }] });
+  const image = checkPins({ ...clean, sources: [{ file: "image", versions: ["v26.12.1"] }] });
   assert.equal(image.length, 1);
-  assert.match(image[0], /v26\.5\.0/);
+  assert.match(image[0], /v26\.12\.1/);
 
   const lost = checkPins({ ...clean, sources: [{ file: "ci.yml", versions: [] }] });
   assert.deepEqual(lost, ["ci.yml: no Node version pin found"]);
 
-  const drift = checkPins({ engines: ENGINES, wikiEngines: ">=24.22.1", sources: [] });
+  const drift = checkPins({ engines: ENGINES, wikiEngines: PER_LINE, sources: [] });
   assert.equal(drift.length, 1);
   assert.match(drift[0], /examples\/wiki\/package\.json engines\.node/);
 });

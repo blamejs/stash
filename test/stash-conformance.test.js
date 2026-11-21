@@ -833,6 +833,78 @@ for (const { name, create } of BACKENDS) {
       );
     });
 
+    // gate() -- a promise the test opens by hand, plus a flag set when code reaches it.
+    function gate() {
+      let open;
+      const g = { reached: false, opened: new Promise((r) => (open = r)) };
+      g.open = open;
+      return g;
+    }
+
+    test("a drop landing inside a pop's commit emits exactly one event", async () => {
+      const inner = create();
+      const atCommit = gate();
+      const backend = wrapBackend(inner, {
+        commit: async (id) => {
+          atCommit.reached = true;
+          await atCommit.opened;
+          return inner.commit(id);
+        },
+      });
+      const stash = new Stash({ backend });
+      const events = [];
+      stash.on("popped", (e) => events.push(["popped", e.id]));
+      stash.on("dropped", (e) => events.push(["dropped", e.id]));
+      const ref = await stash.push("raced");
+      const reading = drain(await stash.pop(ref));
+      await pollUntil(() => atCommit.reached);
+      assert.equal(await stash.drop(ref), true, "the drop destroyed the claimed entry");
+      atCommit.open();
+      await reading;
+      assert.deepEqual(events, [["dropped", ref]], "one destruction, one event");
+      await assert.rejects(stash.show(ref), RefNotFound);
+      assert.deepEqual(await inner.listClaims(), [], "the claim is resolved");
+    });
+
+    test("a drop whose remove resolves after the pop's commit still emits exactly one event", async () => {
+      const inner = create();
+      const atCommit = gate();
+      const commitDone = gate();
+      const afterRemove = gate();
+      const backend = wrapBackend(inner, {
+        commit: async (id) => {
+          atCommit.reached = true;
+          await atCommit.opened;
+          try {
+            await inner.commit(id);
+          } finally {
+            commitDone.reached = true; // a backend may reject a commit of a removed id
+          }
+        },
+        remove: async (id) => {
+          const had = await inner.remove(id);
+          afterRemove.reached = true;
+          await afterRemove.opened;
+          return had;
+        },
+      });
+      const stash = new Stash({ backend });
+      const events = [];
+      stash.on("popped", (e) => events.push(["popped", e.id]));
+      stash.on("dropped", (e) => events.push(["dropped", e.id]));
+      const ref = await stash.push("raced");
+      const reading = drain(await stash.pop(ref));
+      await pollUntil(() => atCommit.reached);
+      const dropping = stash.drop(ref);
+      await pollUntil(() => afterRemove.reached); // the entry is gone; remove has not returned
+      atCommit.open();
+      await pollUntil(() => commitDone.reached);
+      afterRemove.open();
+      await Promise.allSettled([reading, dropping]);
+      assert.equal(events.length, 1, `one destruction, one event: ${JSON.stringify(events)}`);
+      await assert.rejects(stash.show(ref), RefNotFound);
+    });
+
     test("an unbudgeted apply stays lock-free: it takes no claim", async () => {
       const inner = create();
       const seen = [];
@@ -903,6 +975,331 @@ for (const { name, create } of BACKENDS) {
         RefNotFound,
       );
     });
+
+    // A destruction landing inside a live claim (SPEC.md 4.3, 6). The claimed read takes
+    // the first chunk, the disruption runs while the claim is held, then the rest drains.
+    // The reader keeps the bytes it was handed, and the store records exactly one
+    // lifecycle event and at most one grave for the entry.
+    const CLAIM_PAYLOAD = Buffer.alloc(16 * 65536, 9);
+    async function* claimChunks() {
+      for (let i = 0; i < 16; i += 1) yield CLAIM_PAYLOAD.subarray(i * 65536, (i + 1) * 65536);
+    }
+    async function drainAround(readable, disrupt) {
+      const it = readable[Symbol.asyncIterator]();
+      const chunks = [];
+      const first = await it.next();
+      if (!first.done) chunks.push(first.value);
+      await disrupt();
+      for (;;) {
+        const step = await it.next();
+        if (step.done) break;
+        chunks.push(step.value);
+      }
+      return Buffer.concat(chunks);
+    }
+    function recordLifecycle(stash) {
+      const events = [];
+      for (const ev of ["popped", "dropped", "expired"]) stash.on(ev, () => events.push(ev));
+      return events;
+    }
+    async function graveCauses(stash) {
+      return (await stash.tombstones()).map((g) => g.cause);
+    }
+    const CLAIMED_READS = [
+      { verb: "pop", reads: undefined, open: (s, r) => s.pop(r) },
+      { verb: "apply reads:1", reads: 1, open: (s, r) => s.apply(r) },
+      { verb: "apply reads:2", reads: 2, open: (s, r) => s.apply(r) },
+    ];
+
+    for (const policy of ["restore", "burn"]) {
+      for (const { verb, reads, open } of CLAIMED_READS) {
+        for (const destroyer of ["drop", "clear"]) {
+          test(`${destroyer} inside a live ${verb} claim (${policy}): the drain resolves and '${destroyer}' owns the record`, async () => {
+            const stash = new Stash({ backend: create(), onPopFailure: policy });
+            const ref = await stash.push(claimChunks(), reads === undefined ? {} : { reads });
+            const events = recordLifecycle(stash);
+            const got = await drainAround(await open(stash, ref), async () => {
+              if (destroyer === "drop") assert.equal(await stash.drop(ref), true);
+              else assert.equal(await stash.clear(), 1);
+            });
+            assert.ok(got.equals(CLAIM_PAYLOAD), "the reader receives every byte");
+            assert.deepEqual(events, ["dropped"], "exactly one lifecycle event");
+            assert.deepEqual(await graveCauses(stash), [destroyer]);
+            await pollUntil(async () => (await stash.stats()).claimed === 0);
+            assert.deepEqual(await stash.stats(), { entries: 0, bytes: 0, claimed: 0 });
+            assert.deepEqual((await stash.verify()).findings, []);
+            await assert.rejects(stash.show(ref), RefNotFound);
+          });
+        }
+      }
+    }
+
+    test("a drop inside a live pop claim whose read is abandoned (burn): one 'dropped', no 'popped'", async () => {
+      const stash = new Stash({ backend: create(), onPopFailure: "burn" });
+      const ref = await stash.push(claimChunks());
+      const events = recordLifecycle(stash);
+      const held = await stash.pop(ref);
+      await new Promise((resolve) => held.once("readable", resolve));
+      assert.equal(await stash.drop(ref), true);
+      const closed = once(held, "close");
+      held.destroy();
+      await closed;
+      await pollUntil(async () => (await stash.stats()).claimed === 0);
+      assert.deepEqual(events, ["dropped"]);
+      assert.deepEqual(await graveCauses(stash), ["drop"]);
+    });
+
+    // A destroyer that fails inside a live claim destroys nothing, so the claim resolves
+    // through its own terminal step: one 'popped' and one grave. A destroyer whose grave
+    // write succeeded before its remove failed keeps that grave, first-write-wins.
+    const FAILED_DESTROYS = {
+      "writeTombstone throws": () => ({
+        writeTombstone: async () => {
+          throw new Error("grave write fault");
+        },
+      }),
+      "remove throws": () => ({
+        remove: async () => {
+          throw new Error("remove fault");
+        },
+      }),
+      "remove returns false": () => ({ remove: async () => false }),
+    };
+    for (const destroyer of ["drop", "clear"]) {
+      for (const [fault, overrides] of Object.entries(FAILED_DESTROYS)) {
+        test(`a ${destroyer} whose ${fault} inside a live pop claim leaves the pop to emit and write its grave`, async () => {
+          const inner = create();
+          let faulty = false;
+          const faults = overrides();
+          const backend = wrapBackend(inner);
+          for (const [m, fn] of Object.entries(faults))
+            backend[m] = (...a) => (faulty ? fn(...a) : inner[m](...a));
+          const stash = new Stash({ backend });
+          const ref = await stash.push(claimChunks());
+          const events = recordLifecycle(stash);
+          const got = await drainAround(await stash.pop(ref), async () => {
+            faulty = true;
+            try {
+              if (destroyer === "drop") await stash.drop(ref);
+              else await stash.clear();
+            } catch {
+              // the injected fault surfaces to the destroyer's caller
+            }
+            faulty = false;
+          });
+          assert.ok(got.equals(CLAIM_PAYLOAD));
+          await pollUntil(async () => (await stash.stats()).claimed === 0);
+          assert.deepEqual(events, ["popped"]);
+          assert.deepEqual(
+            await graveCauses(stash),
+            fault === "writeTombstone throws" ? ["pop"] : [destroyer],
+          );
+          assert.deepEqual(await stash.stats(), { entries: 0, bytes: 0, claimed: 0 });
+        });
+      }
+    }
+
+    // A claim's terminal commit landing between a destroyer's stat and its remove: the
+    // remove finds nothing, and the claim's destruction still records exactly one event.
+    for (const destroyer of ["drop", "clear"]) {
+      for (const outcome of ["drained", "abandoned (burn)"]) {
+        test(`a pop claim ${outcome} while a ${destroyer} waits on its remove: exactly one event`, async () => {
+          const inner = create();
+          let removeCalled = false;
+          let commitDone;
+          const committed = new Promise((r) => (commitDone = r));
+          const backend = wrapBackend(inner, {
+            remove: async (id) => {
+              removeCalled = true;
+              await committed;
+              return inner.remove(id);
+            },
+            commit: async (id) => {
+              try {
+                return await inner.commit(id);
+              } finally {
+                commitDone();
+              }
+            },
+          });
+          const stash = new Stash({ backend, onPopFailure: "burn" });
+          const ref = await stash.push(claimChunks());
+          const events = recordLifecycle(stash);
+          const held = await stash.pop(ref);
+          let destroyed;
+          const run = () =>
+            (destroyed = destroyer === "drop" ? stash.drop(ref) : stash.clear());
+          if (outcome === "drained") {
+            await drainAround(held, async () => {
+              run();
+              await pollUntil(() => removeCalled);
+            });
+          } else {
+            await new Promise((resolve) => held.once("readable", resolve));
+            run();
+            await pollUntil(() => removeCalled);
+            held.destroy();
+          }
+          assert.equal(await destroyed, destroyer === "drop" ? false : 0);
+          await pollUntil(async () => (await stash.stats()).claimed === 0);
+          assert.deepEqual(events, ["popped"]);
+          assert.equal((await graveCauses(stash)).length, 1);
+          assert.deepEqual(await stash.stats(), { entries: 0, bytes: 0, claimed: 0 });
+        });
+      }
+    }
+
+    test("an abandoned claim under 'restore' whose entry a drop destroyed commits without restoring", async () => {
+      const inner = create();
+      let restores = 0;
+      const backend = wrapBackend(inner, {
+        restore: (id) => {
+          restores += 1;
+          return inner.restore(id);
+        },
+      });
+      const stash = new Stash({ backend });
+      const ref = await stash.push(claimChunks());
+      const events = recordLifecycle(stash);
+      const held = await stash.pop(ref);
+      await new Promise((resolve) => held.once("readable", resolve));
+      assert.equal(await stash.drop(ref), true);
+      const closed = once(held, "close");
+      held.destroy();
+      await closed;
+      await pollUntil(async () => (await stash.stats()).claimed === 0);
+      assert.equal(restores, 0, "a doomed claim is committed, never restored");
+      assert.deepEqual(events, ["dropped"]);
+      assert.deepEqual(await stash.stats(), { entries: 0, bytes: 0, claimed: 0 });
+    });
+
+    // A drop's remove destroys the claimed entry, and its result settles only after the
+    // claim's own destruction has committed. The destroyer emits, and the claim issues no
+    // further commit once one of its commits has succeeded.
+    for (const outcome of ["drained", "abandoned (burn)"]) {
+      test(`a pop claim ${outcome} while a drop's remove result is pending: one event, no commit after a successful commit`, async () => {
+        const inner = create();
+        let removed = false;
+        let releaseRemove;
+        const removeGate = new Promise((r) => (releaseRemove = r));
+        let commitSucceeded = false;
+        let commitsAfterSuccess = 0;
+        let commitCalls = 0;
+        const backend = wrapBackend(inner, {
+          remove: async (id) => {
+            const result = await inner.remove(id);
+            removed = true;
+            await removeGate;
+            return result;
+          },
+          commit: async (id) => {
+            commitCalls += 1;
+            if (commitSucceeded) commitsAfterSuccess += 1;
+            await inner.commit(id);
+            commitSucceeded = true;
+          },
+        });
+        const stash = new Stash({ backend, onPopFailure: "burn" });
+        const ref = await stash.push(claimChunks());
+        const events = recordLifecycle(stash);
+        const held = await stash.pop(ref);
+        let dropped;
+        let drained = Promise.resolve();
+        if (outcome === "drained") {
+          // The drain ends only after the claim resolves, which waits on the gated remove,
+          // so the drain runs concurrently with the release below.
+          drained = drainAround(held, async () => {
+            dropped = stash.drop(ref);
+            await pollUntil(() => removed);
+          });
+        } else {
+          await new Promise((resolve) => held.once("readable", resolve));
+          dropped = stash.drop(ref);
+          await pollUntil(() => removed);
+          held.destroy();
+        }
+        await pollUntil(() => commitCalls >= 1);
+        releaseRemove();
+        assert.equal(await dropped, true);
+        await drained;
+        await pollUntil(async () => (await stash.stats()).claimed === 0);
+        assert.equal(commitsAfterSuccess, 0, "no commit follows a successful commit");
+        assert.deepEqual(events, ["dropped"]);
+        assert.equal((await graveCauses(stash)).length, 1);
+        assert.deepEqual(await stash.stats(), { entries: 0, bytes: 0, claimed: 0 });
+      });
+    }
+
+    // Moves Date.now two hours ahead for the rest of the test. Called once the claim is held,
+    // so an entry pushed with a one-hour ttl expires during the live read on any runner.
+    const passTtl = (t) => {
+      const realNow = Date.now;
+      t.mock.method(Date, "now", () => realNow.call(Date) + 2 * 3600000);
+    };
+
+    test("an expired entry under a live claim whose restore faults is reaped once recovery restores the orphan", async (t) => {
+      const inner = create();
+      let faultRestore = false;
+      const backend = wrapBackend(inner, {
+        restore: async (id) => {
+          if (faultRestore) {
+            faultRestore = false;
+            throw new Error("restore fault");
+          }
+          return inner.restore(id);
+        },
+      });
+      const stash = new Stash({ backend, claimTimeout: 50 });
+      const ref = await stash.push(claimChunks(), { ttl: "1h" });
+      const { expiresAt } = await stash.show(ref);
+      const events = recordLifecycle(stash);
+      const held = await stash.pop(ref);
+      await new Promise((resolve) => held.once("readable", resolve));
+      passTtl(t);
+      assert.ok(Date.now() > expiresAt);
+      assert.equal(await stash.prune(), 0, "a claimed expired entry is left to its claim");
+      faultRestore = true;
+      const closed = once(held, "close");
+      held.destroy();
+      await closed;
+      await pollUntil(async () => (await stash.prune()) === 1 || events.length > 0);
+      assert.deepEqual(events, ["expired"]);
+      assert.deepEqual(await graveCauses(stash), []);
+      assert.deepEqual(await stash.stats(), { entries: 0, bytes: 0, claimed: 0 });
+    });
+
+    // A ttl lapsing mid-drain: expiry leaves a live-claimed entry for the claim to resolve.
+    const EXPIRY_TOUCHES = {
+      has: async (stash, ref) => assert.equal(await stash.has(ref), false),
+      show: async (stash, ref) => assert.rejects(stash.show(ref), RefNotFound),
+      prune: async (stash) => assert.equal(await stash.prune(), 0, "a claimed entry is not reaped"),
+    };
+    const EXPECT_AFTER_EXPIRY = {
+      pop: { events: ["popped"], graves: ["pop"] },
+      "apply reads:1": { events: ["dropped"], graves: ["spent"] },
+      "apply reads:2": { events: ["expired"], graves: [] },
+    };
+    for (const { verb, reads, open } of CLAIMED_READS) {
+      for (const [touch, run] of Object.entries(EXPIRY_TOUCHES)) {
+        test(`a ${verb} claim whose ttl lapses mid-drain, then ${touch}(): the drain resolves with one event`, async (t) => {
+          const stash = new Stash({ backend: create() });
+          const ref = await stash.push(claimChunks(), { ttl: "1h", ...(reads === undefined ? {} : { reads }) });
+          const { expiresAt } = await stash.show(ref);
+          const events = recordLifecycle(stash);
+          const got = await drainAround(await open(stash, ref), async () => {
+            passTtl(t);
+            assert.ok(Date.now() > expiresAt);
+            await run(stash, ref);
+          });
+          assert.ok(got.equals(CLAIM_PAYLOAD), "the reader receives every byte");
+          await pollUntil(async () => (await stash.stats()).claimed === 0);
+          await stash.prune(); // reap a restored, expired entry
+          assert.deepEqual(events, EXPECT_AFTER_EXPIRY[verb].events);
+          assert.deepEqual(await graveCauses(stash), EXPECT_AFTER_EXPIRY[verb].graves);
+          assert.deepEqual(await stash.stats(), { entries: 0, bytes: 0, claimed: 0 });
+        });
+      }
+    }
 
     // ---- M6: audit surface (has / stats / verify) + the event set (SPEC.md 4, 4.3) ----
     test("has: true for a live entry, false for an unknown ref, InvalidRef for a hostile one", async () => {

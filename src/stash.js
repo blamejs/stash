@@ -407,11 +407,13 @@ export class Stash extends EventEmitter {
     const key = this.#backend.identity !== undefined ? this.#backend.identity : this.#backend;
     let shared = CLAIM_GUARDS.get(key);
     if (shared === undefined) {
-      shared = { guard: new Map(), holders: 0 };
+      shared = { guard: new Map(), doomed: new Set(), removals: new Map(), holders: 0 };
       CLAIM_GUARDS.set(key, shared);
     }
     shared.holders += 1;
     this.#liveClaims = shared.guard;
+    this.#doomed = shared.doomed;
+    this.#removals = shared.removals;
     // GUARD_REAP holds `key`, so the reaper needs no field on this instance.
     GUARD_REAP.register(this, key);
   }
@@ -421,7 +423,48 @@ export class Stash extends EventEmitter {
   #unguardClaim(ref) {
     const n = (this.#liveClaims.get(ref) ?? 0) - 1;
     if (n > 0) this.#liveClaims.set(ref, n);
-    else this.#liveClaims.delete(ref);
+    else {
+      this.#liveClaims.delete(ref);
+      this.#doomed.delete(ref);
+    }
+  }
+  // The live-claimed ids a drop or clear destroyed mid-claim, SHARED like #liveClaims. That
+  // destroyer writes the grave and emits the one event; the claim's terminal step then only
+  // finishes the physical cleanup (#unlessDoomed). Cleared when the last holder releases.
+  // Like #liveClaims, it is in-process state: a drop in one process does not see a claim
+  // held by a Stash in another process over the same disk root, and that claim resolves on
+  // its own terms, so both processes can emit for the entry.
+  #doomed;
+  // A drop / clear's remove of `ref`. A true result is the single destruction witness: the
+  // id is marked doomed as soon as that result settles, before the destroyer emits, when a
+  // Stash in this process holds a live claim on it. A failed or false-returning remove marks
+  // nothing, so the claim resolves on its own terms.
+  // While the remove runs, `#removals` holds a promise that settles once its result has
+  // been recorded, so a claim's terminal step can wait for every in-flight remove of the id.
+  async #removeWitnessed(ref) {
+    const removal = this.#backend.remove(ref);
+    const witnessed = removal.then(
+      (removed) => {
+        if (removed && this.#liveClaims.has(ref)) this.#doomed.add(ref);
+      },
+      () => {},
+    );
+    const prior = this.#removals.get(ref);
+    const tracked = prior === undefined ? witnessed : Promise.all([prior, witnessed]);
+    this.#removals.set(ref, tracked);
+    await tracked;
+    if (this.#removals.get(ref) === tracked) this.#removals.delete(ref);
+    return removal;
+  }
+  // The removal shared state, keyed alongside #doomed.
+  #removals;
+  // True when a drop / clear's remove destroyed `ref` while it was claimed. It first waits
+  // for every remove of `ref` already in flight. A remove that starts after the caller's
+  // commit or restore returned finds the entry gone and reports false.
+  async #destroyedElsewhere(ref) {
+    const pending = this.#removals.get(ref);
+    if (pending !== undefined) await pending;
+    return this.#doomed.has(ref);
   }
   // Force the next public verb to re-run #recover, after a claim resolution FAULTS
   // (restore / commit / burn threw): the on-disk claim may still stand as an orphan with
@@ -560,6 +603,11 @@ export class Stash extends EventEmitter {
   async #statLive(ref) {
     const entry = await this.#backend.stat(ref);
     if (isExpired(entry, Date.now())) {
+      // A live claim holds it: hidden from every surface, but left for the claim's own
+      // resolution, which restores, spends, or destroys it under one event (SPEC.md 6).
+      // Only claims held in this process are seen here; an entry claimed by another
+      // process over the same disk root goes through the remove below like any other.
+      if (this.#liveClaims.has(ref)) throw new RefNotFound();
       // The remove returning true is the single 'I destroyed it' witness, so a lazy reap
       // racing the sweeper emits 'expired' exactly once (SPEC.md 4.3).
       if (await this.#backend.remove(ref)) this.#emit("expired", entry);
@@ -723,7 +771,7 @@ export class Stash extends EventEmitter {
       // (the `resolved` latch), so exactly one branch runs and drops the id.
       onCommit: async () => {
         try {
-          await onCommit(entry);
+          await this.#unlessDoomed(ref, () => onCommit(entry));
         } catch (err) {
           this.#scheduleRecover();
           throw err;
@@ -738,9 +786,11 @@ export class Stash extends EventEmitter {
       // 'restore' returns the entry, which survives, so it writes no grave and emits nothing.
       onFail: async () => {
         try {
-          await (this.#onPopFailure === "burn"
-            ? this.#destroy(ref, entry, destruction.cause, destruction.event)
-            : this.#backend.restore(ref));
+          await this.#unlessDoomed(ref, () =>
+            this.#onPopFailure === "burn"
+              ? this.#destroy(ref, entry, destruction.cause, destruction.event)
+              : this.#backend.restore(ref),
+          );
         } catch (err) {
           this.#scheduleRecover();
           throw err;
@@ -753,13 +803,45 @@ export class Stash extends EventEmitter {
   }
 
   // The shared terminal destruction of a claimed read (pop, a budget-exhausting apply, or
-  // either one burned): write the grave FIRST (SPEC.md 4.4), then commit the deletion, then
-  // emit. A crash between grave and commit leaves a tombstoned-but-present entry, which
-  // store() already refuses; the reverse order would resurrect (CWE-459).
+  // either one burned): write the grave FIRST (SPEC.md 4.4), then commit the deletion. A
+  // crash between grave and commit leaves a tombstoned-but-present entry, which store()
+  // already refuses; the reverse order would resurrect (CWE-459). It resolves to the
+  // emission, which #unlessDoomed runs only when no drop / clear's remove destroyed the
+  // entry first.
   async #destroy(ref, entry, cause, event) {
     await this.#backend.writeTombstone(ref, makeTombstone(ref, cause));
     await this.#backend.commit(ref);
-    this.#emit(event, entry);
+    return () => this.#emit(event, entry);
+  }
+
+  // Resolve a claim through `settle`, unless a drop / clear's remove destroyed the claimed
+  // entry mid-claim. That remove's true result is the destruction witness: its destroyer
+  // wrote the grave and emits, so the claim then resolves without a second event, grave,
+  // debit, or restore, and only commits away what the backend still holds for it (a
+  // RefNotFound there means nothing is left). A settle that loses the race to that remove
+  // fails with RefNotFound and takes the same path, and so does a settle that succeeds
+  // while that remove is still in flight. A settle that ran #destroy resolves to its
+  // emission: this method runs it when no remove won, and issues no further commit when
+  // one did, since #destroy's own commit already succeeded.
+  async #unlessDoomed(ref, settle) {
+    if (!this.#doomed.has(ref)) {
+      let emit;
+      try {
+        emit = await settle();
+      } catch (err) {
+        if (!(err instanceof RefNotFound) || !(await this.#destroyedElsewhere(ref))) throw err;
+      }
+      if (!(await this.#destroyedElsewhere(ref))) {
+        if (typeof emit === "function") emit();
+        return;
+      }
+      if (typeof emit === "function") return;
+    }
+    try {
+      await this.#backend.commit(ref);
+    } catch (err) {
+      if (!(err instanceof RefNotFound)) throw err;
+    }
   }
 
   // The stash-wide capacity gate, and the ONE place maxEntries / maxTotal are enforced. Both
@@ -920,11 +1002,10 @@ export class Stash extends EventEmitter {
         ref,
         async (claimed) => {
           if (claimed.readsLeft === 1) {
-            await this.#destroy(ref, claimed, "spent", "dropped"); // the last credit: grave + commit + 'dropped'
-          } else {
-            await this.#backend.consumeRead(ref); // persist the debit BEFORE restoring
-            await this.#backend.restore(ref); // a non-terminal read destroys nothing -- no grave, no event
+            return this.#destroy(ref, claimed, "spent", "dropped"); // the last credit: grave + commit, then 'dropped'
           }
+          await this.#backend.consumeRead(ref); // persist the debit BEFORE restoring
+          await this.#backend.restore(ref); // a non-terminal read destroys nothing -- no grave, no event
         },
         { cause: "spent", event: "dropped" },
       ); // a burned budgeted read destroys the entry -> 'dropped'
@@ -1436,7 +1517,7 @@ export class Stash extends EventEmitter {
       // destroyed, so it leaves a grave; there is no whole Entry to carry, so no event fires.
       if (err instanceof IntegrityError) {
         await this.#backend.writeTombstone(ref, makeTombstone(ref, "drop"));
-        return this.#backend.remove(ref);
+        return this.#removeWitnessed(ref);
       }
       throw err;
     }
@@ -1445,7 +1526,7 @@ export class Stash extends EventEmitter {
     // entry's terms travel with it, so expiry writes none. A grave already standing (a
     // concurrent pop won the race) is kept first-write-wins, so its cause is not clobbered.
     if (!expired) await this.#backend.writeTombstone(ref, makeTombstone(ref, "drop"));
-    if (!(await this.#backend.remove(ref))) return false; // vanished between stat and remove
+    if (!(await this.#removeWitnessed(ref))) return false; // vanished between stat and remove
     this.#emit(expired ? "expired" : "dropped", entry);
     return !expired;
   }
@@ -1484,7 +1565,7 @@ export class Stash extends EventEmitter {
       // expired entry writes none. clear removes no existing tombstone: destruction is
       // monotone across replicas.
       if (!expired) await this.#backend.writeTombstone(entry.id, makeTombstone(entry.id, "clear"));
-      if (await this.#backend.remove(entry.id)) {
+      if (await this.#removeWitnessed(entry.id)) {
         reaped.push([expired ? "expired" : "dropped", entry]);
         if (!expired) destroyed += 1;
       }
@@ -1523,10 +1604,17 @@ export class Stash extends EventEmitter {
     // Reap every expired entry FIRST, emit only after: a throwing 'expired' listener must
     // not abort the reap and strand the rest, which on the sweep timer would linger until a
     // lazy read finds them. An entry a concurrent drop removed first fails the
-    // remove-witness and is never double-counted (SPEC.md 4.3).
+    // remove-witness and is never double-counted (SPEC.md 4.3). An expired entry a live claim
+    // holds is left for that claim to resolve, the same rule #statLive follows. That check
+    // sees only claims held in this process, not a claim another process holds.
     const reaped = [];
     for (const entry of entries) {
-      if (isExpired(entry, now) && (await this.#backend.remove(entry.id))) reaped.push(entry);
+      if (
+        isExpired(entry, now) &&
+        !this.#liveClaims.has(entry.id) &&
+        (await this.#backend.remove(entry.id))
+      )
+        reaped.push(entry);
     }
     for (const entry of reaped) this.#emit("expired", entry);
     // Prune stale graves (SPEC.md 4.4) on THIS sweep, so a single sweep owns both entry

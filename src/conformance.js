@@ -36,6 +36,8 @@ import { Readable } from "node:stream";
 
 import { Stash } from "./stash.js";
 import { RefClaimed, RefNotFound, SizeExceeded, StashFull } from "./errors.js";
+import { algoOf, digestHash, finalize } from "./digest.js";
+import { makeTombstone } from "./entry.js";
 
 // Collect a Readable to one Buffer. Only the small fixtures here are ever buffered.
 async function drain(readable) {
@@ -79,7 +81,11 @@ async function retryOnClaimed(fn) {
  * defaulting to the built-in when omitted. Every case drives the shipped
  * `Stash` consumer path against a `Stash` wrapping the factory's backend, so
  * passing the suite is proof the backend is interchangeable with the ones
- * that ship. No test runner is imported here; the caller owns that choice.
+ * that ship. The cases cover round-trip fidelity for every source type and
+ * for a payload over 4 MiB, identity, expiry, limits, `stats()` byte
+ * accounting under `maxTotal`, claim atomicity, read budgets, the
+ * `verify()` and `reconcilable()` reports, tombstone first-write-wins, and
+ * grave pruning past `tombstoneTtl`. No test runner is imported here; the caller owns that choice.
  *
  * @example
  *   import { test } from "node:test";
@@ -454,5 +460,123 @@ export function runBackendConformance(factory, options) {
       "a tombstoned id is refused, writing nothing",
     );
     await assert.rejects(stash.apply(ref), (e) => e instanceof RefNotFound && e.code === "ENOREF");
+  });
+
+  // ---- Large payloads: no per-value cap below the stream ----
+
+  test("a 4 MiB + 1 byte payload streams in and out byte-exact", async () => {
+    const stash = new Stash({ backend: create() });
+    const total = 4 * 1048576 + 1;
+    const chunk = 65536;
+    // Each chunk carries its own offset pattern, so a backend that drops or repeats a
+    // chunk changes the bytes and the length together. The source is never buffered whole.
+    async function* source() {
+      for (let at = 0; at < total; at += chunk) {
+        const piece = Buffer.alloc(Math.min(chunk, total - at));
+        for (let i = 0; i < piece.length; i++) piece[i] = (at + i) % 251;
+        yield piece;
+      }
+    }
+    const ref = await stash.push(source());
+    const entry = await stash.show(ref);
+    assert.equal(entry.size, total);
+    const algo = algoOf(entry.digest);
+    assert.ok(algo !== null, "the stored digest names a known algorithm");
+    const hash = digestHash(algo);
+    let length = 0;
+    let mismatch = -1;
+    for await (const piece of await stash.apply(ref)) {
+      for (let i = 0; i < piece.length && mismatch === -1; i++) {
+        if (piece[i] !== (length + i) % 251) mismatch = length + i;
+      }
+      hash.update(piece);
+      length += piece.length;
+    }
+    // The length and content checks are both needed: a backend that truncates and
+    // re-hashes what it kept produces a digest consistent with the truncated bytes.
+    assert.equal(length, total, "every pushed byte comes back");
+    assert.equal(mismatch, -1, "every byte comes back in its pushed position");
+    assert.equal(finalize(hash, algo), entry.digest);
+  });
+
+  // ---- Accounting: stats() feeds the maxTotal bound ----
+
+  test("stats() counts every stored byte, and maxTotal binds on that count", async () => {
+    const plain = new Stash({ backend: create() });
+    await plain.push(Buffer.alloc(100000, 1));
+    const stats = await plain.stats();
+    assert.equal(stats.entries, 1);
+    assert.ok(stats.bytes >= 100000, "stats().bytes includes the blob");
+
+    const bounded = new Stash({ backend: create(), maxTotal: 250000 });
+    await bounded.push(Buffer.alloc(100000, 2));
+    await bounded.push(Buffer.alloc(100000, 3));
+    await assert.rejects(
+      bounded.push(Buffer.alloc(100000, 4)),
+      (e) => e instanceof StashFull && e.code === "EFULL",
+    );
+  });
+
+  // ---- Audit and reconciliation listings ----
+
+  test("verify() scans every live entry and reports a clean store as clean", async () => {
+    const stash = new Stash({ backend: create() });
+    const refs = [await stash.push("one"), await stash.push("two"), await stash.push("three")];
+    const report = await stash.verify();
+    assert.ok(report.scanned >= 3, "verify scanned each of the three entries");
+    assert.deepEqual(report.findings, []);
+    assert.deepEqual(report.repaired, []);
+    for (const ref of refs) assert.equal(await stash.drop(ref), true);
+    const after = await stash.verify();
+    assert.deepEqual(after.findings, []);
+    assert.ok(after.scanned < report.scanned, "dropped entries are no longer scanned");
+  });
+
+  test("reconcilable() lists every live entry and no dropped one", async () => {
+    const stash = new Stash({ backend: create() });
+    const keep = await stash.push("keep");
+    const gone = await stash.push("gone");
+    const before = await stash.reconcilable();
+    assert.deepEqual(before.entries.map((e) => e.id).sort(), [keep, gone].sort());
+    assert.deepEqual(before.corrupt, []);
+    assert.equal(await stash.drop(gone), true);
+    const after = await stash.reconcilable();
+    assert.deepEqual(
+      after.entries.map((e) => e.id),
+      [keep],
+    );
+    assert.deepEqual(after.corrupt, []);
+  });
+
+  // ---- Grave pruning: tombstoneTtl reaps a grave through removeTombstone ----
+
+  test("prune() past tombstoneTtl removes the grave, so store() accepts the id again", async () => {
+    const source = new Stash({ backend: create() });
+    const bytes = Buffer.from("buried, then forgotten");
+    const ref = await source.push(bytes);
+    const entry = await source.show(ref);
+    // A grave stamped at the epoch is already older than any tombstoneTtl.
+    const backend = create();
+    const grave = makeTombstone(ref, "drop");
+    grave.destroyedAt = 0;
+    await backend.writeTombstone(ref, grave);
+    const stash = new Stash({ backend, tombstoneTtl: "1h" });
+    assert.equal((await stash.tombstones()).length, 1);
+    assert.equal(await stash.store(entry, bytes), false, "the standing grave refuses the id");
+    await stash.prune();
+    assert.deepEqual(await stash.tombstones(), []);
+    assert.equal(await stash.store(entry, bytes), true, "the pruned grave no longer refuses the id");
+    assert.deepEqual(await drain(await stash.apply(ref)), bytes);
+  });
+
+  // ---- Destruction witness: one destroyer per entry ----
+
+  test("remove() after commit() reports false: a committed entry has no second destroyer", async () => {
+    const backend = create();
+    const ref = await new Stash({ backend }).push("destroyed once");
+    const { source } = await backend.claim(ref);
+    await drain(source);
+    await backend.commit(ref);
+    assert.equal(await backend.remove(ref), false, "the committed entry is already gone");
   });
 }

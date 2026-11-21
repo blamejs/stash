@@ -2476,6 +2476,63 @@ suite("disk: verify -- the physical-integrity audit (SPEC.md 4, 12)", () => {
     );
   });
 
+  // A push or sidecar write that dies with the process leaves its `.tmp` on the partition,
+  // past the unlink-on-reject cleanup. Those bytes occupy the store until verify reaps them.
+  for (const [dir, name] of [
+    ["blobs", "x.tmp"],
+    ["meta", "x.json.tmp"],
+    ["claims", "x.tmp"],
+  ]) {
+    test(`stats counts a crashed write's ${dir}/*.tmp bytes in the footprint`, async () => {
+      const { root, stash } = freshStash();
+      await stash.push("keep");
+      const before = await stash.stats();
+      writeFileSync(join(root, dir, name), Buffer.alloc(4096));
+      const after = await stash.stats();
+      assert.equal(after.bytes, before.bytes + 4096, `the ${dir}/ tmp's bytes are counted`);
+      assert.equal(after.entries, before.entries, "a tmp is never an entry");
+      assert.equal(after.claimed, before.claimed, "a tmp is never a claim");
+    });
+  }
+
+  test("stats leaves tombstones/*.tmp out of the footprint, as it does every grave", async () => {
+    const { root, stash } = freshStash();
+    await stash.push("keep");
+    const before = await stash.stats();
+    writeFileSync(join(root, "tombstones", `${generate()}.json.abcd1234.tmp`), Buffer.alloc(4096));
+    assert.deepEqual(await stash.stats(), before);
+  });
+
+  for (const aged of [false, true]) {
+    test(`maxTotal refuses a push once ${aged ? "aged" : "fresh"} crash tmps fill the ceiling`, async () => {
+      const root = freshRoot();
+      const backend = new DiskBackend({ root });
+      const seed = new Stash({ backend });
+      await seed.push("layout");
+      await seed.clear();
+      for (let i = 0; i < 3; i += 1) {
+        const p = join(root, "blobs", `x${i}.tmp`);
+        writeFileSync(p, Buffer.alloc(200 * 1024));
+        if (aged) {
+          const t = new Date(Date.now() - 2 * 60 * 60 * 1000);
+          utimesSync(p, t, t);
+        }
+      }
+      const stash = new Stash({ backend: new DiskBackend({ root }), maxTotal: 300 * 1024 });
+      await assert.rejects(stash.push(Buffer.alloc(32 * 1024)), (err) => err.code === "EFULL");
+    });
+  }
+
+  test("a push that exactly fits maxTotal is admitted", async () => {
+    const root = freshRoot();
+    const probe = new Stash({ backend: new DiskBackend({ root }) });
+    await probe.push(Buffer.alloc(1024));
+    const one = (await probe.stats()).bytes;
+    const stash = new Stash({ backend: new DiskBackend({ root }), maxTotal: one * 2 });
+    await stash.push(Buffer.alloc(1024));
+    assert.equal((await stash.stats()).bytes, one * 2);
+  });
+
   test("has over a corrupt sidecar throws IntegrityError, never answering false (CWE-703)", async () => {
     const { root, stash } = freshStash();
     const ref = await stash.push("v");
