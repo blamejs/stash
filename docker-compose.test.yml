@@ -7,9 +7,9 @@
 #
 # The `suite` service is a run-to-completion container that executes the
 # full smoke gate (static gates, the library suite, the sandboxed
-# permission-model run, and the wiki e2e) on node:24.22.1-alpine.
+# permission-model run, and the wiki e2e) on node:26.13.1-alpine.
 #
-# The tag is exact, not the rolling `node:24-alpine`. A rolling tag moves
+# The tag is exact, not the rolling `node:26-alpine`. A rolling tag moves
 # whenever the Node line does, so the oracle drifts away from the version
 # ci.yml pins, in either direction and without notice.
 #
@@ -22,7 +22,7 @@
 services:
 
   suite:
-    image: node:24.22.1-alpine
+    image: node:26.13.1-alpine
     container_name: stash-test-suite
     working_dir: /stash
     volumes:

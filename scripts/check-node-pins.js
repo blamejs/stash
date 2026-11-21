@@ -4,8 +4,8 @@
 // check-node-pins: every Node runtime pinned in the tree satisfies
 // package.json `engines.node`.
 //
-// `engines.node` names the Node releases the package supports, one range per
-// release line (`>=24.22.1 <25 || >=26.12.1`). The tree also pins Node in
+// `engines.node` names the Node releases the package supports (`>=26.13.1`,
+// or one range per release line when more than one is supported). The tree also pins Node in
 // places npm never reads: `.node-version`, `.nvmrc`, the workflow
 // `node-version` inputs, the test compose image, and the wiki container's
 // base image. Raising the floor in package.json leaves each of those where it

@@ -119,6 +119,91 @@ for (const { name, create } of BACKENDS) {
   );
 }
 
+// capAt(source, limit) -- an async-iterable that silently stops after `limit` bytes.
+async function* capAt(source, limit) {
+  let seen = 0;
+  for await (const chunk of source) {
+    const buf = Buffer.from(chunk);
+    if (seen >= limit) continue; // keep draining so the producer finishes
+    const room = limit - seen;
+    yield room >= buf.length ? buf : buf.subarray(0, room);
+    seen += Math.min(room, buf.length);
+  }
+}
+
+// Non-conforming backends whose damage passes every per-entry digest check, because
+// the backend computes the digest itself or the fault sits in a report it authors.
+// Each one must fail the case named beside it.
+const SILENT_FAULTS = [
+  {
+    fault: "truncates every value at 1 MiB",
+    caseTitle: "a 4 MiB + 1 byte payload",
+    wrap: (inner) =>
+      wrapBackend(inner, {
+        write: (id, source, entry) => inner.write(id, capAt(source, 1048576), entry),
+      }),
+  },
+  {
+    fault: "reports stats().bytes as 0",
+    caseTitle: "stats() counts every stored byte",
+    wrap: (inner) =>
+      wrapBackend(inner, {
+        stats: async () => ({ ...(await inner.stats()), bytes: 0 }),
+      }),
+  },
+  {
+    fault: "returns a hollow verify() report",
+    caseTitle: "verify() scans every live entry",
+    wrap: (inner) =>
+      wrapBackend(inner, {
+        verify: async () => ({ scanned: 0, findings: [], repaired: [] }),
+      }),
+  },
+  {
+    fault: "returns an empty listReconcilable()",
+    caseTitle: "reconcilable() lists every live entry",
+    wrap: (inner) =>
+      wrapBackend(inner, {
+        listReconcilable: async () => ({ entries: [], corrupt: [] }),
+      }),
+  },
+  {
+    fault: "reports removeTombstone() success without removing the grave",
+    caseTitle: "prune() past tombstoneTtl removes the grave",
+    wrap: (inner) => wrapBackend(inner, { removeTombstone: async () => true }),
+  },
+  {
+    fault: "reports remove() success for an id it already committed away",
+    caseTitle: "remove() after commit() reports false",
+    wrap: (inner) => {
+      const committed = new Set();
+      return wrapBackend(inner, {
+        commit: async (id) => {
+          await inner.commit(id);
+          committed.add(id);
+        },
+        remove: async (id) => (committed.has(id) ? true : inner.remove(id)),
+      });
+    },
+  },
+];
+
+for (const { name, create } of BACKENDS) {
+  for (const { fault, caseTitle, wrap } of SILENT_FAULTS) {
+    test("the harness CATCHES a " + name + " backend that " + fault, async () => {
+      const results = await runCollecting({
+        name: "faulty-" + name,
+        create: () => wrap(create()),
+      });
+      const failed = results.filter((r) => !r.ok).map((r) => r.name);
+      assert.ok(
+        failed.some((title) => title.includes(caseTitle)),
+        "the fault must fail the case '" + caseTitle + "'; failed: " + JSON.stringify(failed),
+      );
+    });
+  }
+}
+
 // The harness must call create AS A METHOD of the factory, preserving `this`: the
 // documented `{ name, create() }` shape lets an author write create() as an object
 // method that reads its own config through `this`. A bare extracted call would hand

@@ -541,7 +541,9 @@ export class DiskBackend {
   // The stash-wide limit pre-check reads this aggregate rather than parsing every sidecar.
   // `bytes` counts each blob PLUS its sidecar file PLUS any sidecar-less claim or orphan
   // blob still occupying the shelf, so no caller slips past `maxTotal` with tiny blobs and
-  // huge `meta`, nor by hoarding crashed removes' orphans. A foreign name in ANY layout
+  // huge `meta`, nor by hoarding crashed removes' orphans. A `.tmp` in meta/, blobs/ or
+  // claims/ (a write that died with its process) counts too, fresh or aged, until verify
+  // reaps it; tombstones/ tmps stay out, as graves do. A foreign name in ANY layout
   // dir is loud. The sidecar is stat'd BEFORE the entry is counted, so one that vanished
   // mid-scan is skipped rather than counted as an entry with zero bytes.
   async stats() {
@@ -552,7 +554,10 @@ export class DiskBackend {
     let bytes = 0;
     const counted = new Set();
     for (const name of await readdir(metaDir)) {
-      if (name.endsWith(".tmp")) continue;
+      if (name.endsWith(".tmp")) {
+        bytes += await this.#tmpBytes(metaDir, name);
+        continue;
+      }
       const id = _requireSidecarId(name);
       let sidecarSize;
       try {
@@ -577,7 +582,10 @@ export class DiskBackend {
     }
     let claimed = 0;
     for (const name of await readdir(claimsDir)) {
-      if (name.endsWith(".tmp")) continue;
+      if (name.endsWith(".tmp")) {
+        bytes += await this.#tmpBytes(claimsDir, name);
+        continue;
+      }
       if (!isValid(name)) throw new IntegrityError("store layout is damaged");
       claimed += 1;
       // A claim whose sidecar is gone has no meta/ entry to count it, but its blob still
@@ -594,7 +602,10 @@ export class DiskBackend {
     // crashed remove) still occupies the store, so count it, or repeated crashed removes
     // hoard orphans every bounded push sees as free space.
     for (const name of await readdir(blobDir)) {
-      if (name.endsWith(".tmp")) continue;
+      if (name.endsWith(".tmp")) {
+        bytes += await this.#tmpBytes(blobDir, name);
+        continue;
+      }
       if (!isValid(name)) throw new IntegrityError("store layout is damaged");
       if (counted.has(name)) continue; // already counted via its sidecar or its claim
       try {
@@ -611,6 +622,19 @@ export class DiskBackend {
       _requireSidecarId(name);
     }
     return { entries, bytes, claimed };
+  }
+
+  // The size of one `.tmp` for stats(). A tmp whose rename landed mid-walk counts 0 here;
+  // its bytes are then counted under the final name, or not at all if the walk passed it.
+  // A tmp stat'd before its rename and then reached again under the final name is counted
+  // twice; the total then reads high for that one call, which can refuse a bounded push.
+  async #tmpBytes(dir, name) {
+    try {
+      return (await lstat(join(dir, name))).size;
+    } catch (err) {
+      _absent(err);
+      return 0;
+    }
   }
 
   // Stream-hash a blob with the ENTRY's own algorithm, so bit rot on a sha3-512 entry is
